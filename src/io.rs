@@ -38,7 +38,7 @@ pub fn open_project_dialog(app: &mut EditorApp) {
             app.images = images;
             app.page_index = 0;
             app.next_id = next_id;
-            app.selected = None;
+            app.clear_selection();
             app.editing = None;
             app.crop_mode = false;
             app.interaction = crate::app::Interaction::None;
@@ -125,7 +125,7 @@ pub fn import_odt_dialog(app: &mut EditorApp) {
             app.images = images;
             app.page_index = 0;
             app.next_id = next_id;
-            app.selected = None;
+            app.clear_selection();
             app.editing = None;
             app.crop_mode = false;
             app.interaction = crate::app::Interaction::None;

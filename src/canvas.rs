@@ -12,12 +12,13 @@ use crate::store::ImageStore;
 
 /// Kopie der aktiven Interaktion, damit `&app` nicht während der Bearbeitung
 /// gebunden bleibt.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Active {
-    Drag(u64, Pos2, (f32, f32)),
+    Drag(Vec<(u64, f32, f32)>, Pos2),
     Resize(u64, Pos2, f32, f32),
     Rotate(u64),
     Crop(u64, CropEdge, crate::model::Crop),
+    SelectionBox(Pos2),
 }
 
 pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) {
@@ -36,14 +37,16 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
 
     let base = rect.min;
     let (pw_pt, ph_pt) = page_size_pt(app.doc.format, app.doc.orientation);
+    let page_align = app.settings.page_align;
+    let rect_w = rect.width();
 
     // --- Alignment-Offset berechnen (vor Zoom, da Zoom ihn berücksichtigt) ---
     let compute_align_x = |zoom_val: f32| {
         let page_w_screen = pw_pt * zoom_val;
-        match app.settings.page_align {
+        match page_align {
             PageAlign::Left => 24.0,
-            PageAlign::Center => ((rect.width() - page_w_screen) / 2.0).max(24.0),
-            PageAlign::Right => (rect.width() - page_w_screen - 24.0).max(24.0),
+            PageAlign::Center => ((rect_w - page_w_screen) / 2.0).max(24.0),
+            PageAlign::Right => (rect_w - page_w_screen - 24.0).max(24.0),
         }
     };
 
@@ -80,7 +83,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                 if app.page_index + 1 < app.doc.pages.len() {
                     app.page_index += 1;
                     app.view.pan.y = 24.0;
-                    app.selected = None;
+                    app.clear_selection();
                 }
             } else if scroll.y < 0.0 && page_top + scroll.y > 24.0 {
                 // Hochscrollen über Seitenanfang → vorige Seite
@@ -88,7 +91,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                     app.page_index -= 1;
                     let new_page_h = ph_pt * zoom;
                     app.view.pan.y = -new_page_h + 24.0;
-                    app.selected = None;
+                    app.clear_selection();
                 }
             } else {
                 app.view.pan += scroll;
@@ -124,14 +127,18 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
     painter.rect_filled(page_rect_screen, 2.0, Color32::WHITE);
 
     // --- Elemente zeichnen ---
-    let selected = app.selected;
+    let selection: Vec<u64> = app.selection.clone();
     let crop_mode = app.crop_mode;
     let page_idx = app.page_index;
     if let Some(page) = app.doc.pages.get_mut(page_idx) {
         for el in page.elements.iter_mut() {
             draw_element(el, &mut app.images, ctx, &painter, &to_screen, zoom);
-            if Some(el.id) == selected {
-                draw_selection(el, &painter, &to_screen, zoom, crop_mode);
+            if selection.contains(&el.id) {
+                if selection.len() == 1 {
+                    draw_selection(el, &painter, &to_screen, zoom, crop_mode);
+                } else {
+                    draw_multi_selection_box(el, &painter, &to_screen, zoom);
+                }
             }
         }
     }
@@ -180,8 +187,40 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
 
     // --- Interaktion beenden ---
     if primary_released {
-        match &app.interaction {
-            Interaction::DragBody { .. }
+        match app.interaction {
+            Interaction::SelectionBox { start } => {
+                // Auswahl-Rechteck abschließen: alle treffenden Objekte auswählen.
+                if let Some(cur) = pointer {
+                    let s = to_page(start);
+                    let e = to_page(cur);
+                    let (min_x, max_x) = (s.x.min(e.x), s.x.max(e.x));
+                    let (min_y, max_y) = (s.y.min(e.y), s.y.max(e.y));
+                    let shift = ui.input(|i| i.modifiers.shift);
+                    if !shift {
+                        app.clear_selection();
+                    }
+                    let hits: Vec<u64> = app.doc.pages[page_idx]
+                        .elements
+                        .iter()
+                        .filter(|el| {
+                            el.x < max_x
+                                && el.x + el.w > min_x
+                                && el.y < max_y
+                                && el.y + el.h > min_y
+                        })
+                        .map(|el| el.id)
+                        .collect();
+                    for id in hits {
+                        if !shift || !app.is_selected(id) {
+                            app.selection.push(id);
+                        } else if shift {
+                            // Shift: bereits ausgewählte bleiben ausgewählt
+                        }
+                    }
+                }
+                app.interaction = Interaction::None;
+            }
+            Interaction::DragBodies { .. }
             | Interaction::Resize { .. }
             | Interaction::Rotate { .. }
             | Interaction::Crop { .. } => app.interaction = Interaction::None,
@@ -189,25 +228,32 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
         }
     }
 
-    // --- Aktive Interaktion fortsetzen (Daten kopieren, dann app frei nutzen) ---
+    // --- Aktive Interaktion fortsetzen ---
     let active = match &app.interaction {
-        Interaction::DragBody { id, start_pointer, start_xy } => {
-            Some(Active::Drag(*id, *start_pointer, *start_xy))
+        Interaction::DragBodies { start_pointer, starts } => {
+            Some(Active::Drag(starts.clone(), *start_pointer))
         }
-        Interaction::Resize { id, anchor, rotation, start_aspect } => Some(Active::Resize(*id, *anchor, *rotation, *start_aspect)),
+        Interaction::Resize { id, anchor, rotation, start_aspect } => {
+            Some(Active::Resize(*id, *anchor, *rotation, *start_aspect))
+        }
         Interaction::Rotate { id } => Some(Active::Rotate(*id)),
-        Interaction::Crop { id, edge, start_crop } => Some(Active::Crop(*id, *edge, *start_crop)),
+        Interaction::Crop { id, edge, start_crop } => {
+            Some(Active::Crop(*id, *edge, *start_crop))
+        }
+        Interaction::SelectionBox { start } => Some(Active::SelectionBox(*start)),
         _ => None,
     };
     if let (Some(a), Some(pointer)) = (active, pointer) {
         match a {
-            Active::Drag(id, sp, xy) => {
+            Active::Drag(starts, sp) => {
                 let dp = to_page(pointer) - to_page(sp);
-                if let Some(el) = element_mut(app, page_idx, id) {
-                    el.x = xy.0 + dp.x;
-                    el.y = xy.1 + dp.y;
-                    app.touch();
+                for (id, sx, sy) in &starts {
+                    if let Some(el) = element_mut(app, page_idx, *id) {
+                        el.x = sx + dp.x;
+                        el.y = sy + dp.y;
+                    }
                 }
+                app.touch();
             }
             Active::Resize(id, anchor, rotation, start_aspect) => {
                 if let Some(el) = element_mut(app, page_idx, id) {
@@ -230,6 +276,20 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                     app.touch();
                 }
             }
+            Active::SelectionBox(start) => {
+                // Auswahl-Rechteck zeichnen.
+                let s = to_screen(start);
+                let e = pointer;
+                let r = Rect::from_two_pos(s, e);
+                painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(40, 120, 220, 30));
+                painter.add(egui::epaint::RectShape::new(
+                    r,
+                    0.0,
+                    egui::Color32::TRANSPARENT,
+                    Stroke::new(1.0, Color32::from_rgb(40, 120, 220)),
+                    egui::StrokeKind::Inside,
+                ));
+            }
         }
     }
 
@@ -250,7 +310,8 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
         && !click_on_ui
     {
         if let Some(pointer) = pointer {
-            start_interaction(app, page_idx, pointer, to_screen, to_page, zoom);
+            let shift = ui.input(|i| i.modifiers.shift);
+            start_interaction(app, page_idx, pointer, to_screen, to_page, zoom, shift);
         }
     }
 
@@ -274,7 +335,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                     .unwrap_or_default();
                 app.editing = Some((id, text));
                 app.edit_focus = true;
-                app.selected = Some(id);
+                app.select_only(id);
             } else {
                 // Leere Fläche → neues Textfeld an der Klickposition (in Seiten-Punkten).
                 let p = to_page(pointer);
@@ -291,7 +352,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
         if i.key_pressed(egui::Key::Escape) {
             app.crop_mode = false;
             app.editing = None;
-            app.selected = None;
+            app.clear_selection();
             app.interaction = Interaction::None;
         }
     });
@@ -360,6 +421,23 @@ fn draw_element(
             }
         }
     }
+}
+
+/// Einfacher Rahmen für jedes Element in einer Multi-Selection (ohne Griffe).
+fn draw_multi_selection_box(
+    el: &Element,
+    painter: &egui::Painter,
+    to_screen: &impl Fn(Pos2) -> Pos2,
+    zoom: f32,
+) {
+    let center = to_screen(Pos2::new(el.x + el.w / 2.0, el.y + el.h / 2.0));
+    let cl = local_corners(el.w * zoom, el.h * zoom);
+    let mut pts: Vec<Pos2> = cl
+        .iter()
+        .map(|lc| local_to_world(center, el.rotation, *lc))
+        .collect();
+    pts.push(pts[0]);
+    painter.add(Shape::line(pts, Stroke::new(1.5, Color32::from_rgb(40, 120, 220))));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -466,8 +544,9 @@ fn start_interaction(
     to_screen: impl Fn(Pos2) -> Pos2,
     to_page: impl Fn(Pos2) -> Vec2,
     zoom: f32,
+    shift: bool,
 ) {
-    let sel = app.selected;
+    let sel = app.primary();
     let crop_mode = app.crop_mode;
 
     // 1) Crop-Kanten
@@ -529,7 +608,7 @@ fn start_interaction(
         }
     }
 
-    // 4) Körper
+    // 4) Körper (oberstes getroffenes Objekt)
     let hit = app.doc.pages[page_idx]
         .elements
         .iter()
@@ -537,21 +616,46 @@ fn start_interaction(
         .find(|e| point_in_element(e, pointer, &to_screen, zoom))
         .map(|e| e.id);
 
+    let shift_held = shift;
+
     match hit {
         Some(id) => {
-            let xy = app.doc.pages[page_idx]
-                .elements
-                .iter()
-                .find(|e| e.id == id)
-                .map(|e| (e.x, e.y))
-                .unwrap();
-            app.selected = Some(id);
-            app.crop_mode = false;
-            app.interaction = Interaction::DragBody { id, start_pointer: pointer, start_xy: xy };
+            if app.is_selected(id) && app.selection.len() > 1 && !shift_held {
+                // Bereits ausgewählt in einer Multi-Selection → alle verschieben.
+                let starts: Vec<(u64, f32, f32)> = app.doc.pages[page_idx]
+                    .elements
+                    .iter()
+                    .filter(|e| app.is_selected(e.id))
+                    .map(|e| (e.id, e.x, e.y))
+                    .collect();
+                app.interaction = Interaction::DragBodies { start_pointer: pointer, starts };
+            } else if shift_held {
+                // Shift+Klick → Auswahl umschalten.
+                app.toggle_selected(id);
+                app.crop_mode = false;
+            } else {
+                // Einzelnes Objekt auswählen und verschieben.
+                let xy = app.doc.pages[page_idx]
+                    .elements
+                    .iter()
+                    .find(|e| e.id == id)
+                    .map(|e| (e.x, e.y))
+                    .unwrap();
+                app.select_only(id);
+                app.crop_mode = false;
+                app.interaction = Interaction::DragBodies {
+                    start_pointer: pointer,
+                    starts: vec![(id, xy.0, xy.1)],
+                };
+            }
         }
         None => {
-            app.selected = None;
+            // Leere Fläche → Auswahl-Rechteck starten.
+            if !shift_held {
+                app.clear_selection();
+            }
             app.crop_mode = false;
+            app.interaction = Interaction::SelectionBox { start: pointer };
         }
     }
 }

@@ -5,11 +5,63 @@ use std::path::PathBuf;
 use egui::{Align, Color32, Context, Frame, Layout, Sense, Stroke, Vec2};
 
 use crate::canvas::show_canvas;
+use crate::geometry::{local_corners, local_to_world};
 use crate::model::{
     page_size_pt, Document, Element, ElementKind, Orientation, PageAlign, PaperFormat, ScrollMode,
     Settings, TextAlign, Units,
 };
 use crate::store::ImageStore;
+
+/// Ankerpunkt der Bounding-Box für die Positionsanzeige.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BBoxAnchor {
+    TopLeft,
+    TopCenter,
+    TopRight,
+    MidLeft,
+    Center,
+    MidRight,
+    BotLeft,
+    BotCenter,
+    BotRight,
+}
+
+impl Default for BBoxAnchor {
+    fn default() -> Self {
+        BBoxAnchor::TopLeft
+    }
+}
+
+impl BBoxAnchor {
+    /// (dx, dy) als Anteil von 0..1 innerhalb der Bounding-Box.
+    pub fn frac(self) -> (f32, f32) {
+        match self {
+            BBoxAnchor::TopLeft => (0.0, 0.0),
+            BBoxAnchor::TopCenter => (0.5, 0.0),
+            BBoxAnchor::TopRight => (1.0, 0.0),
+            BBoxAnchor::MidLeft => (0.0, 0.5),
+            BBoxAnchor::Center => (0.5, 0.5),
+            BBoxAnchor::MidRight => (1.0, 0.5),
+            BBoxAnchor::BotLeft => (0.0, 1.0),
+            BBoxAnchor::BotCenter => (0.5, 1.0),
+            BBoxAnchor::BotRight => (1.0, 1.0),
+        }
+    }
+
+    pub fn all() -> [BBoxAnchor; 9] {
+        [
+            BBoxAnchor::TopLeft,
+            BBoxAnchor::TopCenter,
+            BBoxAnchor::TopRight,
+            BBoxAnchor::MidLeft,
+            BBoxAnchor::Center,
+            BBoxAnchor::MidRight,
+            BBoxAnchor::BotLeft,
+            BBoxAnchor::BotCenter,
+            BBoxAnchor::BotRight,
+        ]
+    }
+}
 
 /// Ansicht (Zoom & Verschiebung) der Zeichenfläche.
 #[derive(Clone)]
@@ -28,14 +80,20 @@ impl Default for View {
 /// Welche Aktion gerade mit der Maus ausgeführt wird.
 pub enum Interaction {
     None,
-    /// Körper verschieben.
-    DragBody { id: u64, start_pointer: egui::Pos2, start_xy: (f32, f32) },
+    /// Eines oder mehrere Objekte verschieben.
+    DragBodies {
+        start_pointer: egui::Pos2,
+        /// (id, start_x, start_y) für jedes verschobene Objekt.
+        starts: Vec<(u64, f32, f32)>,
+    },
     /// Größe ändern; gegenüberliegende Ecke bleibt fix.
     Resize { id: u64, anchor: egui::Pos2, rotation: f32, start_aspect: f32 },
     /// Drehen.
     Rotate { id: u64 },
     /// Bild zuschneiden.
     Crop { id: u64, edge: CropEdge, start_crop: crate::model::Crop },
+    /// Auswahl-Rechteck ziehen.
+    SelectionBox { start: egui::Pos2 },
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -50,7 +108,8 @@ pub struct EditorApp {
     pub doc: Document,
     pub page_index: usize,
     pub next_id: u64,
-    pub selected: Option<u64>,
+    /// Alle aktuell ausgewählten Element-IDs.
+    pub selection: Vec<u64>,
     /// (id, Puffer) falls gerade Text bearbeitet wird.
     pub editing: Option<(u64, String)>,
     /// Beim Start der Textbearbeitung einmal Fokus anfordern.
@@ -63,6 +122,36 @@ pub struct EditorApp {
     pub modified: bool,
     pub status: String,
     pub settings: Settings,
+    /// Ankerpunkt für die Multi-Selection-Positionsanzeige.
+    pub multi_anchor: BBoxAnchor,
+}
+
+impl EditorApp {
+    /// Erstes ausgewähltes Element (für Resize/Rotate-Griffe etc.).
+    pub fn primary(&self) -> Option<u64> {
+        self.selection.first().copied()
+    }
+
+    pub fn is_selected(&self, id: u64) -> bool {
+        self.selection.contains(&id)
+    }
+
+    pub fn select_only(&mut self, id: u64) {
+        self.selection.clear();
+        self.selection.push(id);
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection.clear();
+    }
+
+    pub fn toggle_selected(&mut self, id: u64) {
+        if let Some(pos) = self.selection.iter().position(|&x| x == id) {
+            self.selection.swap_remove(pos);
+        } else {
+            self.selection.push(id);
+        }
+    }
 }
 
 impl Default for EditorApp {
@@ -71,7 +160,7 @@ impl Default for EditorApp {
             doc: Document::default(),
             page_index: 0,
             next_id: 1,
-            selected: None,
+            selection: Vec::new(),
             editing: None,
             edit_focus: false,
             interaction: Interaction::None,
@@ -82,6 +171,7 @@ impl Default for EditorApp {
             modified: false,
             status: String::from("Bereit. Tipp: Bild per Drag&Drop hereinziehen."),
             settings: Settings::default(),
+            multi_anchor: BBoxAnchor::default(),
         }
     }
 }
@@ -91,7 +181,7 @@ impl EditorApp {
         self.doc = Document::default();
         self.page_index = 0;
         self.next_id = 1;
-        self.selected = None;
+        self.clear_selection();
         self.editing = None;
         self.edit_focus = false;
         self.interaction = Interaction::None;
@@ -121,7 +211,7 @@ impl EditorApp {
         if let Some(page) = self.doc.current_page_mut(self.page_index) {
             page.elements.push(el);
         }
-        self.selected = Some(id);
+        self.select_only(id);
         self.crop_mode = false;
         self.modified = true;
         // Sofort in den Bearbeitungsmodus wechseln.
@@ -150,30 +240,35 @@ impl EditorApp {
         if let Some(page) = self.doc.current_page_mut(self.page_index) {
             page.elements.push(el);
         }
-        self.selected = Some(id);
+        self.select_only(id);
         self.crop_mode = false;
         self.modified = true;
         self.status = format!("Bild hinzugefügt ({}×{}).", dims.0, dims.1);
     }
 
     pub fn delete_selected(&mut self) {
-        let Some(id) = self.selected else { return };
-        if let Some(page) = self.doc.current_page_mut(self.page_index) {
-            page.elements.retain(|e| e.id != id);
+        if self.selection.is_empty() {
+            return;
         }
-        self.images.remove(id);
-        self.selected = None;
+        let ids: Vec<u64> = self.selection.clone();
+        if let Some(page) = self.doc.current_page_mut(self.page_index) {
+            page.elements.retain(|e| !ids.contains(&e.id));
+        }
+        for &id in &ids {
+            self.images.remove(id);
+        }
+        self.clear_selection();
         self.editing = None;
         self.crop_mode = false;
         self.interaction = Interaction::None;
         self.modified = true;
-        self.status = String::from("Objekt gelöscht.");
+        self.status = String::from("Objekt(e) gelöscht.");
     }
 
     pub fn add_page(&mut self) {
         self.doc.pages.push(crate::model::Page::default());
         self.page_index = self.doc.pages.len() - 1;
-        self.selected = None;
+        self.clear_selection();
         self.modified = true;
     }
 
@@ -368,7 +463,7 @@ impl EditorApp {
                     ui.add_enabled_ui(self.page_index > 0, |ui| {
                         if ui.button("◀").clicked() {
                             self.page_index -= 1;
-                            self.selected = None;
+                            self.clear_selection();
                         }
                     });
                     if ui.button("＋ Seite").clicked() {
@@ -377,17 +472,21 @@ impl EditorApp {
                     ui.add_enabled_ui(self.page_index + 1 < self.doc.pages.len(), |ui| {
                         if ui.button("▶").clicked() {
                             self.page_index += 1;
-                            self.selected = None;
+                            self.clear_selection();
                         }
                     });
                 });
                 ui.separator();
 
-                let Some(sel) = self.selected else {
-                    ui.label("Kein Objekt ausgewählt.\nKlicke ein Objekt an.");
+                let Some(sel) = self.primary() else {
+                    ui.label("Kein Objekt ausgewählt.\nKlicke oder ziehe ein Auswahl-Rechteck.");
                     return;
                 };
-                self.properties_for(ui, sel);
+                if self.selection.len() == 1 {
+                    self.properties_for(ui, sel);
+                } else {
+                    self.properties_for_multi(ui);
+                }
             });
     }
 
@@ -500,6 +599,112 @@ impl EditorApp {
         let _ = Layout::top_down(Align::TOP);
         let _ = (Sense::hover(), Stroke::default());
         if ui.button("Objekt löschen").clicked() {
+            self.delete_selected();
+        }
+    }
+
+    /// Achsenausgerichtete Bounding-Box aller ausgewählten Elemente (in pt).
+    /// Berücksichtigt Rotation.
+    fn selection_bbox(&self) -> Option<(f32, f32, f32, f32)> {
+        let page = self.doc.pages.get(self.page_index)?;
+        let mut min_x = f32::MAX;
+        let mut min_y = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut max_y = f32::MIN;
+        for el in page.elements.iter().filter(|e| self.is_selected(e.id)) {
+            let cx = el.x + el.w / 2.0;
+            let cy = el.y + el.h / 2.0;
+            for corner in local_corners(el.w, el.h) {
+                let w = local_to_world(egui::Pos2::new(cx, cy), el.rotation, corner);
+                min_x = min_x.min(w.x);
+                min_y = min_y.min(w.y);
+                max_x = max_x.max(w.x);
+                max_y = max_y.max(w.y);
+            }
+        }
+        if min_x > max_x {
+            return None;
+        }
+        Some((min_x, min_y, max_x - min_x, max_y - min_y))
+    }
+
+    fn properties_for_multi(&mut self, ui: &mut egui::Ui) {
+        ui.heading(format!("{} Objekte", self.selection.len()));
+        ui.separator();
+
+        let unit = self.settings.units;
+        let suffix = unit.label();
+
+        // Bounding-Box berechnen.
+        let Some((bx, by, bw, bh)) = self.selection_bbox() else {
+            ui.label("Keine gültige Auswahl.");
+            return;
+        };
+
+        // Ankerpunkt-Raster (3×3).
+        ui.label("Referenzpunkt:");
+        ui.horizontal(|ui| {
+            let rows = [
+                [BBoxAnchor::TopLeft, BBoxAnchor::TopCenter, BBoxAnchor::TopRight],
+                [BBoxAnchor::MidLeft, BBoxAnchor::Center, BBoxAnchor::MidRight],
+                [BBoxAnchor::BotLeft, BBoxAnchor::BotCenter, BBoxAnchor::BotRight],
+            ];
+            for row in &rows {
+                ui.vertical(|ui| {
+                    for anchor in row {
+                        let sel = self.multi_anchor == *anchor;
+                        if ui.selectable_label(sel, "●").clicked() {
+                            self.multi_anchor = *anchor;
+                        }
+                    }
+                });
+            }
+        });
+
+        // Position des Ankerpunkts.
+        let (fx, fy) = self.multi_anchor.frac();
+        let anchor_x = bx + bw * fx;
+        let anchor_y = by + bh * fy;
+
+        let mut dx = unit.from_pt(anchor_x);
+        let mut dy = unit.from_pt(anchor_y);
+        let mut dw = unit.from_pt(bw);
+        let mut dh = unit.from_pt(bh);
+
+        ui.horizontal(|ui| {
+            ui.label("X:");
+            ui.add(egui::DragValue::new(&mut dx).speed(0.1).suffix(suffix));
+            ui.label("Y:");
+            ui.add(egui::DragValue::new(&mut dy).speed(0.1).suffix(suffix));
+        });
+        ui.horizontal(|ui| {
+            ui.label("B:");
+            ui.add(egui::DragValue::new(&mut dw).range(0.01..=2000.0).speed(0.1).suffix(suffix));
+            ui.label("H:");
+            ui.add(egui::DragValue::new(&mut dh).range(0.01..=2000.0).speed(0.1).suffix(suffix));
+        });
+
+        // Wenn sich X/Y geändert hat → alle Objekte verschieben.
+        let new_anchor_x = unit.to_pt(dx);
+        let new_anchor_y = unit.to_pt(dy);
+        let delta_x = new_anchor_x - anchor_x;
+        let delta_y = new_anchor_y - anchor_y;
+        if delta_x.abs() > 0.01 || delta_y.abs() > 0.01 {
+            let sel_ids = self.selection.clone();
+            let page_idx = self.page_index;
+            if let Some(page) = self.doc.pages.get_mut(page_idx) {
+                for el in page.elements.iter_mut() {
+                    if sel_ids.contains(&el.id) {
+                        el.x += delta_x;
+                        el.y += delta_y;
+                    }
+                }
+            }
+            self.touch();
+        }
+
+        ui.separator();
+        if ui.button("Alle löschen").clicked() {
             self.delete_selected();
         }
     }
