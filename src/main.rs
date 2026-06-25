@@ -2,6 +2,7 @@
 
 mod app;
 mod canvas;
+mod fonts;
 mod geometry;
 mod io;
 mod model;
@@ -20,6 +21,10 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "BoxDoc",
         options,
-        Box::new(|_cc| Ok(Box::new(app::EditorApp::default()))),
+        Box::new(|cc| {
+            // Schriften beim Start registrieren.
+            fonts::install(&cc.egui_ctx);
+            Ok(Box::new(app::EditorApp::default()))
+        }),
     )
 }

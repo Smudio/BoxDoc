@@ -63,6 +63,257 @@ pub fn page_size_pt(format: PaperFormat, orientation: Orientation) -> (f32, f32)
     }
 }
 
+// ===========================================================================
+// Einstellungen (Settings)
+// ===========================================================================
+
+/// Maßeinheit für die Anzeige in den Eigenschaften. Intern wird immer in
+/// Punkten (pt) gerechnet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Units {
+    Pt,
+    Mm,
+    Cm,
+    Inch,
+}
+
+impl Default for Units {
+    fn default() -> Self {
+        Units::Cm
+    }
+}
+
+impl Units {
+    pub fn label(self) -> &'static str {
+        match self {
+            Units::Pt => "pt",
+            Units::Mm => "mm",
+            Units::Cm => "cm",
+            Units::Inch => "zoll",
+        }
+    }
+
+    pub fn all() -> [Units; 4] {
+        [Units::Cm, Units::Mm, Units::Pt, Units::Inch]
+    }
+
+    /// Punkt-Wert in die Anzeige-Einheit umrechnen.
+    pub fn from_pt(self, pt: f32) -> f32 {
+        match self {
+            Units::Pt => pt,
+            Units::Mm => pt * 25.4 / 72.0,
+            Units::Cm => pt * 2.54 / 72.0,
+            Units::Inch => pt / 72.0,
+        }
+    }
+
+    /// Anzeige-Wert zurück in Punkte umrechnen.
+    pub fn to_pt(self, val: f32) -> f32 {
+        match self {
+            Units::Pt => val,
+            Units::Mm => val * 72.0 / 25.4,
+            Units::Cm => val * 72.0 / 2.54,
+            Units::Inch => val * 72.0,
+        }
+    }
+}
+
+/// Horizontale Ausrichtung der Seite auf der Zeichenfläche.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PageAlign {
+    Left,
+    Center,
+    Right,
+}
+
+impl Default for PageAlign {
+    fn default() -> Self {
+        PageAlign::Center
+    }
+}
+
+impl PageAlign {
+    pub fn label(self) -> &'static str {
+        match self {
+            PageAlign::Left => "Links",
+            PageAlign::Center => "Mittig",
+            PageAlign::Right => "Rechts",
+        }
+    }
+}
+
+/// Wie beim Scrollen zwischen Seiten gewechselt wird.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScrollMode {
+    /// Runterscrollen am Seitenende springt automatisch zur nächsten Seite.
+    Continuous,
+    /// Seiten werden nur über das Eigenschaften-Panel gewechselt.
+    PageByPage,
+}
+
+impl Default for ScrollMode {
+    fn default() -> Self {
+        ScrollMode::PageByPage
+    }
+}
+
+impl ScrollMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            ScrollMode::Continuous => "Fortlaufend (Scrollen wechselt Seite)",
+            ScrollMode::PageByPage => "Seitenweise (über Eigenschaften)",
+        }
+    }
+}
+
+/// Globale Anwendungseinstellungen.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Settings {
+    pub units: Units,
+    pub page_align: PageAlign,
+    pub scroll_mode: ScrollMode,
+}
+
+// ===========================================================================
+// Schriften
+// ===========================================================================
+
+/// Default-Schrift-Schlüssel (für `#[serde(default)]`).
+pub fn default_font_key() -> String {
+    String::from("default")
+}
+
+/// Ein kuratierter Satz schöner Schriften. Der Name dient als Schlüssel in
+/// egui und als Anzeige im UI; `key` ist der technische Bezeichner, der im
+/// Element gespeichert wird. So bleibt das Dokument portabel, auch wenn eine
+/// Schrift auf dem Zielsystem fehlt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FontDef {
+    pub key: &'static str,
+    pub display: &'static str,
+    /// Kandidaten-Pfade (betriebssystemspezifisch); der erste Treffer wird
+    /// geladen. Bleibt die Liste leer, fällt egui auf seinen Default zurück.
+    pub paths: &'static [&'static str],
+}
+
+/// Kuratierte Auswahl. Index 0 ist die Standard-Schrift.
+pub const FONT_CHOICES: &[FontDef] = &[
+    FontDef {
+        key: "default",
+        display: "Standard",
+        paths: &[],
+    },
+    FontDef {
+        key: "arial",
+        display: "Arial",
+        paths: &[
+            "C:\\Windows\\Fonts\\arial.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+        ],
+    },
+    FontDef {
+        key: "calibri",
+        display: "Calibri",
+        paths: &[
+            "C:\\Windows\\Fonts\\calibri.ttf",
+            "/usr/share/fonts/truetype/calibri/Calibri-Regular.ttf",
+        ],
+    },
+    FontDef {
+        key: "cambria",
+        display: "Cambria",
+        paths: &[
+            "C:\\Windows\\Fonts\\cambria.ttc",
+            "/usr/share/fonts/truetype/cambria/Cambria.ttf",
+        ],
+    },
+    FontDef {
+        key: "georgia",
+        display: "Georgia",
+        paths: &[
+            "C:\\Windows\\Fonts\\georgia.ttf",
+            "/usr/share/fonts/truetype/georgia/Georgia.ttf",
+        ],
+    },
+    FontDef {
+        key: "verdana",
+        display: "Verdana",
+        paths: &["C:\\Windows\\Fonts\\verdana.ttf"],
+    },
+    FontDef {
+        key: "tahoma",
+        display: "Tahoma",
+        paths: &["C:\\Windows\\Fonts\\tahoma.ttf"],
+    },
+    FontDef {
+        key: "trebuc",
+        display: "Trebuchet MS",
+        paths: &["C:\\Windows\\Fonts\\trebuc.ttf"],
+    },
+    FontDef {
+        key: "palatino",
+        display: "Palatino Linotype",
+        paths: &["C:\\Windows\\Fonts\\pala.ttf"],
+    },
+    FontDef {
+        key: "segoeui",
+        display: "Segoe UI",
+        paths: &["C:\\Windows\\Fonts\\segoeui.ttf"],
+    },
+    FontDef {
+        key: "consolas",
+        display: "Consolas",
+        paths: &[
+            "C:\\Windows\\Fonts\\consola.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        ],
+    },
+    FontDef {
+        key: "gabriola",
+        display: "Gabriola",
+        paths: &["C:\\Windows\\Fonts\\Gabriola.ttf"],
+    },
+    FontDef {
+        key: "inkfree",
+        display: "Ink Free",
+        paths: &["C:\\Windows\\Fonts\\Inkfree.ttf"],
+    },
+    FontDef {
+        key: "comic",
+        display: "Comic Sans MS",
+        paths: &["C:\\Windows\\Fonts\\comic.ttf"],
+    },
+    FontDef {
+        key: "impact",
+        display: "Impact",
+        paths: &["C:\\Windows\\Fonts\\impact.ttf"],
+    },
+    FontDef {
+        key: "candara",
+        display: "Candara",
+        paths: &["C:\\Windows\\Fonts\\Candara.ttf"],
+    },
+];
+
+/// Schlüssel zur Anzeige.
+pub fn font_display(key: &str) -> &'static str {
+    FONT_CHOICES
+        .iter()
+        .find(|f| f.key == key)
+        .map(|f| f.display)
+        .unwrap_or("Unbekannt")
+}
+
+/// Index des Schlüssels (für ComboBox).
+pub fn font_index(key: &str) -> usize {
+    FONT_CHOICES
+        .iter()
+        .position(|f| f.key == key)
+        .unwrap_or(0)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TextAlign {
     Left,
@@ -119,6 +370,9 @@ pub struct Element {
     // --- Text ---
     pub text: String,
     pub font_size: f32,
+    /// Schrift-Schlüssel (siehe FONT_CHOICES / font_index).
+    #[serde(default = "default_font_key")]
+    pub font: String,
     pub color: [u8; 4],
     pub align: TextAlign,
     /// Einzug jeder Zeile in Punkten.
@@ -147,6 +401,7 @@ impl Element {
             rotation: 0.0,
             text: String::from("Text"),
             font_size: 14.0,
+            font: default_font_key(),
             color: [20, 20, 20, 255],
             align: TextAlign::Left,
             indent: 0.0,
@@ -172,6 +427,7 @@ impl Element {
             rotation: 0.0,
             text: String::new(),
             font_size: 14.0,
+            font: default_font_key(),
             color: [255, 255, 255, 255],
             align: TextAlign::Left,
             indent: 0.0,

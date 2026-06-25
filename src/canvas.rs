@@ -7,7 +7,7 @@ use egui::{
 
 use crate::app::{CropEdge, EditorApp, Interaction};
 use crate::geometry::{local_corners, local_to_world, rotate_vec, world_to_local};
-use crate::model::{page_size_pt, Element, ElementKind};
+use crate::model::{page_size_pt, Element, ElementKind, PageAlign, ScrollMode};
 use crate::store::ImageStore;
 
 /// Kopie der aktiven Interaktion, damit `&app` nicht während der Bearbeitung
@@ -34,40 +34,88 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
     let pointer = ui.input(|i| i.pointer.interact_pos());
     let double_clicked = response.double_clicked();
 
+    let base = rect.min;
+    let (pw_pt, ph_pt) = page_size_pt(app.doc.format, app.doc.orientation);
+
+    // --- Alignment-Offset berechnen (vor Zoom, da Zoom ihn berücksichtigt) ---
+    let compute_align_x = |zoom_val: f32| {
+        let page_w_screen = pw_pt * zoom_val;
+        match app.settings.page_align {
+            PageAlign::Left => 24.0,
+            PageAlign::Center => ((rect.width() - page_w_screen) / 2.0).max(24.0),
+            PageAlign::Right => (rect.width() - page_w_screen - 24.0).max(24.0),
+        }
+    };
+
     // --- Zoom & Verschiebung ---
     if ctrl && scroll.y.abs() > 0.0 {
         if let Some(cur) = pointer {
             if rect.contains(cur) {
                 let zoom = app.view.zoom;
-                let base = rect.min;
                 let pan = app.view.pan;
-                let page_under =
-                    Vec2::new((cur.x - base.x - pan.x) / zoom, (cur.y - base.y - pan.y) / zoom);
+                let align_x = compute_align_x(zoom);
+                let page_under = Vec2::new(
+                    (cur.x - base.x - align_x - pan.x) / zoom,
+                    (cur.y - base.y - pan.y) / zoom,
+                );
                 let factor = if scroll.y > 0.0 { 1.1 } else { 0.9 };
                 let new_zoom = (zoom * factor).clamp(0.1, 6.0);
+                let new_align_x = compute_align_x(new_zoom);
                 app.view.zoom = new_zoom;
                 app.view.pan = Vec2::new(
-                    cur.x - base.x - page_under.x * new_zoom,
+                    cur.x - base.x - new_align_x - page_under.x * new_zoom,
                     cur.y - base.y - page_under.y * new_zoom,
                 );
             }
         }
     } else if scroll != Vec2::ZERO {
-        app.view.pan += scroll;
+        // --- Continuous-Scroll: Seitenwechsel am Ende ---
+        if app.settings.scroll_mode == ScrollMode::Continuous && scroll.y.abs() > 0.1 {
+            let zoom = app.view.zoom;
+            let page_h_screen = ph_pt * zoom;
+            let page_top = app.view.pan.y;
+            let page_bottom = page_top + page_h_screen;
+            if scroll.y > 0.0 && page_bottom + scroll.y < 24.0 {
+                // Runterscrollen über Seitenende → nächste Seite
+                if app.page_index + 1 < app.doc.pages.len() {
+                    app.page_index += 1;
+                    app.view.pan.y = 24.0;
+                    app.selected = None;
+                }
+            } else if scroll.y < 0.0 && page_top + scroll.y > 24.0 {
+                // Hochscrollen über Seitenanfang → vorige Seite
+                if app.page_index > 0 {
+                    app.page_index -= 1;
+                    let new_page_h = ph_pt * zoom;
+                    app.view.pan.y = -new_page_h + 24.0;
+                    app.selected = None;
+                }
+            } else {
+                app.view.pan += scroll;
+            }
+        } else {
+            app.view.pan += scroll;
+        }
     }
     if middle_down {
         app.view.pan += delta;
     }
 
-    let base = rect.min;
     let zoom = app.view.zoom;
+    let align_offset_x = compute_align_x(zoom);
     let pan = app.view.pan;
-    let to_screen = |p: Pos2| base + pan + Vec2::new(p.x, p.y) * zoom;
-    let to_page = |s: Pos2| Vec2::new((s.x - base.x - pan.x) / zoom, (s.y - base.y - pan.y) / zoom);
+    let to_screen = |p: Pos2| {
+        base + Vec2::new(align_offset_x + pan.x, pan.y) + Vec2::new(p.x, p.y) * zoom
+    };
+    let to_page = |s: Pos2| {
+        Vec2::new(
+            (s.x - base.x - align_offset_x - pan.x) / zoom,
+            (s.y - base.y - pan.y) / zoom,
+        )
+    };
 
     // --- Seite zeichnen ---
-    let (pw, ph) = page_size_pt(app.doc.format, app.doc.orientation);
-    let page_rect_screen = Rect::from_min_size(to_screen(Pos2::ZERO), Vec2::new(pw, ph) * zoom);
+    let page_rect_screen = Rect::from_min_size(to_screen(Pos2::ZERO), Vec2::new(pw_pt, ph_pt) * zoom);
     painter.rect_filled(
         page_rect_screen.translate(Vec2::new(4.0, 6.0)),
         2.0,
@@ -188,11 +236,18 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
     // --- Neue Interaktion starten ---
     let editing_active = app.editing.is_some();
     let pointer_in_canvas = pointer.map(|p| rect.contains(p)).unwrap_or(false);
+    // Liegt über dem Pointer eine höhere Ebene (Farbwähler-Popup, Menü etc.)?
+    // Dann gehört der Klick der UI und darf die Auswahl nicht verändern.
+    let click_on_ui = pointer
+        .and_then(|p| ctx.layer_id_at(p))
+        .map(|lid| lid.order != egui::Order::Background)
+        .unwrap_or(false);
     if matches!(app.interaction, Interaction::None)
         && primary_pressed
         && !editing_active
         && !middle_down
         && pointer_in_canvas
+        && !click_on_ui
     {
         if let Some(pointer) = pointer {
             start_interaction(app, page_idx, pointer, to_screen, to_page, zoom);
@@ -200,15 +255,30 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
     }
 
     // --- Doppelklick → Text bearbeiten ---
-    if double_clicked && !editing_active && pointer_in_canvas {
+    if double_clicked && !editing_active && pointer_in_canvas && !click_on_ui {
         if let Some(pointer) = pointer {
+            // Wenn ein bestehendes Text-Objekt getroffen wird → bearbeiten.
+            let mut hit_text = None;
             for el in app.doc.pages[page_idx].elements.iter().rev() {
                 if el.kind == ElementKind::Text && point_in_element(el, pointer, &to_screen, zoom) {
-                    app.editing = Some((el.id, el.text.clone()));
-                    app.edit_focus = true;
-                    app.selected = Some(el.id);
+                    hit_text = Some(el.id);
                     break;
                 }
+            }
+            if let Some(id) = hit_text {
+                let text = app.doc.pages[page_idx]
+                    .elements
+                    .iter()
+                    .find(|e| e.id == id)
+                    .map(|e| e.text.clone())
+                    .unwrap_or_default();
+                app.editing = Some((id, text));
+                app.edit_focus = true;
+                app.selected = Some(id);
+            } else {
+                // Leere Fläche → neues Textfeld an der Klickposition (in Seiten-Punkten).
+                let p = to_page(pointer);
+                app.add_text(Some((p.x, p.y)));
             }
         }
     }
@@ -249,7 +319,7 @@ fn draw_element(
 ) {
     match el.kind {
         ElementKind::Text => {
-            let font = FontId::proportional(el.font_size * zoom);
+            let font = FontId::new(el.font_size * zoom, crate::fonts::family_for(&el.font));
             let color = Color32::from_rgba_unmultiplied(
                 el.color[0], el.color[1], el.color[2], el.color[3],
             );

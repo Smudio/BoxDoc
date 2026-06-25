@@ -6,7 +6,8 @@ use egui::{Align, Color32, Context, Frame, Layout, Sense, Stroke, Vec2};
 
 use crate::canvas::show_canvas;
 use crate::model::{
-    page_size_pt, Document, Element, ElementKind, Orientation, PaperFormat, TextAlign,
+    page_size_pt, Document, Element, ElementKind, Orientation, PageAlign, PaperFormat, ScrollMode,
+    Settings, TextAlign, Units,
 };
 use crate::store::ImageStore;
 
@@ -19,7 +20,8 @@ pub struct View {
 
 impl Default for View {
     fn default() -> Self {
-        View { zoom: 1.0, pan: Vec2::new(48.0, 24.0) }
+        // Pan X = 0, denn die horizontale Ausrichtung wird dynamisch berechnet.
+        View { zoom: 1.0, pan: Vec2::new(0.0, 24.0) }
     }
 }
 
@@ -60,6 +62,7 @@ pub struct EditorApp {
     pub file_path: Option<PathBuf>,
     pub modified: bool,
     pub status: String,
+    pub settings: Settings,
 }
 
 impl Default for EditorApp {
@@ -78,6 +81,7 @@ impl Default for EditorApp {
             file_path: None,
             modified: false,
             status: String::from("Bereit. Tipp: Bild per Drag&Drop hereinziehen."),
+            settings: Settings::default(),
         }
     }
 }
@@ -113,13 +117,17 @@ impl EditorApp {
         let mut el = Element::new_text(id, 0.0, 0.0);
         el.x = center.0 - el.w / 2.0;
         el.y = center.1 - el.h / 2.0;
+        el.text = String::new();
         if let Some(page) = self.doc.current_page_mut(self.page_index) {
             page.elements.push(el);
         }
         self.selected = Some(id);
         self.crop_mode = false;
         self.modified = true;
-        self.status = String::from("Text hinzugefügt. Doppelklick zum Bearbeiten.");
+        // Sofort in den Bearbeitungsmodus wechseln.
+        self.editing = Some((id, String::new()));
+        self.edit_focus = true;
+        self.status = String::from("Text erstellt – tippe los.");
     }
 
     pub fn add_image_from_bytes(&mut self, bytes: Vec<u8>, at: Option<(f32, f32)>) {
@@ -249,6 +257,26 @@ impl EditorApp {
                     if ui.button("Drucken…").clicked() {
                         crate::printing::print_dialog(self);
                     }
+                    ui.separator();
+                    ui.menu_button("Einstellungen", |ui| {
+                        ui.label("Einheit:");
+                        let mut u = self.settings.units;
+                        for candidate in Units::all() {
+                            ui.selectable_value(&mut u, candidate, candidate.label());
+                        }
+                        if u != self.settings.units {
+                            self.settings.units = u;
+                        }
+
+                        ui.separator();
+                        ui.label("Seitenwechsel beim Scrollen:");
+                        let mut sm = self.settings.scroll_mode;
+                        ui.selectable_value(&mut sm, ScrollMode::Continuous, "Fortlaufend (Scrollen wechselt Seite)");
+                        ui.selectable_value(&mut sm, ScrollMode::PageByPage, "Seitenweise (über Eigenschaften)");
+                        if sm != self.settings.scroll_mode {
+                            self.settings.scroll_mode = sm;
+                        }
+                    });
                 });
 
                 ui.menu_button("Einfügen", |ui| {
@@ -262,6 +290,23 @@ impl EditorApp {
                     }
                     if ui.button("Seite").clicked() {
                         self.add_page();
+                        ui.close_menu();
+                    }
+                });
+
+                ui.menu_button("Ansicht", |ui| {
+                    ui.label("Seitenausrichtung:");
+                    let mut align = self.settings.page_align;
+                    ui.selectable_value(&mut align, PageAlign::Left, "Linksbündig");
+                    ui.selectable_value(&mut align, PageAlign::Center, "Mittig");
+                    ui.selectable_value(&mut align, PageAlign::Right, "Rechtsbündig");
+                    if align != self.settings.page_align {
+                        self.settings.page_align = align;
+                    }
+
+                    ui.separator();
+                    if ui.button("Ansicht zurücksetzen").clicked() {
+                        self.view = View::default();
                         ui.close_menu();
                     }
                 });
@@ -293,9 +338,6 @@ impl EditorApp {
                 }
 
                 ui.separator();
-                if ui.button("⟲").on_hover_text("Ansicht zurücksetzen").clicked() {
-                    self.view = View::default();
-                }
                 ui.label(format!("{:.0}%", self.view.zoom * 100.0));
                 if ui.button("−").clicked() {
                     self.view.zoom = (self.view.zoom * 0.9).max(0.1);
@@ -361,19 +403,31 @@ impl EditorApp {
         };
 
         let el = &mut self.doc.pages[page_idx].elements[el_idx];
+        let unit = self.settings.units;
+        let suffix = unit.label();
+
+        // Position und Größe in der Anzeige-Einheit.
+        let mut x_d = unit.from_pt(el.x);
+        let mut y_d = unit.from_pt(el.y);
+        let mut w_d = unit.from_pt(el.w);
+        let mut h_d = unit.from_pt(el.h);
 
         ui.horizontal(|ui| {
             ui.label("X:");
-            ui.add(egui::DragValue::new(&mut el.x).speed(1.0));
+            ui.add(egui::DragValue::new(&mut x_d).speed(0.1).suffix(suffix));
             ui.label("Y:");
-            ui.add(egui::DragValue::new(&mut el.y).speed(1.0));
+            ui.add(egui::DragValue::new(&mut y_d).speed(0.1).suffix(suffix));
         });
         ui.horizontal(|ui| {
             ui.label("B:");
-            ui.add(egui::DragValue::new(&mut el.w).range(1.0..=4000.0).speed(1.0));
+            ui.add(egui::DragValue::new(&mut w_d).range(0.01..=2000.0).speed(0.1).suffix(suffix));
             ui.label("H:");
-            ui.add(egui::DragValue::new(&mut el.h).range(1.0..=4000.0).speed(1.0));
+            ui.add(egui::DragValue::new(&mut h_d).range(0.01..=2000.0).speed(0.1).suffix(suffix));
         });
+        el.x = unit.to_pt(x_d);
+        el.y = unit.to_pt(y_d);
+        el.w = unit.to_pt(w_d);
+        el.h = unit.to_pt(h_d);
 
         match el.kind {
             ElementKind::Text => {
@@ -383,13 +437,28 @@ impl EditorApp {
                         .desired_width(f32::INFINITY)
                         .desired_rows(4),
                 );
+                ui.label("Schrift:");
+                ui.horizontal_wrapped(|ui| {
+                    let mut chosen: Option<String> = None;
+                    for def in crate::model::FONT_CHOICES {
+                        let selected = el.font == def.key;
+                        let text = egui::RichText::new(def.display)
+                            .family(crate::fonts::family_for(def.key));
+                        if ui.selectable_label(selected, text).clicked() {
+                            chosen = Some(def.key.to_string());
+                        }
+                    }
+                    if let Some(k) = chosen {
+                        el.font = k;
+                    }
+                });
                 ui.horizontal(|ui| {
                     ui.label("Schriftgröße:");
-                    ui.add(egui::DragValue::new(&mut el.font_size).range(4.0..=400.0).speed(0.5));
+                    ui.add(egui::DragValue::new(&mut el.font_size).range(4.0..=400.0).speed(0.5).suffix("pt"));
                 });
                 ui.horizontal(|ui| {
                     ui.label("Einzug:");
-                    ui.add(egui::DragValue::new(&mut el.indent).range(0.0..=400.0).speed(0.5));
+                    ui.add(egui::DragValue::new(&mut el.indent).range(0.0..=400.0).speed(0.5).suffix("pt"));
                 });
                 ui.horizontal(|ui| {
                     ui.label("Farbe:");

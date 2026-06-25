@@ -70,7 +70,11 @@ pub fn export_pdf(
 
     let (document, first_page, first_layer) =
         PdfDocument::new("BoxDoc", Mm(pw_mm), Mm(ph_mm), "Ebene 1");
-    let font = system_font(&document);
+    // Fallback-Schrift (wird verwendet, wenn eine Element-Schrift fehlt).
+    let fallback_font = system_font(&document);
+    // Cache: Schrift-Schlüssel → eingebetteter Font.
+    let mut font_cache: std::collections::HashMap<String, IndirectFontRef> =
+        std::collections::HashMap::new();
 
     for (pi, page) in doc.pages.iter().enumerate() {
         let (page_idx, layer_idx) = if pi == 0 {
@@ -81,7 +85,22 @@ pub fn export_pdf(
         let layer = document.get_page(page_idx).get_layer(layer_idx);
         for el in &page.elements {
             match el.kind {
-                ElementKind::Text => draw_text(&layer, el, ph_mm, &font),
+                ElementKind::Text => {
+                    let font = if el.font == "default" || el.font.is_empty() {
+                        fallback_font.clone()
+                    } else {
+                        match font_cache.get(&el.font).cloned() {
+                            Some(f) => f,
+                            None => {
+                                let f = load_font_by_key(&document, &el.font)
+                                    .unwrap_or_else(|| fallback_font.clone());
+                                font_cache.insert(el.font.clone(), f.clone());
+                                f
+                            }
+                        }
+                    };
+                    draw_text(&layer, el, ph_mm, &font);
+                }
                 ElementKind::Image => draw_image(&layer, el, ph_mm, images),
             }
         }
@@ -106,6 +125,15 @@ fn system_font(doc: &PdfDocumentReference) -> IndirectFontRef {
         }
     }
     doc.add_builtin_font(BuiltinFont::Helvetica).unwrap_or_else(|_| panic!("keine Schrift gefunden"))
+}
+
+/// Lädt die zu `key` gehörende Schrift aus `FONT_CHOICES`. Liefert `None`,
+/// wenn die Datei fehlt oder nicht lesbar ist.
+fn load_font_by_key(doc: &PdfDocumentReference, key: &str) -> Option<IndirectFontRef> {
+    let def = crate::model::FONT_CHOICES.iter().find(|f| f.key == key)?;
+    let path = def.paths.iter().find(|p| std::fs::metadata(p).is_ok())?;
+    let f = File::open(path).ok()?;
+    doc.add_external_font(f).ok()
 }
 
 fn draw_text(layer: &PdfLayerReference, el: &Element, page_h_mm: f32, font: &IndirectFontRef) {
