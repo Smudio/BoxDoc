@@ -1,0 +1,20 @@
+[package]
+name = "boxdoc"
+version = "0.1.0"
+edition = "2021"
+description = "Ein simples, leistungsstarkes und zuverlässiges Dokumenten-Programm"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+eframe = { version = "0.34", default-features = false, features = ["glow", "wayland", "x11"] }
+egui = "0.34"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "webp", "ico"] }
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+printpdf = "0.7"
+
+[profile.release]
+opt-level = 2
