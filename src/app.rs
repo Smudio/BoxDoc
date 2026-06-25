@@ -664,17 +664,18 @@ impl EditorApp {
         };
 
         // --- Ankerpunkt-Raster (3×3) ---
+        // ui.horizontal + ui.vertical => jedes Array ist eine visuelle Spalte.
         ui.label("Referenzpunkt:");
         let anchor_clicked = ui.horizontal(|ui| {
-            let rows = [
-                [BBoxAnchor::TopLeft, BBoxAnchor::TopCenter, BBoxAnchor::TopRight],
-                [BBoxAnchor::MidLeft, BBoxAnchor::Center, BBoxAnchor::MidRight],
-                [BBoxAnchor::BotLeft, BBoxAnchor::BotCenter, BBoxAnchor::BotRight],
+            let columns = [
+                [BBoxAnchor::TopLeft, BBoxAnchor::MidLeft, BBoxAnchor::BotLeft],
+                [BBoxAnchor::TopCenter, BBoxAnchor::Center, BBoxAnchor::BotCenter],
+                [BBoxAnchor::TopRight, BBoxAnchor::MidRight, BBoxAnchor::BotRight],
             ];
             let mut changed = false;
-            for row in &rows {
+            for col in &columns {
                 ui.vertical(|ui| {
-                    for anchor in row {
+                    for anchor in col {
                         let sel = self.multi_anchor == *anchor;
                         if ui.selectable_label(sel, "●").clicked() {
                             self.multi_anchor = *anchor;
