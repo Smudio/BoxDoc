@@ -122,8 +122,12 @@ pub struct EditorApp {
     pub modified: bool,
     pub status: String,
     pub settings: Settings,
-    /// Ankerpunkt für die Multi-Selection-Positionsanzeige.
+    /// Ankerpunkt für die Positions-Anzeige.
     pub multi_anchor: BBoxAnchor,
+    /// Gespeicherte Ankerposition (nur bei Anker-/Auswahlwechsel aktualisiert).
+    pub pos_x: f32,
+    pub pos_y: f32,
+    pub pos_last_sel: Vec<u64>,
 }
 
 impl EditorApp {
@@ -172,6 +176,9 @@ impl Default for EditorApp {
             status: String::from("Bereit. Tipp: Bild per Drag&Drop hereinziehen."),
             settings: Settings::default(),
             multi_anchor: BBoxAnchor::default(),
+            pos_x: 0.0,
+            pos_y: 0.0,
+            pos_last_sel: Vec::new(),
         }
     }
 }
@@ -522,9 +529,43 @@ impl EditorApp {
             return;
         };
 
-        // --- Vereinheitlichter Positions-Editor (Anker-Raster) ---
-        // Funktioniert für Einzel- und Mehrfachauswahl gleich.
-        self.position_section(ui);
+        // --- Position: Ursprung abhängig von align/valign ---
+        let unit = self.settings.units;
+        let suffix = unit.label();
+        ui.heading("Objekt");
+        ui.separator();
+
+        {
+            let el = &mut self.doc.pages[page_idx].elements[el_idx];
+
+            // Ursprungs-Offset aus horizontaler/vertikaler Ausrichtung.
+            let (ox, oy) = origin_offset(el);
+
+            // Angezeigte X/Y = Element-Position + Ursprungs-Offset.
+            let mut x_d = unit.from_pt(el.x + ox);
+            let mut y_d = unit.from_pt(el.y + oy);
+            let mut w_d = unit.from_pt(el.w);
+            let mut h_d = unit.from_pt(el.h);
+
+            ui.horizontal(|ui| {
+                ui.label("X:");
+                ui.add(egui::DragValue::new(&mut x_d).speed(0.1).suffix(suffix));
+                ui.label("Y:");
+                ui.add(egui::DragValue::new(&mut y_d).speed(0.1).suffix(suffix));
+            });
+            ui.horizontal(|ui| {
+                ui.label("B:");
+                ui.add(egui::DragValue::new(&mut w_d).range(0.01..=2000.0).speed(0.1).suffix(suffix));
+                ui.label("H:");
+                ui.add(egui::DragValue::new(&mut h_d).range(0.01..=2000.0).speed(0.1).suffix(suffix));
+            });
+
+            // Zurückschreiben: Element-Position = eingegebener Wert − Offset.
+            el.x = unit.to_pt(x_d) - ox;
+            el.y = unit.to_pt(y_d) - oy;
+            el.w = unit.to_pt(w_d);
+            el.h = unit.to_pt(h_d);
+        }
 
         // --- Element-spezifische Eigenschaften ---
         let el = &mut self.doc.pages[page_idx].elements[el_idx];
@@ -609,18 +650,12 @@ impl EditorApp {
         }
     }
 
-    /// Vereinheitlichter Positions-Editor mit Anker-Raster.
-    /// Arbeitet auf der Bounding-Box der aktuellen Auswahl (1 oder mehrere).
+    /// Positions-Editor für Mehrfachauswahl mit Anker-Raster.
     fn position_section(&mut self, ui: &mut egui::Ui) {
         let unit = self.settings.units;
         let suffix = unit.label();
-        let n = self.selection.len();
 
-        ui.heading(if n == 1 {
-            "Objekt".to_string()
-        } else {
-            format!("{n} Objekte")
-        });
+        ui.heading(format!("{} Objekte", self.selection.len()));
         ui.separator();
 
         let Some((bx, by, bw, bh)) = self.selection_bbox() else {
@@ -628,34 +663,49 @@ impl EditorApp {
             return;
         };
 
-        // Ankerpunkt-Raster (3×3).
+        // --- Ankerpunkt-Raster (3×3) ---
         ui.label("Referenzpunkt:");
-        ui.horizontal(|ui| {
+        let anchor_clicked = ui.horizontal(|ui| {
             let rows = [
                 [BBoxAnchor::TopLeft, BBoxAnchor::TopCenter, BBoxAnchor::TopRight],
                 [BBoxAnchor::MidLeft, BBoxAnchor::Center, BBoxAnchor::MidRight],
                 [BBoxAnchor::BotLeft, BBoxAnchor::BotCenter, BBoxAnchor::BotRight],
             ];
+            let mut changed = false;
             for row in &rows {
                 ui.vertical(|ui| {
                     for anchor in row {
                         let sel = self.multi_anchor == *anchor;
                         if ui.selectable_label(sel, "●").clicked() {
                             self.multi_anchor = *anchor;
+                            changed = true;
                         }
                     }
                 });
             }
-        });
+            changed
+        }).inner;
 
+        // Ankerposition berechnen.
         let (fx, fy) = self.multi_anchor.frac();
         let anchor_x = bx + bw * fx;
         let anchor_y = by + bh * fy;
 
-        let mut dx = unit.from_pt(anchor_x);
-        let mut dy = unit.from_pt(anchor_y);
+        // Bei Ankerwechsel oder Auswahlwechsel: Puffer synchronisieren.
+        if anchor_clicked || self.pos_last_sel != self.selection {
+            self.pos_x = anchor_x;
+            self.pos_y = anchor_y;
+            self.pos_last_sel = self.selection.clone();
+        }
+
+        // DragValues an den Puffer binden (nicht an die Live-Berechnung).
+        let mut dx = unit.from_pt(self.pos_x);
+        let mut dy = unit.from_pt(self.pos_y);
         let mut dw = unit.from_pt(bw);
         let mut dh = unit.from_pt(bh);
+
+        let before_x = dx;
+        let before_y = dy;
 
         ui.horizontal(|ui| {
             ui.label("X:");
@@ -670,12 +720,12 @@ impl EditorApp {
             ui.add(egui::DragValue::new(&mut dh).range(0.01..=2000.0).speed(0.1).suffix(suffix));
         });
 
-        // X/Y-Änderung → alle ausgewählten Objekte verschieben.
-        let new_anchor_x = unit.to_pt(dx);
-        let new_anchor_y = unit.to_pt(dy);
-        let delta_x = new_anchor_x - anchor_x;
-        let delta_y = new_anchor_y - anchor_y;
-        if delta_x.abs() > 0.01 || delta_y.abs() > 0.01 {
+        // Delta nur aus NUTZER-Änderung berechnen (Vergleich Vorher/Nachher).
+        if (dx - before_x).abs() > 1e-6 || (dy - before_y).abs() > 1e-6 {
+            let new_x_pt = unit.to_pt(dx);
+            let new_y_pt = unit.to_pt(dy);
+            let delta_x = new_x_pt - self.pos_x;
+            let delta_y = new_y_pt - self.pos_y;
             let sel_ids = self.selection.clone();
             if let Some(page) = self.doc.pages.get_mut(self.page_index) {
                 for el in page.elements.iter_mut() {
@@ -685,7 +735,14 @@ impl EditorApp {
                     }
                 }
             }
+            self.pos_x = new_x_pt;
+            self.pos_y = new_y_pt;
             self.touch();
+        } else {
+            // Keine Nutzereingabe → Puffer an Live-Position anpassen
+            // (z.B. nach Drag im Canvas).
+            self.pos_x = anchor_x;
+            self.pos_y = anchor_y;
         }
     }
 
@@ -728,4 +785,25 @@ impl EditorApp {
             });
         });
     }
+}
+
+/// Berechnet den Ursprungs-Offset (ox, oy) eines Elements aus seiner
+/// horizontalen und vertikalen Ausrichtung. Bei Bildern ist der Ursprung
+/// immer oben-links (0, 0).
+fn origin_offset(el: &Element) -> (f32, f32) {
+    use crate::model::{TextAlign, VAlign};
+    if el.kind != ElementKind::Text {
+        return (0.0, 0.0);
+    }
+    let ox = match el.align {
+        TextAlign::Left => 0.0,
+        TextAlign::Center => el.w / 2.0,
+        TextAlign::Right => el.w,
+    };
+    let oy = match el.valign {
+        VAlign::Top => 0.0,
+        VAlign::Middle => el.h / 2.0,
+        VAlign::Bottom => el.h,
+    };
+    (ox, oy)
 }
