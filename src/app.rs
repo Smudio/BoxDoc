@@ -198,15 +198,33 @@ impl EditorApp {
         id
     }
 
-    pub fn add_text(&mut self, at_center: Option<(f32, f32)>) {
+    /// `at` wird interpretiert als:
+    /// - `None`  → Seitenmitte (zentriert)
+    /// - `Some(false, x, y)` → (x,y) ist die linke-obere Ecke
+    /// - `Some(true, x, y)`  → (x,y) ist das Zentrum
+    pub fn add_text(&mut self, at: Option<(bool, f32, f32)>) {
         let id = self.next_id();
-        let center = at_center.unwrap_or_else(|| {
-            let (w, h) = page_size_pt(self.doc.format, self.doc.orientation);
-            (w / 2.0, h / 2.0)
-        });
+        let (cx, cy) = match at {
+            None => {
+                let (w, h) = page_size_pt(self.doc.format, self.doc.orientation);
+                (w / 2.0, h / 2.0)
+            }
+            Some((true, x, y)) => (x, y),
+            Some((false, x, y)) => (x, y),
+        };
         let mut el = Element::new_text(id, 0.0, 0.0);
-        el.x = center.0 - el.w / 2.0;
-        el.y = center.1 - el.h / 2.0;
+        // Für den Doppelklick: linke-obere Ecke genau an der Cursor-Position,
+        // damit der Text-Nullpunkt (= Cursor) dort liegt.
+        match at {
+            Some((false, _, _)) => {
+                el.x = cx;
+                el.y = cy;
+            }
+            _ => {
+                el.x = cx - el.w / 2.0;
+                el.y = cy - el.h / 2.0;
+            }
+        }
         el.text = String::new();
         if let Some(page) = self.doc.current_page_mut(self.page_index) {
             page.elements.push(el);
@@ -485,13 +503,16 @@ impl EditorApp {
                 if self.selection.len() == 1 {
                     self.properties_for(ui, sel);
                 } else {
-                    self.properties_for_multi(ui);
+                    self.position_section(ui);
+                    ui.separator();
+                    if ui.button("Alle löschen").clicked() {
+                        self.delete_selected();
+                    }
                 }
             });
     }
 
     fn properties_for(&mut self, ui: &mut egui::Ui, sel: u64) {
-        // Werte holen, bearbeiten, zurück schreiben.
         let page_idx = self.page_index;
         let Some(el_idx) = self.doc.pages[page_idx]
             .elements
@@ -501,32 +522,13 @@ impl EditorApp {
             return;
         };
 
+        // --- Vereinheitlichter Positions-Editor (Anker-Raster) ---
+        // Funktioniert für Einzel- und Mehrfachauswahl gleich.
+        self.position_section(ui);
+
+        // --- Element-spezifische Eigenschaften ---
         let el = &mut self.doc.pages[page_idx].elements[el_idx];
-        let unit = self.settings.units;
-        let suffix = unit.label();
-
-        // Position und Größe in der Anzeige-Einheit.
-        let mut x_d = unit.from_pt(el.x);
-        let mut y_d = unit.from_pt(el.y);
-        let mut w_d = unit.from_pt(el.w);
-        let mut h_d = unit.from_pt(el.h);
-
-        ui.horizontal(|ui| {
-            ui.label("X:");
-            ui.add(egui::DragValue::new(&mut x_d).speed(0.1).suffix(suffix));
-            ui.label("Y:");
-            ui.add(egui::DragValue::new(&mut y_d).speed(0.1).suffix(suffix));
-        });
-        ui.horizontal(|ui| {
-            ui.label("B:");
-            ui.add(egui::DragValue::new(&mut w_d).range(0.01..=2000.0).speed(0.1).suffix(suffix));
-            ui.label("H:");
-            ui.add(egui::DragValue::new(&mut h_d).range(0.01..=2000.0).speed(0.1).suffix(suffix));
-        });
-        el.x = unit.to_pt(x_d);
-        el.y = unit.to_pt(y_d);
-        el.w = unit.to_pt(w_d);
-        el.h = unit.to_pt(h_d);
+        ui.separator();
 
         match el.kind {
             ElementKind::Text => {
@@ -568,10 +570,16 @@ impl EditorApp {
                     el.color = [c.r(), c.g(), c.b(), c.a()];
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Ausrichtung:");
+                    ui.label("Horizontal:");
                     ui.selectable_value(&mut el.align, TextAlign::Left, "Links");
                     ui.selectable_value(&mut el.align, TextAlign::Center, "Mitte");
                     ui.selectable_value(&mut el.align, TextAlign::Right, "Rechts");
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Vertikal:");
+                    ui.selectable_value(&mut el.valign, crate::model::VAlign::Top, "Oben");
+                    ui.selectable_value(&mut el.valign, crate::model::VAlign::Middle, "Mitte");
+                    ui.selectable_value(&mut el.valign, crate::model::VAlign::Bottom, "Unten");
                 });
             }
             ElementKind::Image => {
@@ -596,10 +604,88 @@ impl EditorApp {
         }
 
         ui.separator();
-        let _ = Layout::top_down(Align::TOP);
-        let _ = (Sense::hover(), Stroke::default());
         if ui.button("Objekt löschen").clicked() {
             self.delete_selected();
+        }
+    }
+
+    /// Vereinheitlichter Positions-Editor mit Anker-Raster.
+    /// Arbeitet auf der Bounding-Box der aktuellen Auswahl (1 oder mehrere).
+    fn position_section(&mut self, ui: &mut egui::Ui) {
+        let unit = self.settings.units;
+        let suffix = unit.label();
+        let n = self.selection.len();
+
+        ui.heading(if n == 1 {
+            "Objekt".to_string()
+        } else {
+            format!("{n} Objekte")
+        });
+        ui.separator();
+
+        let Some((bx, by, bw, bh)) = self.selection_bbox() else {
+            ui.label("Keine gültige Auswahl.");
+            return;
+        };
+
+        // Ankerpunkt-Raster (3×3).
+        ui.label("Referenzpunkt:");
+        ui.horizontal(|ui| {
+            let rows = [
+                [BBoxAnchor::TopLeft, BBoxAnchor::TopCenter, BBoxAnchor::TopRight],
+                [BBoxAnchor::MidLeft, BBoxAnchor::Center, BBoxAnchor::MidRight],
+                [BBoxAnchor::BotLeft, BBoxAnchor::BotCenter, BBoxAnchor::BotRight],
+            ];
+            for row in &rows {
+                ui.vertical(|ui| {
+                    for anchor in row {
+                        let sel = self.multi_anchor == *anchor;
+                        if ui.selectable_label(sel, "●").clicked() {
+                            self.multi_anchor = *anchor;
+                        }
+                    }
+                });
+            }
+        });
+
+        let (fx, fy) = self.multi_anchor.frac();
+        let anchor_x = bx + bw * fx;
+        let anchor_y = by + bh * fy;
+
+        let mut dx = unit.from_pt(anchor_x);
+        let mut dy = unit.from_pt(anchor_y);
+        let mut dw = unit.from_pt(bw);
+        let mut dh = unit.from_pt(bh);
+
+        ui.horizontal(|ui| {
+            ui.label("X:");
+            ui.add(egui::DragValue::new(&mut dx).speed(0.1).suffix(suffix));
+            ui.label("Y:");
+            ui.add(egui::DragValue::new(&mut dy).speed(0.1).suffix(suffix));
+        });
+        ui.horizontal(|ui| {
+            ui.label("B:");
+            ui.add(egui::DragValue::new(&mut dw).range(0.01..=2000.0).speed(0.1).suffix(suffix));
+            ui.label("H:");
+            ui.add(egui::DragValue::new(&mut dh).range(0.01..=2000.0).speed(0.1).suffix(suffix));
+        });
+
+        // X/Y-Änderung → alle ausgewählten Objekte verschieben.
+        let new_anchor_x = unit.to_pt(dx);
+        let new_anchor_y = unit.to_pt(dy);
+        let delta_x = new_anchor_x - anchor_x;
+        let delta_y = new_anchor_y - anchor_y;
+        if delta_x.abs() > 0.01 || delta_y.abs() > 0.01 {
+            let sel_ids = self.selection.clone();
+            if let Some(page) = self.doc.pages.get_mut(self.page_index) {
+                for el in page.elements.iter_mut() {
+                    if sel_ids.contains(&el.id) {
+                        el.x += delta_x;
+                        el.y += delta_y;
+                    }
+                }
+            }
+            self.touch();
         }
     }
 
@@ -626,87 +712,6 @@ impl EditorApp {
             return None;
         }
         Some((min_x, min_y, max_x - min_x, max_y - min_y))
-    }
-
-    fn properties_for_multi(&mut self, ui: &mut egui::Ui) {
-        ui.heading(format!("{} Objekte", self.selection.len()));
-        ui.separator();
-
-        let unit = self.settings.units;
-        let suffix = unit.label();
-
-        // Bounding-Box berechnen.
-        let Some((bx, by, bw, bh)) = self.selection_bbox() else {
-            ui.label("Keine gültige Auswahl.");
-            return;
-        };
-
-        // Ankerpunkt-Raster (3×3).
-        ui.label("Referenzpunkt:");
-        ui.horizontal(|ui| {
-            let rows = [
-                [BBoxAnchor::TopLeft, BBoxAnchor::TopCenter, BBoxAnchor::TopRight],
-                [BBoxAnchor::MidLeft, BBoxAnchor::Center, BBoxAnchor::MidRight],
-                [BBoxAnchor::BotLeft, BBoxAnchor::BotCenter, BBoxAnchor::BotRight],
-            ];
-            for row in &rows {
-                ui.vertical(|ui| {
-                    for anchor in row {
-                        let sel = self.multi_anchor == *anchor;
-                        if ui.selectable_label(sel, "●").clicked() {
-                            self.multi_anchor = *anchor;
-                        }
-                    }
-                });
-            }
-        });
-
-        // Position des Ankerpunkts.
-        let (fx, fy) = self.multi_anchor.frac();
-        let anchor_x = bx + bw * fx;
-        let anchor_y = by + bh * fy;
-
-        let mut dx = unit.from_pt(anchor_x);
-        let mut dy = unit.from_pt(anchor_y);
-        let mut dw = unit.from_pt(bw);
-        let mut dh = unit.from_pt(bh);
-
-        ui.horizontal(|ui| {
-            ui.label("X:");
-            ui.add(egui::DragValue::new(&mut dx).speed(0.1).suffix(suffix));
-            ui.label("Y:");
-            ui.add(egui::DragValue::new(&mut dy).speed(0.1).suffix(suffix));
-        });
-        ui.horizontal(|ui| {
-            ui.label("B:");
-            ui.add(egui::DragValue::new(&mut dw).range(0.01..=2000.0).speed(0.1).suffix(suffix));
-            ui.label("H:");
-            ui.add(egui::DragValue::new(&mut dh).range(0.01..=2000.0).speed(0.1).suffix(suffix));
-        });
-
-        // Wenn sich X/Y geändert hat → alle Objekte verschieben.
-        let new_anchor_x = unit.to_pt(dx);
-        let new_anchor_y = unit.to_pt(dy);
-        let delta_x = new_anchor_x - anchor_x;
-        let delta_y = new_anchor_y - anchor_y;
-        if delta_x.abs() > 0.01 || delta_y.abs() > 0.01 {
-            let sel_ids = self.selection.clone();
-            let page_idx = self.page_index;
-            if let Some(page) = self.doc.pages.get_mut(page_idx) {
-                for el in page.elements.iter_mut() {
-                    if sel_ids.contains(&el.id) {
-                        el.x += delta_x;
-                        el.y += delta_y;
-                    }
-                }
-            }
-            self.touch();
-        }
-
-        ui.separator();
-        if ui.button("Alle löschen").clicked() {
-            self.delete_selected();
-        }
     }
 
     fn show_status(&self, ctx: &Context) {

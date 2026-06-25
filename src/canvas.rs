@@ -277,10 +277,9 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                 }
             }
             Active::SelectionBox(start) => {
-                // Auswahl-Rechteck zeichnen.
-                let s = to_screen(start);
-                let e = pointer;
-                let r = Rect::from_two_pos(s, e);
+                // Auswahl-Rechteck zeichnen. `start` und `pointer` sind
+                // beide Screen-Koordinaten — keine Transformation nötig.
+                let r = Rect::from_two_pos(start, pointer);
                 painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(40, 120, 220, 30));
                 painter.add(egui::epaint::RectShape::new(
                     r,
@@ -337,9 +336,9 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                 app.edit_focus = true;
                 app.select_only(id);
             } else {
-                // Leere Fläche → neues Textfeld an der Klickposition (in Seiten-Punkten).
+                // Leere Fläche → neues Textfeld, linke-obere Ecke an der Cursor-Position.
                 let p = to_page(pointer);
-                app.add_text(Some((p.x, p.y)));
+                app.add_text(Some((false, p.x, p.y)));
             }
         }
     }
@@ -391,6 +390,15 @@ fn draw_element(
                 crate::model::TextAlign::Left => {}
                 crate::model::TextAlign::Center => pos.x += (el.w * zoom - galley.size().x) / 2.0,
                 crate::model::TextAlign::Right => pos.x += el.w * zoom - galley.size().x,
+            }
+            match el.valign {
+                crate::model::VAlign::Top => {}
+                crate::model::VAlign::Middle => {
+                    pos.y += (el.h * zoom - galley.size().y) / 2.0;
+                }
+                crate::model::VAlign::Bottom => {
+                    pos.y += el.h * zoom - galley.size().y;
+                }
             }
             painter.galley(pos, galley, color);
         }

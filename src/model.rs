@@ -321,6 +321,20 @@ pub enum TextAlign {
     Right,
 }
 
+/// Vertikale Textausrichtung innerhalb der Element-Box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VAlign {
+    Top,
+    Middle,
+    Bottom,
+}
+
+impl Default for VAlign {
+    fn default() -> Self {
+        VAlign::Top
+    }
+}
+
 /// Nicht-destruktiver Bildausschnitt, normalisiert auf [0.0, 1.0].
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct Crop {
@@ -375,6 +389,8 @@ pub struct Element {
     pub font: String,
     pub color: [u8; 4],
     pub align: TextAlign,
+    #[serde(default)]
+    pub valign: VAlign,
     /// Einzug jeder Zeile in Punkten.
     pub indent: f32,
 
@@ -404,6 +420,7 @@ impl Element {
             font: default_font_key(),
             color: [20, 20, 20, 255],
             align: TextAlign::Left,
+            valign: VAlign::default(),
             indent: 0.0,
             crop: Crop::default(),
             image_w: 0,
@@ -430,6 +447,7 @@ impl Element {
             font: default_font_key(),
             color: [255, 255, 255, 255],
             align: TextAlign::Left,
+            valign: VAlign::default(),
             indent: 0.0,
             crop: Crop::default(),
             image_w: w as u32,
