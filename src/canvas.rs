@@ -187,10 +187,12 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
 
     // --- Neue Interaktion starten ---
     let editing_active = app.editing.is_some();
+    let pointer_in_canvas = pointer.map(|p| rect.contains(p)).unwrap_or(false);
     if matches!(app.interaction, Interaction::None)
         && primary_pressed
         && !editing_active
         && !middle_down
+        && pointer_in_canvas
     {
         if let Some(pointer) = pointer {
             start_interaction(app, page_idx, pointer, to_screen, to_page, zoom);
@@ -198,7 +200,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
     }
 
     // --- Doppelklick → Text bearbeiten ---
-    if double_clicked && !editing_active {
+    if double_clicked && !editing_active && pointer_in_canvas {
         if let Some(pointer) = pointer {
             for el in app.doc.pages[page_idx].elements.iter().rev() {
                 if el.kind == ElementKind::Text && point_in_element(el, pointer, &to_screen, zoom) {
