@@ -438,7 +438,42 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
         }
     }
 
-    // --- Tastatur ---
+    // --- Tastatur: Copy/Paste ---
+    // egui 0.34 wandelt Ctrl+C/V in Event::Copy/Event::Paste um, nicht in
+    // Event::Key. Wir prüfen beide und konsumieren sie, damit TextEdit-Widgets
+    // sie nicht bekommen, wenn wir nicht im Edit-Modus sind.
+    let mut do_copy = false;
+    let mut do_paste = false;
+    ctx.input_mut(|i| {
+        i.events.retain(|e| {
+            match e {
+                egui::Event::Copy => {
+                    if app.editing.is_none() {
+                        do_copy = true;
+                        false // konsumieren
+                    } else {
+                        true
+                    }
+                }
+                egui::Event::Paste(_) => {
+                    if app.editing.is_none() {
+                        do_paste = true;
+                        false // konsumieren
+                    } else {
+                        true
+                    }
+                }
+                _ => true,
+            }
+        });
+    });
+    if do_copy && !app.selection.is_empty() {
+        app.copy_selection();
+    }
+    if do_paste && !app.clipboard.is_empty() {
+        app.start_paste();
+    }
+
     ctx.input(|i| {
         if i.key_pressed(egui::Key::Delete) && app.editing.is_none() && !app.pasting {
             app.delete_selected();
@@ -453,12 +488,6 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                 app.clear_selection();
                 app.interaction = Interaction::None;
             }
-        }
-        if i.key_pressed(egui::Key::C) && i.modifiers.ctrl && app.editing.is_none() {
-            app.copy_selection();
-        }
-        if i.key_pressed(egui::Key::V) && i.modifiers.ctrl && app.editing.is_none() {
-            app.start_paste();
         }
     });
 
