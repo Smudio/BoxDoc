@@ -1116,35 +1116,44 @@ impl EditorApp {
     fn multi_text_section(&mut self, ui: &mut egui::Ui) {
         let sel_ids = self.selection.clone();
 
-        // Nur Text-Elemente betrachten.
-        let page_ref = self.doc.pages.get(self.page_index);
-        let texts: Vec<String> = page_ref
+        // Alle benötigten Daten vorab sammeln, um Borrow-Konflikte zu vermeiden.
+        struct TextData {
+            text: String,
+            font: String,
+            font_size: f32,
+        }
+        let data: Vec<TextData> = self
+            .doc
+            .pages
+            .get(self.page_index)
             .map(|p| {
                 p.elements
                     .iter()
                     .filter(|e| sel_ids.contains(&e.id) && e.kind == ElementKind::Text)
-                    .map(|e| e.text.clone())
+                    .map(|e| TextData {
+                        text: e.text.clone(),
+                        font: e.font.clone(),
+                        font_size: e.font_size,
+                    })
                     .collect()
             })
             .unwrap_or_default();
 
-        if texts.is_empty() {
+        if data.is_empty() {
             return;
         }
 
         ui.heading("Text");
-        ui.label(format!("{} Text-Objekte", texts.len()));
+        ui.label(format!("{} Text-Objekte", data.len()));
 
-        // Gemeinsamer Text?
-        let uniform = texts.iter().all(|t| t == &texts[0]);
-        let mut buf = if uniform {
-            texts[0].clone()
+        // --- Text-Inhalt ---
+        let text_uniform = data.iter().all(|d| d.text == data[0].text);
+        let mut buf = if text_uniform {
+            data[0].text.clone()
         } else {
             String::new()
         };
-
-        // Placeholder bei gemischten Werten.
-        let response = if uniform {
+        let response = if text_uniform {
             ui.add(
                 egui::TextEdit::multiline(&mut buf)
                     .desired_width(f32::INFINITY)
@@ -1158,14 +1167,75 @@ impl EditorApp {
                     .desired_rows(4),
             )
         };
-
-        // Bei Änderung: neuen Text auf alle anwenden.
         if response.changed() {
+            self.push_history();
             let ids = self.selection.clone();
             if let Some(page) = self.doc.pages.get_mut(self.page_index) {
                 for el in page.elements.iter_mut() {
                     if ids.contains(&el.id) && el.kind == ElementKind::Text {
                         el.text = buf.clone();
+                    }
+                }
+            }
+            self.touch();
+        }
+
+        // --- Schriftart ---
+        let font_uniform = data.iter().all(|d| d.font == data[0].font);
+        ui.horizontal(|ui| {
+            ui.label("Schrift:");
+            if font_uniform {
+                let mut chosen: Option<String> = None;
+                for def in crate::model::FONT_CHOICES {
+                    let selected = data[0].font == def.key;
+                    let text = egui::RichText::new(def.display)
+                        .family(crate::fonts::family_for(def.key));
+                    if ui.selectable_label(selected, text).clicked() {
+                        chosen = Some(def.key.to_string());
+                    }
+                }
+                if let Some(k) = chosen {
+                    self.push_history();
+                    let ids = self.selection.clone();
+                    if let Some(page) = self.doc.pages.get_mut(self.page_index) {
+                        for el in page.elements.iter_mut() {
+                            if ids.contains(&el.id) && el.kind == ElementKind::Text {
+                                el.font = k.clone();
+                            }
+                        }
+                    }
+                    self.touch();
+                }
+            } else {
+                ui.label(egui::RichText::new("Unterschiedliche Schriften").weak());
+            }
+        });
+
+        // --- Schriftgröße ---
+        let size_uniform = data.iter().all(|d| (d.font_size - data[0].font_size).abs() < 0.01);
+        let mut ds = if size_uniform {
+            data[0].font_size
+        } else {
+            0.0
+        };
+        let rs = ui.horizontal(|ui| {
+            ui.label("Schriftgröße:");
+            let mut dv = egui::DragValue::new(&mut ds)
+                .range(4.0..=400.0)
+                .speed(0.5)
+                .suffix("pt");
+            if !size_uniform {
+                dv = dv.custom_formatter(|_, _| String::from("—"));
+            }
+            ui.add(dv)
+        }).inner;
+        if rs.changed() {
+            self.push_history();
+            let ids = self.selection.clone();
+            if let Some(page) = self.doc.pages.get_mut(self.page_index) {
+                for el in page.elements.iter_mut() {
+                    if ids.contains(&el.id) && el.kind == ElementKind::Text {
+                        el.font_size = ds;
                     }
                 }
             }
