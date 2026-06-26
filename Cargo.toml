@@ -25,7 +25,7 @@ printpdf = "0.7"
 eframe = { version = "0.34", default-features = false, features = ["glow", "default_fonts"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlAnchorElement", "Blob", "Url", "FileReader", "File", "FileList", "HtmlInputElement"] }
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlAnchorElement", "Blob", "Url", "FileReader", "File", "FileList", "HtmlInputElement", "ClipboardEvent", "DataTransfer", "DataTransferItem"] }
 js-sys = "0.3"
 
 [profile.release]

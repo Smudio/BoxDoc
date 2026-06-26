@@ -459,6 +459,11 @@ impl eframe::App for EditorApp {
         if had_drops {
             ctx.input_mut(|i| i.raw.dropped_files.clear());
         }
+
+        // Web: asynchron geladenes Bild aus dem File-Dialog oder Zwischenablage.
+        if let Some(bytes) = crate::io::take_pending_image() {
+            self.add_image_from_bytes(bytes, None);
+        }
     }
 }
 
@@ -927,23 +932,26 @@ impl EditorApp {
 
         let rw = ui.horizontal(|ui| {
             ui.label("B:");
-            let mut dv = egui::DragValue::new(&mut dw).range(0.01..=2000.0).speed(0.1).suffix(suffix);
+            let mut dv = egui::DragValue::new(&mut dw).range(0.0..=2000.0).speed(0.1).suffix(suffix);
             if !w_uniform {
+                // Wert auf 0.0 lassen und nur als "—" anzeigen.
+                // changed() wird durch den custom_formatter nicht ausgelöst.
                 dv = dv.custom_formatter(|_, _| String::from("—"));
             }
             ui.add(dv)
         }).inner;
         let rh = ui.horizontal(|ui| {
             ui.label("H:");
-            let mut dv = egui::DragValue::new(&mut dh).range(0.01..=2000.0).speed(0.1).suffix(suffix);
+            let mut dv = egui::DragValue::new(&mut dh).range(0.0..=2000.0).speed(0.1).suffix(suffix);
             if !h_uniform {
                 dv = dv.custom_formatter(|_, _| String::from("—"));
             }
             ui.add(dv)
         }).inner;
 
-        // B/H-Änderung auf alle ausgewählten Objekte anwenden.
-        if rw.changed() {
+        // Nur anwenden, wenn der Wert vom Nutzer aktiv geändert wurde
+        // und nicht der "—" Indikator ist.
+        if rw.changed() && w_uniform {
             let new_w = unit.to_pt(dw);
             let ids = self.selection.clone();
             if let Some(page) = self.doc.pages.get_mut(self.page_index) {
@@ -955,7 +963,7 @@ impl EditorApp {
             }
             self.touch();
         }
-        if rh.changed() {
+        if rh.changed() && h_uniform {
             let new_h = unit.to_pt(dh);
             let ids = self.selection.clone();
             if let Some(page) = self.doc.pages.get_mut(self.page_index) {

@@ -29,6 +29,7 @@ fn main() -> eframe::Result<()> {
         Box::new(|cc| {
             fonts::install(&cc.egui_ctx);
             themes::apply(&cc.egui_ctx, model::Theme::default());
+            io::install_clipboard_paste_listener();
             Ok(Box::new(app::EditorApp::default()))
         }),
     )
@@ -57,6 +58,7 @@ fn main() {
                 Box::new(|cc| {
                     fonts::install(&cc.egui_ctx);
                     themes::apply(&cc.egui_ctx, model::Theme::default());
+                    io::install_clipboard_paste_listener();
                     Ok(Box::new(app::EditorApp::default()))
                 }),
             )

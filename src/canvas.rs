@@ -470,8 +470,15 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
     if do_copy && !app.selection.is_empty() {
         app.copy_selection();
     }
-    if do_paste && !app.clipboard.is_empty() {
-        app.start_paste();
+    if do_paste {
+        // Priorität 1: Bild aus der Zwischenablage (Native).
+        if let Some(img_bytes) = crate::io::poll_clipboard_image() {
+            app.add_image_from_bytes(img_bytes, None);
+        }
+        // Priorität 2: BoxDoc-Objekte aus der eigenen Zwischenablage.
+        else if !app.clipboard.is_empty() {
+            app.start_paste();
+        }
     }
 
     // Undo/Redo über rohe Key-Events (egui konsumiert Ctrl+Z sonst).

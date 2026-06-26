@@ -105,6 +105,32 @@ mod native {
         }
     }
 
+    /// Liefert ein Bild aus der Zwischenablage (Windows).
+    #[cfg(target_os = "windows")]
+    pub fn poll_clipboard_image() -> Option<Vec<u8>> {
+        // Clipboard-Bild als BMP über eine temporäre Datei via PowerShell lesen.
+        let temp = std::env::temp_dir().join("boxdoc_clip.png");
+        let ps = format!(
+            r#"$ErrorActionPreference='SilentlyContinue'; Add-Type -AssemblyName System.Windows.Forms; $img=[System.Windows.Forms.Clipboard]::GetImage(); if ($img) {{ $img.Save('{}') }}"#,
+            temp.display()
+        );
+        let _ = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
+            .output();
+        if temp.exists() {
+            let bytes = std::fs::read(&temp).ok();
+            let _ = std::fs::remove_file(&temp);
+            bytes.filter(|b| b.starts_with(&[0x89, b'P', b'N', b'G']))
+        } else {
+            None
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub fn poll_clipboard_image() -> Option<Vec<u8>> {
+        None
+    }
+
     pub fn export_odt_dialog(app: &mut EditorApp) {
         let mut dlg = rfd::FileDialog::new()
             .add_filter("OpenDocument", &["odt"])
@@ -172,7 +198,7 @@ mod native {
         }
     }
 
-    fn save_project(path: &std::path::Path, app: &EditorApp) -> IoResult<()> {
+    fn save_project(path: &std::path::Path, app: &EditorApp) -> std::io::Result<()> {
         let images: Vec<ProjectImage> = app
             .images
             .map
@@ -191,7 +217,7 @@ mod native {
         std::fs::write(path, json)
     }
 
-    fn load_project(path: &std::path::Path) -> IoResult<(Document, ImageStore, u64)> {
+    fn load_project(path: &std::path::Path) -> std::io::Result<(Document, ImageStore, u64)> {
         let json = std::fs::read_to_string(path)?;
         let project: Project = serde_json::from_str(&json)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -215,10 +241,6 @@ mod native {
     }
 }
 
-// ===========================================================================
-// Web
-// ===========================================================================
-
 #[cfg(target_arch = "wasm32")]
 mod web_impl {
     use super::{EditorApp, Project, ProjectImage};
@@ -229,7 +251,6 @@ mod web_impl {
     }
 
     pub fn save_project_dialog(app: &mut EditorApp, _save_as: bool) {
-        // JSON serialisieren und als Download anbieten.
         let images: Vec<ProjectImage> = app
             .images
             .map
@@ -254,7 +275,12 @@ mod web_impl {
     }
 
     pub fn open_image_dialog(app: &mut EditorApp) {
-        app.set_status("Web: Bild per Drag&Drop auf die Zeichenfläche ziehen.");
+        super::trigger_file_input();
+        app.set_status("Bild auswählen…");
+    }
+
+    pub fn poll_clipboard_image() -> Option<Vec<u8>> {
+        None // auf Web übernimmt der paste-Listener + take_pending_image
     }
 
     pub fn export_odt_dialog(app: &mut EditorApp) {
@@ -311,3 +337,108 @@ pub use native::*;
 
 #[cfg(target_arch = "wasm32")]
 pub use web_impl::*;
+
+// ===========================================================================
+// Web: Globaler Puffer für asynchron geladene Dateien
+// ===========================================================================
+
+#[cfg(target_arch = "wasm32")]
+static PENDING_IMAGE: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
+
+#[cfg(target_arch = "wasm32")]
+fn trigger_file_input() {
+    use wasm_bindgen::JsCast;
+    use web_sys::HtmlInputElement;
+
+    let document = web_sys::window().unwrap().document().unwrap();
+    let input = document
+        .create_element("input")
+        .unwrap()
+        .dyn_into::<HtmlInputElement>()
+        .unwrap();
+    input.set_type("file");
+    input.set_accept("image/png,image/jpeg,image/bmp,image/webp");
+    input.set_multiple(false);
+
+    let onchange: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)> =
+        wasm_bindgen::closure::Closure::new(move |event: web_sys::Event| {
+            let input: Option<HtmlInputElement> = event
+                .target()
+                .and_then(|t| t.dyn_into::<HtmlInputElement>().ok());
+            let Some(input) = input else { return };
+            let Some(file) = input.files().and_then(|f| f.get(0)) else { return };
+
+            let reader = web_sys::FileReader::new().unwrap();
+            let _ = reader.read_as_array_buffer(&file);
+
+            let onload: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)> = {
+                let reader = reader.clone();
+                wasm_bindgen::closure::Closure::new(move |_e: web_sys::Event| {
+                    if let Ok(result) = reader.result() {
+                        let uint8 = js_sys::Uint8Array::new(&result).to_vec();
+                        if let Ok(mut p) = PENDING_IMAGE.lock() {
+                            *p = Some(uint8);
+                        }
+                    }
+                })
+            };
+            reader.set_onload(Some(onload.as_ref().unchecked_ref()));
+            onload.forget();
+        });
+
+    input.set_onchange(Some(onchange.as_ref().unchecked_ref()));
+    onchange.forget();
+    input.click();
+}
+
+/// Registriert einen paste-Listener auf Window-Ebene, der Bilder aus der
+/// Zwischenablage abfängt. Muss einmal beim Start aufgerufen werden.
+#[cfg(target_arch = "wasm32")]
+pub fn install_clipboard_paste_listener() {
+    use wasm_bindgen::JsCast;
+    let cb: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)> =
+        wasm_bindgen::closure::Closure::new(|event: web_sys::Event| {
+            let Some(evt) = event.dyn_ref::<web_sys::ClipboardEvent>() else { return };
+            let Some(data) = evt.clipboard_data() else { return };
+            let Some(files) = data.files() else { return };
+            for i in 0..files.length() {
+                let Some(file) = files.get(i) else { continue };
+                if file.type_().starts_with("image/") {
+                    let reader = web_sys::FileReader::new().unwrap();
+                    let _ = reader.read_as_array_buffer(&file);
+                    let onload: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)> = {
+                        let reader = reader.clone();
+                        wasm_bindgen::closure::Closure::new(move |_e: web_sys::Event| {
+                            if let Ok(result) = reader.result() {
+                                let bytes = js_sys::Uint8Array::new(&result).to_vec();
+                                if let Ok(mut p) = PENDING_IMAGE.lock() {
+                                    *p = Some(bytes);
+                                }
+                            }
+                        })
+                    };
+                    reader.set_onload(Some(onload.as_ref().unchecked_ref()));
+                    onload.forget();
+                    break;
+                }
+            }
+        });
+    let window = web_sys::window().unwrap();
+    let _ = window.add_event_listener_with_callback("paste", cb.as_ref().unchecked_ref());
+    cb.forget();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn install_clipboard_paste_listener() {}
+
+/// Auf Web: gibt die zuletzt geladenen Bild-Bytes zurück (falls vorhanden)
+/// und leert den Puffer. Auf Native immer `None`.
+#[cfg(target_arch = "wasm32")]
+pub fn take_pending_image() -> Option<Vec<u8>> {
+    PENDING_IMAGE.lock().unwrap().take()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn take_pending_image() -> Option<Vec<u8>> {
+    None
+}
