@@ -552,6 +552,8 @@ impl EditorApp {
                     ui.separator();
                     self.align_section(ui);
                     ui.separator();
+                    self.multi_text_section(ui);
+                    ui.separator();
                     if ui.button("Alle löschen").clicked() {
                         self.delete_selected();
                     }
@@ -997,6 +999,68 @@ impl EditorApp {
             }
         }
         self.touch();
+    }
+
+    /// Text-Feld für Mehrfachauswahl.
+    /// Zeigt den gemeinsamen Text an, oder leer bei unterschiedlichen Inhalten.
+    fn multi_text_section(&mut self, ui: &mut egui::Ui) {
+        let sel_ids = self.selection.clone();
+
+        // Nur Text-Elemente betrachten.
+        let page_ref = self.doc.pages.get(self.page_index);
+        let texts: Vec<String> = page_ref
+            .map(|p| {
+                p.elements
+                    .iter()
+                    .filter(|e| sel_ids.contains(&e.id) && e.kind == ElementKind::Text)
+                    .map(|e| e.text.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if texts.is_empty() {
+            return;
+        }
+
+        ui.heading("Text");
+        ui.label(format!("{} Text-Objekte", texts.len()));
+
+        // Gemeinsamer Text?
+        let uniform = texts.iter().all(|t| t == &texts[0]);
+        let mut buf = if uniform {
+            texts[0].clone()
+        } else {
+            String::new()
+        };
+
+        // Placeholder bei gemischten Werten.
+        let response = if uniform {
+            ui.add(
+                egui::TextEdit::multiline(&mut buf)
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(4),
+            )
+        } else {
+            ui.add(
+                egui::TextEdit::multiline(&mut buf)
+                    .hint_text("Unterschiedliche Texte — Eingabe überschreibt alle")
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(4),
+            )
+        };
+
+        // Bei Änderung: neuen Text auf alle anwenden.
+        if response.changed() {
+            let ids = self.selection.clone();
+            if let Some(page) = self.doc.pages.get_mut(self.page_index) {
+                for el in page.elements.iter_mut() {
+                    if ids.contains(&el.id) && el.kind == ElementKind::Text {
+                        el.text = buf.clone();
+                    }
+                }
+            }
+            self.touch();
+        }
     }
 
     // =======================================================================
