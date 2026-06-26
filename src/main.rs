@@ -9,6 +9,7 @@ mod model;
 mod odt;
 mod printing;
 mod store;
+mod themes;
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -24,6 +25,8 @@ fn main() -> eframe::Result<()> {
         Box::new(|cc| {
             // Schriften beim Start registrieren.
             fonts::install(&cc.egui_ctx);
+            // Standard-Thema anwenden.
+            themes::apply(&cc.egui_ctx, model::Theme::default());
             Ok(Box::new(app::EditorApp::default()))
         }),
     )

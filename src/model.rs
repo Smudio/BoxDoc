@@ -166,12 +166,42 @@ impl ScrollMode {
     }
 }
 
+/// Farb-Thema der Anwendung.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Theme {
+    Light,
+    DarkClassic,
+    DarkCalm,
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Theme::Light
+    }
+}
+
+impl Theme {
+    pub fn label(self) -> &'static str {
+        match self {
+            Theme::Light => "Hell",
+            Theme::DarkClassic => "Dunkel (Klassisch)",
+            Theme::DarkCalm => "Dunkel (Calm)",
+        }
+    }
+
+    pub fn all() -> [Theme; 3] {
+        [Theme::Light, Theme::DarkClassic, Theme::DarkCalm]
+    }
+}
+
 /// Globale Anwendungseinstellungen.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Settings {
     pub units: Units,
     pub page_align: PageAlign,
     pub scroll_mode: ScrollMode,
+    #[serde(default)]
+    pub theme: Theme,
 }
 
 // ===========================================================================

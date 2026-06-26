@@ -442,6 +442,17 @@ impl EditorApp {
                 });
 
                 ui.menu_button("Ansicht", |ui| {
+                    ui.label("Thema:");
+                    let mut theme = self.settings.theme;
+                    for t in crate::model::Theme::all() {
+                        ui.selectable_value(&mut theme, t, t.label());
+                    }
+                    if theme != self.settings.theme {
+                        self.settings.theme = theme;
+                        crate::themes::apply(ctx, theme);
+                    }
+
+                    ui.separator();
                     ui.label("Seitenausrichtung:");
                     let mut align = self.settings.page_align;
                     ui.selectable_value(&mut align, PageAlign::Left, "Linksbündig");
