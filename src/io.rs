@@ -31,7 +31,7 @@ mod native {
 
     use base64::Engine;
 
-    use super::{EditorApp, ImageStore, Project, ProjectImage};
+    use super::{Document, EditorApp, ImageStore, Project, ProjectImage};
 
     type IoResult<T> = std::io::Result<T>;
 
