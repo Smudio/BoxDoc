@@ -489,6 +489,37 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                 app.interaction = Interaction::None;
             }
         }
+
+        // Pfeiltasten: Auswahl verschieben (1 pt pro Druck, 10 pt mit Shift).
+        if app.editing.is_none() && !app.selection.is_empty() {
+            let step = if i.modifiers.shift { 10.0 } else { 1.0 };
+            let mut dx = 0.0;
+            let mut dy = 0.0;
+            if i.key_pressed(egui::Key::ArrowLeft) {
+                dx = -step;
+            }
+            if i.key_pressed(egui::Key::ArrowRight) {
+                dx = step;
+            }
+            if i.key_pressed(egui::Key::ArrowUp) {
+                dy = -step;
+            }
+            if i.key_pressed(egui::Key::ArrowDown) {
+                dy = step;
+            }
+            if dx != 0.0 || dy != 0.0 {
+                let ids = app.selection.clone();
+                if let Some(page) = app.doc.pages.get_mut(app.page_index) {
+                    for el in page.elements.iter_mut() {
+                        if ids.contains(&el.id) {
+                            el.x += dx;
+                            el.y += dy;
+                        }
+                    }
+                }
+                app.touch();
+            }
+        }
     });
 
     painter.text(
