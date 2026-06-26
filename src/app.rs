@@ -152,6 +152,12 @@ pub struct EditorApp {
     pub clip_origins: Vec<(f32, f32)>,
     /// Paste-Modus aktiv: Preview folgt dem Cursor, Klick platziert.
     pub pasting: bool,
+    /// Theme-Fade: Quell-Thema.
+    pub theme_from: crate::model::Theme,
+    /// Theme-Fade: Ziel-Thema (= settings.theme).
+    pub theme_target: crate::model::Theme,
+    /// Theme-Fade: Fortschritt 0..1.
+    pub theme_anim: f32,
 }
 
 impl EditorApp {
@@ -206,6 +212,9 @@ impl Default for EditorApp {
             clipboard: Vec::new(),
             clip_origins: Vec::new(),
             pasting: false,
+            theme_from: crate::model::Theme::default(),
+            theme_target: crate::model::Theme::default(),
+            theme_anim: 1.0,
         }
     }
 }
@@ -340,6 +349,19 @@ impl EditorApp {
 impl eframe::App for EditorApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
+        // Theme-Fade animieren.
+        if self.theme_anim < 1.0 {
+            let dt = ctx.input(|i| i.unstable_dt).min(0.1);
+            self.theme_anim = (self.theme_anim + dt / crate::themes::fade_duration()).min(1.0);
+            crate::themes::tick_fade(
+                &ctx,
+                self.theme_from,
+                self.theme_target,
+                self.theme_anim,
+            );
+        }
+
         self.show_menu(&ctx);
         self.show_properties(&ctx);
         self.show_status(&ctx);
@@ -456,8 +478,10 @@ impl EditorApp {
                         ui.selectable_value(&mut theme, t, t.label());
                     }
                     if theme != self.settings.theme {
+                        self.theme_from = self.theme_target;
+                        self.theme_target = theme;
+                        self.theme_anim = 0.0;
                         self.settings.theme = theme;
-                        crate::themes::apply(ctx, theme);
                     }
 
                     ui.separator();
