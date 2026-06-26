@@ -6,15 +6,35 @@ description = "Ein simples, leistungsstarkes und zuverlässiges Dokumenten-Progr
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-eframe = { version = "0.34", default-features = false, features = ["glow", "wayland", "x11"] }
+eframe = { version = "0.34", default-features = false, features = ["glow"] }
 egui = "0.34"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "webp", "ico"] }
-rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
+
+# Native-only Dependencies
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+eframe = { version = "0.34", default-features = false, features = ["glow", "wayland", "x11"] }
+rfd = "0.15"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 printpdf = "0.7"
 
+# Web-only Dependencies
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+eframe = { version = "0.34", default-features = false, features = ["glow", "default_fonts"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlAnchorElement", "Blob", "Url", "FileReader", "File", "FileList", "HtmlInputElement"] }
+js-sys = "0.3"
+
 [profile.release]
 opt-level = 2
+
+# Web-Release: kleinere WASM-Binaries
+[profile.wasm-release]
+inherits = "release"
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"

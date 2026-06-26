@@ -6,11 +6,14 @@ mod fonts;
 mod geometry;
 mod io;
 mod model;
+#[cfg(not(target_arch = "wasm32"))]
 mod odt;
+#[cfg(not(target_arch = "wasm32"))]
 mod printing;
 mod store;
 mod themes;
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -23,11 +26,40 @@ fn main() -> eframe::Result<()> {
         "BoxDoc",
         options,
         Box::new(|cc| {
-            // Schriften beim Start registrieren.
             fonts::install(&cc.egui_ctx);
-            // Standard-Thema anwenden.
             themes::apply(&cc.egui_ctx, model::Theme::default());
             Ok(Box::new(app::EditorApp::default()))
         }),
     )
+}
+
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    use wasm_bindgen::JsCast;
+    use web_sys::HtmlCanvasElement;
+
+    let web_options = eframe::WebOptions::default();
+
+    wasm_bindgen_futures::spawn_local(async {
+        let document = web_sys::window().unwrap().document().unwrap();
+        let canvas = document
+            .get_element_by_id("the_canvas_id")
+            .unwrap()
+            .dyn_into::<HtmlCanvasElement>()
+            .unwrap()
+            .clone();
+
+        eframe::WebRunner::new()
+            .start(
+                canvas,
+                web_options,
+                Box::new(|cc| {
+                    fonts::install(&cc.egui_ctx);
+                    themes::apply(&cc.egui_ctx, model::Theme::default());
+                    Ok(Box::new(app::EditorApp::default()))
+                }),
+            )
+            .await
+            .expect("failed to start eframe");
+    });
 }

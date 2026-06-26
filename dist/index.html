@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>BoxDoc</title>
+    
+<script type="module">
+import init, * as bindings from '/boxdoc-e3602be714dad110.js';
+const wasm = await init({ module_or_path: '/boxdoc-e3602be714dad110_bg.wasm' });
+
+
+window.wasmBindings = bindings;
+
+
+dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
+
+</script>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        width: 100%;
+        height: 100%;
+        background: #2a282e;
+      }
+      #the_canvas_id {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+      .loading {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        color: #aaa;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        font-size: 16px;
+      }
+    </style>
+  <link rel="modulepreload" href="/boxdoc-e3602be714dad110.js" crossorigin="anonymous" integrity="sha384-o9vx0EgwzKnK5sXGtgpQXoXs2K/tEPDc/oanRGVVfPpC7yfzmqSUSKRry8lWyGQV"><link rel="preload" href="/boxdoc-e3602be714dad110_bg.wasm" crossorigin="anonymous" integrity="sha384-QB+na7fonUFOvcFoKQ0Xi4dg+NqGGg8AgRRFgXptFINhDMV44fNlrJd055VzJGFi" as="fetch" type="application/wasm"></head>
+  <body>
+    <div class="loading" id="loading">BoxDoc wird geladen…</div>
+    <canvas id="the_canvas_id"></canvas>
+    <script>
+      window.addEventListener('load', function() {
+        var loading = document.getElementById('loading');
+        if (loading) loading.style.display = 'none';
+      });
+    </script>
+  </body>
+</html>

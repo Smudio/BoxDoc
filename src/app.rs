@@ -390,19 +390,27 @@ impl EditorApp {
                     if ui.button("Speichern unter…").clicked() {
                         crate::io::save_project_dialog(self, true);
                     }
-                    ui.separator();
-                    if ui.button("ODT exportieren…").clicked() {
-                        crate::io::export_odt_dialog(self);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        ui.separator();
+                        if ui.button("ODT exportieren…").clicked() {
+                            crate::io::export_odt_dialog(self);
+                        }
+                        if ui.button("ODT öffnen…").clicked() {
+                            crate::io::import_odt_dialog(self);
+                        }
+                        ui.separator();
+                        if ui.button("PDF exportieren…").clicked() {
+                            crate::printing::export_pdf_dialog(self);
+                        }
+                        if ui.button("Drucken…").clicked() {
+                            crate::printing::print_dialog(self);
+                        }
                     }
-                    if ui.button("ODT öffnen…").clicked() {
-                        crate::io::import_odt_dialog(self);
-                    }
-                    ui.separator();
-                    if ui.button("PDF exportieren…").clicked() {
-                        crate::printing::export_pdf_dialog(self);
-                    }
-                    if ui.button("Drucken…").clicked() {
-                        crate::printing::print_dialog(self);
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        ui.separator();
+                        ui.label(egui::RichText::new("ODT/PDF/Druck: nur Desktop-Version").weak());
                     }
                     ui.separator();
                     ui.menu_button("Einstellungen", |ui| {
