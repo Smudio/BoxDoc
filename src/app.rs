@@ -373,23 +373,31 @@ impl eframe::App for EditorApp {
             });
 
         // Dateien, die per Drag&Drop herein gezogen wurden.
-        let dropped: Vec<PathBuf> = ctx.input(|i| {
-            i.raw
-                .dropped_files
-                .iter()
-                .filter_map(|f| f.path.clone())
-                .collect()
-        });
-        for path in &dropped {
-            if let Ok(bytes) = std::fs::read(path) {
-                if bytes.starts_with(&[0x89, b'P', b'N', b'G'])
+        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        let mut had_drops = false;
+        for f in &dropped {
+            let bytes = if let Some(bytes) = &f.bytes {
+                // Web: Bytes direkt verfügbar.
+                Some(bytes.to_vec())
+            } else if let Some(path) = &f.path {
+                // Native: Datei vom Pfad lesen.
+                std::fs::read(path).ok()
+            } else {
+                None
+            };
+
+            if let Some(bytes) = bytes {
+                let is_image = bytes.starts_with(&[0x89, b'P', b'N', b'G'])
                     || bytes.starts_with(&[0xFF, 0xD8, 0xFF])
-                {
+                    || bytes.starts_with(b"BM")
+                    || f.mime.starts_with("image/");
+                if is_image {
                     self.add_image_from_bytes(bytes, None);
+                    had_drops = true;
                 }
             }
         }
-        if !dropped.is_empty() {
+        if had_drops {
             ctx.input_mut(|i| i.raw.dropped_files.clear());
         }
     }
