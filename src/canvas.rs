@@ -185,6 +185,89 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
         }
     }
 
+    // --- Paste: Ghost + Preview Rendering ---
+    if app.pasting && !app.clipboard.is_empty() {
+        let ghost_fill = Color32::from_rgba_unmultiplied(100, 160, 230, 20);
+        let ghost_stroke = Stroke::new(1.0, Color32::from_rgba_unmultiplied(100, 160, 230, 70));
+
+        // Ghost an Originalpositionen.
+        for (i, el) in app.clipboard.iter().enumerate() {
+            let (gx, gy) = app.clip_origins[i];
+            let r = Rect::from_min_size(
+                to_screen(Pos2::new(gx, gy)),
+                Vec2::new(el.w, el.h) * zoom,
+            );
+            painter.rect_filled(r, 2.0, ghost_fill);
+            painter.add(egui::epaint::RectShape::new(
+                r, 2.0, Color32::TRANSPARENT, ghost_stroke, egui::StrokeKind::Inside,
+            ));
+            // Ghost-Text rendern.
+            if el.kind == ElementKind::Text && !el.text.is_empty() {
+                let font = FontId::new(el.font_size * zoom, crate::fonts::family_for(&el.font));
+                let color = Color32::from_rgba_unmultiplied(100, 160, 230, 50);
+                let galley = painter.layout(el.text.clone(), font, color, (el.w * zoom).max(1.0));
+                painter.galley(to_screen(Pos2::new(gx, gy)), galley, color);
+            }
+        }
+
+        // Preview am Cursor + Snap-Erkennung.
+        if let Some(pt) = pointer {
+            let cp = to_page(pt);
+            let ref_origin = app.clip_origins[0];
+            let ref_screen = to_screen(Pos2::new(ref_origin.0, ref_origin.1));
+            let snapped = pt.distance(ref_screen) < 16.0;
+
+            let paste_ref = if snapped {
+                ref_origin
+            } else {
+                (cp.x, cp.y)
+            };
+
+            let (p_fill, p_stroke) = if snapped {
+                (
+                    Color32::from_rgba_unmultiplied(80, 200, 120, 50),
+                    Stroke::new(1.5, Color32::from_rgb(80, 200, 120)),
+                )
+            } else {
+                (
+                    Color32::from_rgba_unmultiplied(40, 120, 220, 40),
+                    Stroke::new(1.5, Color32::from_rgb(40, 120, 220)),
+                )
+            };
+
+            for (i, el) in app.clipboard.iter().enumerate() {
+                let rel_x = app.clip_origins[i].0 - ref_origin.0;
+                let rel_y = app.clip_origins[i].1 - ref_origin.1;
+                let (px, py) = (paste_ref.0 + rel_x, paste_ref.1 + rel_y);
+                let r = Rect::from_min_size(
+                    to_screen(Pos2::new(px, py)),
+                    Vec2::new(el.w, el.h) * zoom,
+                );
+                painter.rect_filled(r, 2.0, p_fill);
+                painter.add(egui::epaint::RectShape::new(
+                    r, 2.0, Color32::TRANSPARENT, p_stroke, egui::StrokeKind::Inside,
+                ));
+                // Preview-Text rendern.
+                if el.kind == ElementKind::Text && !el.text.is_empty() {
+                    let font = FontId::new(el.font_size * zoom, crate::fonts::family_for(&el.font));
+                    let color = Color32::from_rgba_unmultiplied(el.color[0], el.color[1], el.color[2], 160);
+                    let galley = painter.layout(el.text.clone(), font, color, (el.w * zoom).max(1.0));
+                    painter.galley(to_screen(Pos2::new(px, py)), galley, color);
+                }
+            }
+
+            if snapped {
+                painter.text(
+                    pt + Vec2::new(12.0, -20.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    "◉ Snap",
+                    FontId::proportional(12.0),
+                    Color32::from_rgb(80, 200, 120),
+                );
+            }
+        }
+    }
+
     // --- Interaktion beenden ---
     if primary_released {
         match app.interaction {
@@ -292,16 +375,28 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
         }
     }
 
-    // --- Neue Interaktion starten ---
+    // --- Gemeinsame Eingabe-Flags ---
     let editing_active = app.editing.is_some();
     let pointer_in_canvas = pointer.map(|p| rect.contains(p)).unwrap_or(false);
-    // Liegt über dem Pointer eine höhere Ebene (Farbwähler-Popup, Menü etc.)?
-    // Dann gehört der Klick der UI und darf die Auswahl nicht verändern.
     let click_on_ui = pointer
         .and_then(|p| ctx.layer_id_at(p))
         .map(|lid| lid.order != egui::Order::Background)
         .unwrap_or(false);
-    if matches!(app.interaction, Interaction::None)
+
+    // --- Paste-Modus: Klick bestätigt das Einfügen ---
+    if app.pasting && primary_pressed && pointer_in_canvas && !click_on_ui {
+        if let Some(pt) = pointer {
+            let cp = to_page(pt);
+            let ref_origin = app.clip_origins[0];
+            let ref_screen = to_screen(Pos2::new(ref_origin.0, ref_origin.1));
+            let snapped = pt.distance(ref_screen) < 16.0;
+            app.confirm_paste((cp.x, cp.y), snapped);
+        }
+    }
+
+    // --- Neue Interaktion starten (nur wenn nicht am Pasten) ---
+    if !app.pasting
+        && matches!(app.interaction, Interaction::None)
         && primary_pressed
         && !editing_active
         && !middle_down
@@ -314,8 +409,8 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
         }
     }
 
-    // --- Doppelklick → Text bearbeiten ---
-    if double_clicked && !editing_active && pointer_in_canvas && !click_on_ui {
+    // --- Doppelklick → Text bearbeiten (nur wenn nicht am Pasten) ---
+    if !app.pasting && double_clicked && !editing_active && pointer_in_canvas && !click_on_ui {
         if let Some(pointer) = pointer {
             // Wenn ein bestehendes Text-Objekt getroffen wird → bearbeiten.
             let mut hit_text = None;
@@ -345,21 +440,32 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
 
     // --- Tastatur ---
     ctx.input(|i| {
-        if i.key_pressed(egui::Key::Delete) && app.editing.is_none() {
+        if i.key_pressed(egui::Key::Delete) && app.editing.is_none() && !app.pasting {
             app.delete_selected();
         }
         if i.key_pressed(egui::Key::Escape) {
-            app.crop_mode = false;
-            app.editing = None;
-            app.clear_selection();
-            app.interaction = Interaction::None;
+            if app.pasting {
+                app.pasting = false;
+                app.status = String::from("Einfügen abgebrochen.");
+            } else {
+                app.crop_mode = false;
+                app.editing = None;
+                app.clear_selection();
+                app.interaction = Interaction::None;
+            }
+        }
+        if i.key_pressed(egui::Key::C) && i.modifiers.ctrl && app.editing.is_none() {
+            app.copy_selection();
+        }
+        if i.key_pressed(egui::Key::V) && i.modifiers.ctrl && app.editing.is_none() {
+            app.start_paste();
         }
     });
 
     painter.text(
         rect.left_top() + Vec2::new(8.0, 6.0),
         egui::Align2::LEFT_TOP,
-        "Strg+Scroll = Zoom · Mittel-Taste = Verschieben · Entf = Löschen · Esc = Abbrechen",
+        "Strg+Scroll = Zoom · Strg+C/V = Kopieren/Einfügen · Entf = Löschen · Esc = Abbrechen",
         FontId::proportional(11.0),
         Color32::from_gray(150),
     );

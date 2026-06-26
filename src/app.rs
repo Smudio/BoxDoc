@@ -138,6 +138,12 @@ pub struct EditorApp {
     pub pos_x: f32,
     pub pos_y: f32,
     pub pos_last_sel: Vec<u64>,
+    /// Zwischenablage für Copy/Paste.
+    pub clipboard: Vec<Element>,
+    /// Ursprüngliche Positionen der kopierten Elemente (für Ghost + Snap).
+    pub clip_origins: Vec<(f32, f32)>,
+    /// Paste-Modus aktiv: Preview folgt dem Cursor, Klick platziert.
+    pub pasting: bool,
 }
 
 impl EditorApp {
@@ -189,6 +195,9 @@ impl Default for EditorApp {
             pos_x: 0.0,
             pos_y: 0.0,
             pos_last_sel: Vec::new(),
+            clipboard: Vec::new(),
+            clip_origins: Vec::new(),
+            pasting: false,
         }
     }
 }
@@ -838,6 +847,88 @@ impl EditorApp {
             }
         }
         self.touch();
+    }
+
+    // =======================================================================
+    // Copy / Paste
+    // =======================================================================
+
+    /// Kopiert alle ausgewählten Elemente in die Zwischenablage.
+    pub fn copy_selection(&mut self) {
+        let sel_ids = self.selection.clone();
+        let Some(page) = self.doc.pages.get(self.page_index) else {
+            return;
+        };
+        self.clipboard.clear();
+        self.clip_origins.clear();
+        for el in page.elements.iter().filter(|e| sel_ids.contains(&e.id)) {
+            self.clipboard.push(el.clone());
+            self.clip_origins.push((el.x, el.y));
+        }
+        if !self.clipboard.is_empty() {
+            self.status = format!("{} Objekt(e) kopiert.", self.clipboard.len());
+        }
+    }
+
+    /// Startet den Paste-Modus: Preview folgt dem Cursor bis zum Klick.
+    pub fn start_paste(&mut self) {
+        if self.clipboard.is_empty() {
+            return;
+        }
+        self.pasting = true;
+        self.clear_selection();
+        self.status = String::from("Klicke zum Platzieren · Esc bricht ab.");
+    }
+
+    /// Bestätigt das Einfügen: erstellt echte Elemente mit neuen IDs.
+    /// `snapped` → Elemente landen exakt an den Originalpositionen.
+    pub fn confirm_paste(&mut self, cursor_page: (f32, f32), snapped: bool) {
+        if self.clipboard.is_empty() {
+            self.pasting = false;
+            return;
+        }
+        let ref_origin = self.clip_origins[0];
+        let paste_ref = if snapped {
+            ref_origin
+        } else {
+            cursor_page
+        };
+
+        // Daten vorab klonen, um Borrow-Konflikte zu vermeiden.
+        let items: Vec<(Element, (f32, f32))> = self
+            .clipboard
+            .iter()
+            .zip(self.clip_origins.iter())
+            .map(|(el, origin)| (el.clone(), *origin))
+            .collect();
+
+        let mut new_ids = Vec::new();
+        for (mut new_el, origin) in items {
+            let old_id = new_el.id;
+            let new_id = self.next_id();
+
+            // Bei Bildern: Bilddaten kopieren.
+            if new_el.kind == ElementKind::Image {
+                let img_data = self.images.map.get(&old_id).map(|e| (e.png.clone(), e.dim));
+                if let Some((png, dim)) = img_data {
+                    self.images.insert(new_id, png, dim);
+                }
+            }
+
+            new_el.id = new_id;
+            new_el.x = paste_ref.0 + (origin.0 - ref_origin.0);
+            new_el.y = paste_ref.1 + (origin.1 - ref_origin.1);
+
+            if let Some(page) = self.doc.current_page_mut(self.page_index) {
+                page.elements.push(new_el);
+            }
+            new_ids.push(new_id);
+        }
+
+        self.selection = new_ids;
+        self.pasting = false;
+        self.modified = true;
+        self.status = String::from("Eingefügt.");
     }
 
     /// Achsenausgerichtete Bounding-Box aller ausgewählten Elemente (in pt).
