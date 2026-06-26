@@ -742,8 +742,6 @@ impl EditorApp {
         // DragValues an den Puffer binden (nicht an die Live-Berechnung).
         let mut dx = unit.from_pt(self.pos_x);
         let mut dy = unit.from_pt(self.pos_y);
-        let mut dw = unit.from_pt(bw);
-        let mut dh = unit.from_pt(bh);
 
         let before_x = dx;
         let before_y = dy;
@@ -754,14 +752,74 @@ impl EditorApp {
             ui.label("Y:");
             ui.add(egui::DragValue::new(&mut dy).speed(0.1).suffix(suffix));
         });
-        ui.horizontal(|ui| {
-            ui.label("B:");
-            ui.add(egui::DragValue::new(&mut dw).range(0.01..=2000.0).speed(0.1).suffix(suffix));
-            ui.label("H:");
-            ui.add(egui::DragValue::new(&mut dh).range(0.01..=2000.0).speed(0.1).suffix(suffix));
-        });
 
-        // Delta nur aus NUTZER-Änderung berechnen (Vergleich Vorher/Nachher).
+        // --- B/H: einzelne Element-Größen, "—" bei gemischten Werten ---
+        let sel_ids = self.selection.clone();
+        let page_ref = self.doc.pages.get(self.page_index);
+        let sel_els: Vec<&Element> = page_ref
+            .map(|p| p.elements.iter().filter(|e| sel_ids.contains(&e.id)).collect())
+            .unwrap_or_default();
+
+        let widths: Vec<f32> = sel_els.iter().map(|e| e.w).collect();
+        let heights: Vec<f32> = sel_els.iter().map(|e| e.h).collect();
+        let w_uniform = widths.iter().all(|&w| (w - widths[0]).abs() < 0.01);
+        let h_uniform = heights.iter().all(|&h| (h - heights[0]).abs() < 0.01);
+
+        let mut dw = if w_uniform {
+            unit.from_pt(widths[0])
+        } else {
+            0.0
+        };
+        let mut dh = if h_uniform {
+            unit.from_pt(heights[0])
+        } else {
+            0.0
+        };
+
+        let rw = ui.horizontal(|ui| {
+            ui.label("B:");
+            let mut dv = egui::DragValue::new(&mut dw).range(0.01..=2000.0).speed(0.1).suffix(suffix);
+            if !w_uniform {
+                dv = dv.custom_formatter(|_, _| String::from("—"));
+            }
+            ui.add(dv)
+        }).inner;
+        let rh = ui.horizontal(|ui| {
+            ui.label("H:");
+            let mut dv = egui::DragValue::new(&mut dh).range(0.01..=2000.0).speed(0.1).suffix(suffix);
+            if !h_uniform {
+                dv = dv.custom_formatter(|_, _| String::from("—"));
+            }
+            ui.add(dv)
+        }).inner;
+
+        // B/H-Änderung auf alle ausgewählten Objekte anwenden.
+        if rw.changed() {
+            let new_w = unit.to_pt(dw);
+            let ids = self.selection.clone();
+            if let Some(page) = self.doc.pages.get_mut(self.page_index) {
+                for el in page.elements.iter_mut() {
+                    if ids.contains(&el.id) {
+                        el.w = new_w;
+                    }
+                }
+            }
+            self.touch();
+        }
+        if rh.changed() {
+            let new_h = unit.to_pt(dh);
+            let ids = self.selection.clone();
+            if let Some(page) = self.doc.pages.get_mut(self.page_index) {
+                for el in page.elements.iter_mut() {
+                    if ids.contains(&el.id) {
+                        el.h = new_h;
+                    }
+                }
+            }
+            self.touch();
+        }
+
+        // X/Y-Änderung: Delta nur aus NUTZER-Änderung berechnen.
         if (dx - before_x).abs() > 1e-6 || (dy - before_y).abs() > 1e-6 {
             let new_x_pt = unit.to_pt(dx);
             let new_y_pt = unit.to_pt(dy);
@@ -780,8 +838,7 @@ impl EditorApp {
             self.pos_y = new_y_pt;
             self.touch();
         } else {
-            // Keine Nutzereingabe → Puffer an Live-Position anpassen
-            // (z.B. nach Drag im Canvas).
+            // Keine Nutzereingabe → Puffer an Live-Position anpassen.
             self.pos_x = anchor_x;
             self.pos_y = anchor_y;
         }
