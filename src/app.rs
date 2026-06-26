@@ -104,6 +104,16 @@ pub enum CropEdge {
     Bottom,
 }
 
+/// Ausrichtungs-Operation für Mehrfachauswahl.
+enum AlignOp {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    CenterX,
+    CenterY,
+}
+
 pub struct EditorApp {
     pub doc: Document,
     pub page_index: usize,
@@ -512,6 +522,8 @@ impl EditorApp {
                 } else {
                     self.position_section(ui);
                     ui.separator();
+                    self.align_section(ui);
+                    ui.separator();
                     if ui.button("Alle löschen").clicked() {
                         self.delete_selected();
                     }
@@ -745,6 +757,87 @@ impl EditorApp {
             self.pos_x = anchor_x;
             self.pos_y = anchor_y;
         }
+    }
+
+    /// Ausrichtungs-Buttons für Mehrfachauswahl.
+    fn align_section(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Ausrichten");
+        ui.label("Kanten / Mitten:");
+
+        // Jede Zeile: Horizontal-Buttons (Links / X-Mitte / Rechts)
+        ui.horizontal(|ui| {
+            if ui.button("⟨ Links").on_hover_text("Alle an der linken Kante ausrichten").clicked() {
+                self.align_objects(AlignOp::Left);
+            }
+            if ui.button("X Mitte").on_hover_text("Alle horizontal mittig ausrichten").clicked() {
+                self.align_objects(AlignOp::CenterX);
+            }
+            if ui.button("Rechts ⟩").on_hover_text("Alle an der rechten Kante ausrichten").clicked() {
+                self.align_objects(AlignOp::Right);
+            }
+        });
+        ui.horizontal(|ui| {
+            if ui.button("⟨ Oben").on_hover_text("Alle an der oberen Kante ausrichten").clicked() {
+                self.align_objects(AlignOp::Top);
+            }
+            if ui.button("Y Mitte").on_hover_text("Alle vertikal mittig ausrichten").clicked() {
+                self.align_objects(AlignOp::CenterY);
+            }
+            if ui.button("Unten ⟩").on_hover_text("Alle an der unteren Kante ausrichten").clicked() {
+                self.align_objects(AlignOp::Bottom);
+            }
+        });
+    }
+
+    /// Richtet alle ausgewählten Objekte auf einer Achse aus.
+    fn align_objects(&mut self, op: AlignOp) {
+        let sel_ids = self.selection.clone();
+        let page_idx = self.page_index;
+
+        // Referenzwert aus dem ersten ausgewählten Element berechnen.
+        let Some(page) = self.doc.pages.get(page_idx) else { return };
+        let sel_els: Vec<&Element> = page.elements.iter().filter(|e| sel_ids.contains(&e.id)).collect();
+        if sel_els.len() < 2 {
+            return;
+        }
+
+        let ref_val = match op {
+            AlignOp::Left => sel_els.iter().map(|e| e.x).fold(f32::INFINITY, f32::min),
+            AlignOp::Right => sel_els.iter().map(|e| e.x + e.w).fold(f32::NEG_INFINITY, f32::max),
+            AlignOp::CenterX => {
+                let (min, max) = sel_els
+                    .iter()
+                    .map(|e| e.x)
+                    .fold((f32::INFINITY, f32::NEG_INFINITY), |(mn, mx), x| (mn.min(x), mx.max(x)));
+                (min + max) / 2.0
+            }
+            AlignOp::Top => sel_els.iter().map(|e| e.y).fold(f32::INFINITY, f32::min),
+            AlignOp::Bottom => sel_els.iter().map(|e| e.y + e.h).fold(f32::NEG_INFINITY, f32::max),
+            AlignOp::CenterY => {
+                let (min, max) = sel_els
+                    .iter()
+                    .map(|e| e.y)
+                    .fold((f32::INFINITY, f32::NEG_INFINITY), |(mn, my), y| (mn.min(y), my.max(y)));
+                (min + max) / 2.0
+            }
+        };
+
+        if let Some(page) = self.doc.pages.get_mut(page_idx) {
+            for el in page.elements.iter_mut() {
+                if !sel_ids.contains(&el.id) {
+                    continue;
+                }
+                match op {
+                    AlignOp::Left => el.x = ref_val,
+                    AlignOp::Right => el.x = ref_val - el.w,
+                    AlignOp::CenterX => el.x = ref_val - el.w / 2.0,
+                    AlignOp::Top => el.y = ref_val,
+                    AlignOp::Bottom => el.y = ref_val - el.h,
+                    AlignOp::CenterY => el.y = ref_val - el.h / 2.0,
+                }
+            }
+        }
+        self.touch();
     }
 
     /// Achsenausgerichtete Bounding-Box aller ausgewählten Elemente (in pt).
