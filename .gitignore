@@ -12,3 +12,6 @@ desktop.ini
 
 # Build artifacts
 build_errors.txt
+
+# Trunk/Web build output (wird via `trunk build` erzeugt)
+/dist

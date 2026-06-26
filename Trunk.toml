@@ -1,0 +1,3 @@
+[build]
+# Relativer Pfad, damit die App auch in Unterverzeichnissen funktioniert.
+public_url = "./"
