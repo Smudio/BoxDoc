@@ -4,6 +4,7 @@ mod app;
 mod canvas;
 mod fonts;
 mod geometry;
+mod history;
 mod io;
 mod model;
 #[cfg(not(target_arch = "wasm32"))]

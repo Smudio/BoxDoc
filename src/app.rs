@@ -158,6 +158,10 @@ pub struct EditorApp {
     pub theme_target: crate::model::Theme,
     /// Theme-Fade: Fortschritt 0..1.
     pub theme_anim: f32,
+    /// Undo/Redo-History.
+    pub history: crate::history::History,
+    /// Flag: Snapshot beim nächsten DragValue-Focus-Gain machen.
+    pub prop_snapshot_pending: bool,
 }
 
 impl EditorApp {
@@ -215,7 +219,10 @@ impl Default for EditorApp {
             theme_from: crate::model::Theme::default(),
             theme_target: crate::model::Theme::default(),
             theme_anim: 1.0,
+            history: crate::history::History::default(),
+            prop_snapshot_pending: false,
         }
+        .with_init_history()
     }
 }
 
@@ -246,6 +253,7 @@ impl EditorApp {
     /// - `Some(false, x, y)` → (x,y) ist die linke-obere Ecke
     /// - `Some(true, x, y)`  → (x,y) ist das Zentrum
     pub fn add_text(&mut self, at: Option<(bool, f32, f32)>) {
+        self.push_history();
         let id = self.next_id();
         let (cx, cy) = match at {
             None => {
@@ -282,6 +290,7 @@ impl EditorApp {
     }
 
     pub fn add_image_from_bytes(&mut self, bytes: Vec<u8>, at: Option<(f32, f32)>) {
+        self.push_history();
         let id = self.next_id();
         let dims = match image::load_from_memory(&bytes) {
             Ok(img) => (img.width(), img.height()),
@@ -311,13 +320,12 @@ impl EditorApp {
         if self.selection.is_empty() {
             return;
         }
+        self.push_history();
         let ids: Vec<u64> = self.selection.clone();
         if let Some(page) = self.doc.current_page_mut(self.page_index) {
             page.elements.retain(|e| !ids.contains(&e.id));
         }
-        for &id in &ids {
-            self.images.remove(id);
-        }
+        // Images NICHT entfernen — bleiben für Undo erhalten.
         self.clear_selection();
         self.editing = None;
         self.crop_mode = false;
@@ -343,6 +351,57 @@ impl EditorApp {
 
     pub fn set_status(&mut self, s: impl Into<String>) {
         self.status = s.into();
+    }
+
+    // ===================================================================
+    // Undo / Redo
+    // ===================================================================
+
+    fn with_init_history(mut self) -> Self {
+        self.history.init(self.snapshot());
+        self
+    }
+
+    /// Erstellt einen Snapshot des aktuellen Zustands.
+    pub fn snapshot(&self) -> crate::history::Snapshot {
+        crate::history::Snapshot {
+            doc: self.doc.clone(),
+            selection: self.selection.clone(),
+            page_index: self.page_index,
+        }
+    }
+
+    /// Nimmt einen History-Snapshot auf (vor einer Mutation aufrufen).
+    pub fn push_history(&mut self) {
+        self.history.push(self.snapshot());
+    }
+
+    /// Undo: stellt vorherigen Zustand wieder her.
+    pub fn undo(&mut self) {
+        if let Some(snap) = self.history.undo() {
+            self.doc = snap.doc.clone();
+            self.selection = snap.selection.clone();
+            self.page_index = snap.page_index;
+            self.editing = None;
+            self.crop_mode = false;
+            self.interaction = Interaction::None;
+            self.touch();
+            self.set_status("Rückgängig.");
+        }
+    }
+
+    /// Redo: stellt verworfenen Zustand wieder her.
+    pub fn redo(&mut self) {
+        if let Some(snap) = self.history.redo() {
+            self.doc = snap.doc.clone();
+            self.selection = snap.selection.clone();
+            self.page_index = snap.page_index;
+            self.editing = None;
+            self.crop_mode = false;
+            self.interaction = Interaction::None;
+            self.touch();
+            self.set_status("Wiederhergestellt.");
+        }
     }
 }
 
@@ -597,6 +656,15 @@ impl EditorApp {
                     if ui.button("Alle löschen").clicked() {
                         self.delete_selected();
                     }
+                }
+
+                // Undo-Snapshot: einmal pro Editier-Session.
+                let any_focused = ctx.memory(|m| m.focused()).is_some();
+                if any_focused && self.prop_snapshot_pending {
+                    self.push_history();
+                    self.prop_snapshot_pending = false;
+                } else if !any_focused {
+                    self.prop_snapshot_pending = true;
                 }
             });
     }
@@ -929,6 +997,7 @@ impl EditorApp {
 
     /// Richtet alle ausgewählten Objekte auf einer Achse aus.
     fn align_objects(&mut self, op: AlignOp) {
+        self.push_history();
         let sel_ids = self.selection.clone();
         let page_idx = self.page_index;
 
@@ -982,6 +1051,7 @@ impl EditorApp {
     /// Horizontal: sortiert nach X, verteilt die Zwischenräume gleichmäßig.
     /// Vertikal: sortiert nach Y, entsprechend.
     fn distribute_objects(&mut self, op: DistributeOp) {
+        self.push_history();
         let sel_ids = self.selection.clone();
         let page_idx = self.page_index;
 
@@ -1141,6 +1211,7 @@ impl EditorApp {
             self.pasting = false;
             return;
         }
+        self.push_history();
         let ref_origin = self.clip_origins[0];
         let paste_ref = if snapped {
             ref_origin

@@ -474,6 +474,31 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
         app.start_paste();
     }
 
+    // Undo/Redo über rohe Key-Events (egui konsumiert Ctrl+Z sonst).
+    let (do_undo, do_redo) = ctx.input(|i| {
+        let mut u = false;
+        let mut r = false;
+        for event in &i.events {
+            if let egui::Event::Key { key, pressed: true, modifiers, .. } = event {
+                match *key {
+                    egui::Key::Z if modifiers.ctrl && !modifiers.shift => u = true,
+                    egui::Key::Z if modifiers.ctrl && modifiers.shift => r = true,
+                    egui::Key::Y if modifiers.ctrl => r = true,
+                    _ => {}
+                }
+            }
+        }
+        (u, r)
+    });
+    if (do_undo || do_redo) && app.editing.is_none() {
+        if do_undo {
+            app.undo();
+        }
+        if do_redo {
+            app.redo();
+        }
+    }
+
     ctx.input(|i| {
         if i.key_pressed(egui::Key::Delete) && app.editing.is_none() && !app.pasting {
             app.delete_selected();
@@ -525,7 +550,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
     painter.text(
         rect.left_top() + Vec2::new(8.0, 6.0),
         egui::Align2::LEFT_TOP,
-        "Strg+Scroll = Zoom · Strg+C/V = Kopieren/Einfügen · Entf = Löschen · Esc = Abbrechen",
+        "Strg+Z = Rückgängig · Strg+Y = Wiederherstellen · Strg+C/V = Kopieren/Einfügen · Entf = Löschen · Esc = Abbrechen",
         FontId::proportional(11.0),
         Color32::from_gray(150),
     );
@@ -738,6 +763,7 @@ fn start_interaction(
                                 _ => CropEdge::Bottom,
                             };
                             let start_crop = el.crop;
+                            app.push_history();
                             app.interaction = Interaction::Crop { id, edge, start_crop };
                             return;
                         }
@@ -755,6 +781,7 @@ fn start_interaction(
                 let grip =
                     local_to_world(center, el.rotation, Vec2::new(0.0, -el.h * zoom / 2.0 - 24.0));
                 if grip.distance(pointer) < 9.0 {
+                    app.push_history();
                     app.interaction = Interaction::Rotate { id };
                     return;
                 }
@@ -774,6 +801,7 @@ fn start_interaction(
                         let anchor = Pos2::new(a.x, a.y);
                         let rotation = el.rotation;
                         let start_aspect = if el.h != 0.0 { el.w / el.h } else { 1.0 };
+                        app.push_history();
                         app.interaction = Interaction::Resize { id, anchor, rotation, start_aspect };
                         return;
                     }
@@ -802,6 +830,7 @@ fn start_interaction(
                     .filter(|e| app.is_selected(e.id))
                     .map(|e| (e.id, e.x, e.y))
                     .collect();
+                app.push_history();
                 app.interaction = Interaction::DragBodies { start_pointer: pointer, starts };
             } else if shift_held {
                 // Shift+Klick → Auswahl umschalten.
@@ -817,6 +846,7 @@ fn start_interaction(
                     .unwrap();
                 app.select_only(id);
                 app.crop_mode = false;
+                app.push_history();
                 app.interaction = Interaction::DragBodies {
                     start_pointer: pointer,
                     starts: vec![(id, xy.0, xy.1)],
