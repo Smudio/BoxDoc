@@ -254,6 +254,8 @@ pub struct FontDef {
     /// Kandidaten-Pfade (betriebssystemspezifisch); der erste Treffer wird
     /// geladen. Bleibt die Liste leer, fällt egui auf seinen Default zurück.
     pub paths: &'static [&'static str],
+    /// Eingebettet via include_bytes! (funktioniert auch im Browser).
+    pub bundled: bool,
 }
 
 /// Kuratierte Auswahl. Index 0 ist die Standard-Schrift.
@@ -262,7 +264,40 @@ pub const FONT_CHOICES: &[FontDef] = &[
         key: "default",
         display: "Standard",
         paths: &[],
+        bundled: false,
     },
+    // --- Eingebettete Schriften (Web + Desktop) ---
+    FontDef {
+        key: "inter",
+        display: "Inter",
+        paths: &[],
+        bundled: true,
+    },
+    FontDef {
+        key: "roboto",
+        display: "Roboto",
+        paths: &[],
+        bundled: true,
+    },
+    FontDef {
+        key: "lora",
+        display: "Lora",
+        paths: &[],
+        bundled: true,
+    },
+    FontDef {
+        key: "jetbrains",
+        display: "JetBrains Mono",
+        paths: &[],
+        bundled: true,
+    },
+    FontDef {
+        key: "pacifico",
+        display: "Pacifico",
+        paths: &[],
+        bundled: true,
+    },
+    // --- System-Schriften (nur Desktop) ---
     FontDef {
         key: "arial",
         display: "Arial",
@@ -272,6 +307,7 @@ pub const FONT_CHOICES: &[FontDef] = &[
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/System/Library/Fonts/Helvetica.ttc",
         ],
+        bundled: false,
     },
     FontDef {
         key: "calibri",
@@ -280,6 +316,7 @@ pub const FONT_CHOICES: &[FontDef] = &[
             "C:\\Windows\\Fonts\\calibri.ttf",
             "/usr/share/fonts/truetype/calibri/Calibri-Regular.ttf",
         ],
+        bundled: false,
     },
     FontDef {
         key: "cambria",
@@ -288,6 +325,7 @@ pub const FONT_CHOICES: &[FontDef] = &[
             "C:\\Windows\\Fonts\\cambria.ttc",
             "/usr/share/fonts/truetype/cambria/Cambria.ttf",
         ],
+        bundled: false,
     },
     FontDef {
         key: "georgia",
@@ -296,31 +334,37 @@ pub const FONT_CHOICES: &[FontDef] = &[
             "C:\\Windows\\Fonts\\georgia.ttf",
             "/usr/share/fonts/truetype/georgia/Georgia.ttf",
         ],
+        bundled: false,
     },
     FontDef {
         key: "verdana",
         display: "Verdana",
         paths: &["C:\\Windows\\Fonts\\verdana.ttf"],
+        bundled: false,
     },
     FontDef {
         key: "tahoma",
         display: "Tahoma",
         paths: &["C:\\Windows\\Fonts\\tahoma.ttf"],
+        bundled: false,
     },
     FontDef {
         key: "trebuc",
         display: "Trebuchet MS",
         paths: &["C:\\Windows\\Fonts\\trebuc.ttf"],
+        bundled: false,
     },
     FontDef {
         key: "palatino",
         display: "Palatino Linotype",
         paths: &["C:\\Windows\\Fonts\\pala.ttf"],
+        bundled: false,
     },
     FontDef {
         key: "segoeui",
         display: "Segoe UI",
         paths: &["C:\\Windows\\Fonts\\segoeui.ttf"],
+        bundled: false,
     },
     FontDef {
         key: "consolas",
@@ -329,31 +373,37 @@ pub const FONT_CHOICES: &[FontDef] = &[
             "C:\\Windows\\Fonts\\consola.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
         ],
+        bundled: false,
     },
     FontDef {
         key: "gabriola",
         display: "Gabriola",
         paths: &["C:\\Windows\\Fonts\\Gabriola.ttf"],
+        bundled: false,
     },
     FontDef {
         key: "inkfree",
         display: "Ink Free",
         paths: &["C:\\Windows\\Fonts\\Inkfree.ttf"],
+        bundled: false,
     },
     FontDef {
         key: "comic",
         display: "Comic Sans MS",
         paths: &["C:\\Windows\\Fonts\\comic.ttf"],
+        bundled: false,
     },
     FontDef {
         key: "impact",
         display: "Impact",
         paths: &["C:\\Windows\\Fonts\\impact.ttf"],
+        bundled: false,
     },
     FontDef {
         key: "candara",
         display: "Candara",
         paths: &["C:\\Windows\\Fonts\\Candara.ttf"],
+        bundled: false,
     },
 ];
 
