@@ -114,6 +114,14 @@ enum AlignOp {
     CenterY,
 }
 
+/// Gleichmäßige Abstandsverteilung.
+enum DistributeOp {
+    /// Horizontal: gleiche Abstände zwischen den Objekten (X-Achse).
+    Horizontal,
+    /// Vertikal: gleiche Abstände zwischen den Objekten (Y-Achse).
+    Vertical,
+}
+
 pub struct EditorApp {
     pub doc: Document,
     pub page_index: usize,
@@ -773,7 +781,7 @@ impl EditorApp {
         ui.heading("Ausrichten");
         ui.label("Kanten / Mitten:");
 
-        // Jede Zeile: Horizontal-Buttons (Links / X-Mitte / Rechts)
+        // Horizontal-Buttons (Links / X-Mitte / Rechts)
         ui.horizontal(|ui| {
             if ui.button("⟨ Links").on_hover_text("Alle an der linken Kante ausrichten").clicked() {
                 self.align_objects(AlignOp::Left);
@@ -794,6 +802,17 @@ impl EditorApp {
             }
             if ui.button("Unten ⟩").on_hover_text("Alle an der unteren Kante ausrichten").clicked() {
                 self.align_objects(AlignOp::Bottom);
+            }
+        });
+
+        ui.separator();
+        ui.label("Abstände verteilen:");
+        ui.horizontal(|ui| {
+            if ui.button("⇿ Horizontal").on_hover_text("Gleiche horizontale Abstände zwischen allen Objekten").clicked() {
+                self.distribute_objects(DistributeOp::Horizontal);
+            }
+            if ui.button("⇕ Vertikal").on_hover_text("Gleiche vertikale Abstände zwischen allen Objekten").clicked() {
+                self.distribute_objects(DistributeOp::Vertical);
             }
         });
     }
@@ -843,6 +862,69 @@ impl EditorApp {
                     AlignOp::Top => el.y = ref_val,
                     AlignOp::Bottom => el.y = ref_val - el.h,
                     AlignOp::CenterY => el.y = ref_val - el.h / 2.0,
+                }
+            }
+        }
+        self.touch();
+    }
+
+    /// Verteilt alle ausgewählten Objekte mit gleichmäßigen Abständen.
+    /// Horizontal: sortiert nach X, verteilt die Zwischenräume gleichmäßig.
+    /// Vertikal: sortiert nach Y, entsprechend.
+    fn distribute_objects(&mut self, op: DistributeOp) {
+        let sel_ids = self.selection.clone();
+        let page_idx = self.page_index;
+
+        let Some(page) = self.doc.pages.get(page_idx) else { return };
+        // (id, start, size) für jede Achse.
+        let mut items: Vec<(u64, f32, f32)> = page
+            .elements
+            .iter()
+            .filter(|e| sel_ids.contains(&e.id))
+            .map(|e| match op {
+                DistributeOp::Horizontal => (e.id, e.x, e.w),
+                DistributeOp::Vertical => (e.id, e.y, e.h),
+            })
+            .collect();
+        if items.len() < 3 {
+            return;
+        }
+
+        // Nach Startposition sortieren.
+        items.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Gesamt-Strecke vom Start des ersten bis zum Ende des letzten Objekts.
+        let first_start = items.first().unwrap().1;
+        let last_end = items.last().unwrap().1 + items.last().unwrap().2;
+        let total_span = last_end - first_start;
+
+        // Summe der Objekt-Breiten/-Höhen (ohne Abstände).
+        let total_size: f32 = items.iter().map(|(_, _, s)| *s).sum();
+        let count_gaps = items.len() - 1;
+        let gap = if total_span > total_size {
+            (total_span - total_size) / count_gaps as f32
+        } else {
+            0.0
+        };
+
+        // Neue Positionen: erstes bleibt, dann jeweils + size + gap.
+        let mut cursor = first_start;
+        let updates: Vec<(u64, f32)> = items
+            .iter()
+            .map(|(id, _, size)| {
+                let new_pos = cursor;
+                cursor += size + gap;
+                (*id, new_pos)
+            })
+            .collect();
+
+        if let Some(page) = self.doc.pages.get_mut(page_idx) {
+            for el in page.elements.iter_mut() {
+                if let Some((_, new_pos)) = updates.iter().find(|(id, _)| *id == el.id) {
+                    match op {
+                        DistributeOp::Horizontal => el.x = *new_pos,
+                        DistributeOp::Vertical => el.y = *new_pos,
+                    }
                 }
             }
         }
