@@ -552,6 +552,17 @@ impl EditorApp {
                     }
 
                     ui.separator();
+                    ui.separator();
+                    ui.label("Eigenschaften-Fenster:");
+                    let mut side = self.settings.panel_side;
+                    for s in crate::model::PanelSide::all() {
+                        ui.selectable_value(&mut side, s, s.label());
+                    }
+                    if side != self.settings.panel_side {
+                        self.settings.panel_side = side;
+                    }
+
+                    ui.separator();
                     ui.label("Seitenausrichtung:");
                     let mut align = self.settings.page_align;
                     ui.selectable_value(&mut align, PageAlign::Left, "Linksbündig");
@@ -607,66 +618,94 @@ impl EditorApp {
     }
 
     fn show_properties(&mut self, ctx: &Context) {
-        egui::SidePanel::right("properties")
-            .resizable(true)
-            .default_width(240.0)
-            .width_range(180.0..=360.0)
-            .show(ctx, |ui| {
-                ui.heading("Eigenschaften");
-                ui.separator();
+        let panel_side = self.settings.panel_side;
 
-                // Seitennavigation
-                ui.label(format!(
-                    "Seite {} / {}",
-                    self.page_index + 1,
-                    self.doc.pages.len()
-                ));
-                ui.horizontal(|ui| {
-                    ui.add_enabled_ui(self.page_index > 0, |ui| {
-                        if ui.button("◀").clicked() {
-                            self.page_index -= 1;
-                            self.clear_selection();
+        // Der Inhalt wird in einer Closure gekapselt, damit alle drei
+        // Panel-Varianten denselben Inhalt anzeigen.
+        let content = |ui: &mut egui::Ui, app: &mut EditorApp, ctx: &Context| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false; 2])
+                .show(ui, |ui| {
+                    ui.heading("Eigenschaften");
+                    ui.separator();
+
+                    // Seitennavigation
+                    ui.label(format!(
+                        "Seite {} / {}",
+                        app.page_index + 1,
+                        app.doc.pages.len()
+                    ));
+                    ui.horizontal(|ui| {
+                        ui.add_enabled_ui(app.page_index > 0, |ui| {
+                            if ui.button("◀").clicked() {
+                                app.page_index -= 1;
+                                app.clear_selection();
+                            }
+                        });
+                        if ui.button("＋ Seite").clicked() {
+                            app.add_page();
                         }
+                        ui.add_enabled_ui(app.page_index + 1 < app.doc.pages.len(), |ui| {
+                            if ui.button("▶").clicked() {
+                                app.page_index += 1;
+                                app.clear_selection();
+                            }
+                        });
                     });
-                    if ui.button("＋ Seite").clicked() {
-                        self.add_page();
+                    ui.separator();
+
+                    let Some(sel) = app.primary() else {
+                        ui.label("Kein Objekt ausgewählt.\nKlicke oder ziehe ein Auswahl-Rechteck.");
+                        return;
+                    };
+                    if app.selection.len() == 1 {
+                        app.properties_for(ui, sel);
+                    } else {
+                        app.position_section(ui);
+                        ui.separator();
+                        app.align_section(ui);
+                        ui.separator();
+                        app.multi_text_section(ui);
+                        ui.separator();
+                        if ui.button("Alle löschen").clicked() {
+                            app.delete_selected();
+                        }
                     }
-                    ui.add_enabled_ui(self.page_index + 1 < self.doc.pages.len(), |ui| {
-                        if ui.button("▶").clicked() {
-                            self.page_index += 1;
-                            self.clear_selection();
-                        }
-                    });
                 });
-                ui.separator();
 
-                let Some(sel) = self.primary() else {
-                    ui.label("Kein Objekt ausgewählt.\nKlicke oder ziehe ein Auswahl-Rechteck.");
-                    return;
-                };
-                if self.selection.len() == 1 {
-                    self.properties_for(ui, sel);
-                } else {
-                    self.position_section(ui);
-                    ui.separator();
-                    self.align_section(ui);
-                    ui.separator();
-                    self.multi_text_section(ui);
-                    ui.separator();
-                    if ui.button("Alle löschen").clicked() {
-                        self.delete_selected();
-                    }
-                }
+            // Undo-Snapshot: einmal pro Editier-Session.
+            let any_focused = ctx.memory(|m| m.focused()).is_some();
+            if any_focused && app.prop_snapshot_pending {
+                app.push_history();
+                app.prop_snapshot_pending = false;
+            } else if !any_focused {
+                app.prop_snapshot_pending = true;
+            }
+        };
 
-                // Undo-Snapshot: einmal pro Editier-Session.
-                let any_focused = ctx.memory(|m| m.focused()).is_some();
-                if any_focused && self.prop_snapshot_pending {
-                    self.push_history();
-                    self.prop_snapshot_pending = false;
-                } else if !any_focused {
-                    self.prop_snapshot_pending = true;
-                }
-            });
+        match panel_side {
+            crate::model::PanelSide::Right => {
+                egui::SidePanel::right("properties")
+                    .resizable(true)
+                    .default_width(240.0)
+                    .width_range(180.0..=360.0)
+                    .show(ctx, |ui| content(ui, self, ctx));
+            }
+            crate::model::PanelSide::Left => {
+                egui::SidePanel::left("properties")
+                    .resizable(true)
+                    .default_width(240.0)
+                    .width_range(180.0..=360.0)
+                    .show(ctx, |ui| content(ui, self, ctx));
+            }
+            crate::model::PanelSide::Bottom => {
+                egui::TopBottomPanel::bottom("properties")
+                    .resizable(true)
+                    .default_height(200.0)
+                    .height_range(120.0..=500.0)
+                    .show(ctx, |ui| content(ui, self, ctx));
+            }
+        }
     }
 
     fn properties_for(&mut self, ui: &mut egui::Ui, sel: u64) {

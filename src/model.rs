@@ -194,6 +194,34 @@ impl Theme {
     }
 }
 
+/// Position des Eigenschaften-Panels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PanelSide {
+    Right,
+    Left,
+    Bottom,
+}
+
+impl Default for PanelSide {
+    fn default() -> Self {
+        PanelSide::Right
+    }
+}
+
+impl PanelSide {
+    pub fn label(self) -> &'static str {
+        match self {
+            PanelSide::Right => "Rechts",
+            PanelSide::Left => "Links",
+            PanelSide::Bottom => "Unten",
+        }
+    }
+
+    pub fn all() -> [PanelSide; 3] {
+        [PanelSide::Right, PanelSide::Left, PanelSide::Bottom]
+    }
+}
+
 /// Globale Anwendungseinstellungen.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Settings {
@@ -202,6 +230,8 @@ pub struct Settings {
     pub scroll_mode: ScrollMode,
     #[serde(default)]
     pub theme: Theme,
+    #[serde(default)]
+    pub panel_side: PanelSide,
 }
 
 // ===========================================================================
