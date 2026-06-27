@@ -27,7 +27,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
 
     // --- Eingaben ---
     let scroll = ui.input(|i| i.smooth_scroll_delta);
-    let ctrl = ui.input(|i| i.modifiers.ctrl);
+    let zoom_delta = ui.input(|i| i.zoom_delta());
     let delta = ui.input(|i| i.pointer.delta());
     let middle_down = ui.input(|i| i.pointer.middle_down());
     let primary_pressed = ui.input(|i| i.pointer.primary_pressed());
@@ -50,28 +50,29 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
         }
     };
 
-    // --- Zoom & Verschiebung ---
-    if ctrl && scroll.y.abs() > 0.0 {
+    // --- Zoom (Ctrl+Scroll UND Pinch-to-Zoom) ---
+    // egui's zoom_delta() liefert den Faktor für beide Gesten.
+    if zoom_delta != 1.0 {
         if let Some(cur) = pointer {
-            if rect.contains(cur) {
-                let zoom = app.view.zoom;
-                let pan = app.view.pan;
-                let align_x = compute_align_x(zoom);
-                let page_under = Vec2::new(
-                    (cur.x - base.x - align_x - pan.x) / zoom,
-                    (cur.y - base.y - pan.y) / zoom,
-                );
-                let factor = if scroll.y > 0.0 { 1.1 } else { 0.9 };
-                let new_zoom = (zoom * factor).clamp(0.1, 6.0);
-                let new_align_x = compute_align_x(new_zoom);
-                app.view.zoom = new_zoom;
-                app.view.pan = Vec2::new(
-                    cur.x - base.x - new_align_x - page_under.x * new_zoom,
-                    cur.y - base.y - page_under.y * new_zoom,
-                );
-            }
+            let zoom = app.view.zoom;
+            let pan = app.view.pan;
+            let align_x = compute_align_x(zoom);
+            let page_under = Vec2::new(
+                (cur.x - base.x - align_x - pan.x) / zoom,
+                (cur.y - base.y - pan.y) / zoom,
+            );
+            let new_zoom = (zoom * zoom_delta).clamp(0.1, 6.0);
+            let new_align_x = compute_align_x(new_zoom);
+            app.view.zoom = new_zoom;
+            app.view.pan = Vec2::new(
+                cur.x - base.x - new_align_x - page_under.x * new_zoom,
+                cur.y - base.y - page_under.y * new_zoom,
+            );
         }
-    } else if scroll != Vec2::ZERO {
+    }
+
+    // --- Scroll / Pan (ohne Zoom) ---
+    if zoom_delta == 1.0 && scroll != Vec2::ZERO {
         // --- Continuous-Scroll: Seitenwechsel am Ende ---
         if app.settings.scroll_mode == ScrollMode::Continuous && scroll.y.abs() > 0.1 {
             let zoom = app.view.zoom;
@@ -79,14 +80,12 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
             let page_top = app.view.pan.y;
             let page_bottom = page_top + page_h_screen;
             if scroll.y > 0.0 && page_bottom + scroll.y < 24.0 {
-                // Runterscrollen über Seitenende → nächste Seite
                 if app.page_index + 1 < app.doc.pages.len() {
                     app.page_index += 1;
                     app.view.pan.y = 24.0;
                     app.clear_selection();
                 }
             } else if scroll.y < 0.0 && page_top + scroll.y > 24.0 {
-                // Hochscrollen über Seitenanfang → vorige Seite
                 if app.page_index > 0 {
                     app.page_index -= 1;
                     let new_page_h = ph_pt * zoom;
