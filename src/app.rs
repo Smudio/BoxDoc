@@ -152,6 +152,8 @@ pub struct EditorApp {
     pub clip_origins: Vec<(f32, f32)>,
     /// Paste-Modus aktiv: Preview folgt dem Cursor, Klick platziert.
     pub pasting: bool,
+    /// Snap-Visual: vertikale Mittellinie aktiv (beim Drag).
+    pub snap_center: bool,
     /// Theme-Fade: Quell-Thema.
     pub theme_from: crate::model::Theme,
     /// Theme-Fade: Ziel-Thema (= settings.theme).
@@ -216,6 +218,7 @@ impl Default for EditorApp {
             clipboard: Vec::new(),
             clip_origins: Vec::new(),
             pasting: false,
+            snap_center: false,
             theme_from: crate::model::Theme::default(),
             theme_target: crate::model::Theme::default(),
             theme_anim: 1.0,

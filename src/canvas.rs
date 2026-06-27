@@ -184,6 +184,24 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
         }
     }
 
+    // --- Center-Snap-Linie (vertikale Mittellinie der Seite) ---
+    if app.snap_center {
+        let cx = to_screen(Pos2::new(pw_pt / 2.0, 0.0)).x;
+        let top = to_screen(Pos2::new(pw_pt / 2.0, 0.0));
+        let bot = to_screen(Pos2::new(pw_pt / 2.0, ph_pt));
+        painter.line_segment(
+            [top, bot],
+            Stroke::new(1.5, Color32::from_rgb(80, 200, 120)),
+        );
+        painter.text(
+            Pos2::new(cx, top.y - 4.0),
+            egui::Align2::CENTER_BOTTOM,
+            "◉",
+            FontId::proportional(14.0),
+            Color32::from_rgb(80, 200, 120),
+        );
+    }
+
     // --- Paste: Ghost + Preview Rendering ---
     if app.pasting && !app.clipboard.is_empty() {
         let ghost_fill = Color32::from_rgba_unmultiplied(100, 160, 230, 20);
@@ -305,7 +323,10 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
             Interaction::DragBodies { .. }
             | Interaction::Resize { .. }
             | Interaction::Rotate { .. }
-            | Interaction::Crop { .. } => app.interaction = Interaction::None,
+            | Interaction::Crop { .. } => {
+                app.interaction = Interaction::None;
+                app.snap_center = false;
+            }
             _ => {}
         }
     }
@@ -334,6 +355,34 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                         el.x = sx + dp.x;
                         el.y = sy + dp.y;
                     }
+                }
+                // --- Center-Snapping (vertikale Mittellinie der Seite) ---
+                let snap_px = 8.0;
+                let (pw_pt_snap, _) = page_size_pt(app.doc.format, app.doc.orientation);
+                let page_cx = pw_pt_snap / 2.0;
+                let mut snap_offset_x: Option<f32> = None;
+                for (id, _, _) in &starts {
+                    let Some(el) = app.doc.pages[page_idx].elements.iter().find(|e| e.id == *id) else { continue };
+                    let el_cx = el.x + el.w / 2.0;
+                    let dist = (el_cx - page_cx).abs() / app.view.zoom;
+                    if dist < snap_px {
+                        snap_offset_x = Some(page_cx - el.w / 2.0 - el.x);
+                        break;
+                    }
+                }
+                if let Some(off) = snap_offset_x {
+                    let ids: Vec<u64> = starts.iter().map(|(id, _, _)| *id).collect();
+                    if let Some(page) = app.doc.pages.get_mut(page_idx) {
+                        for el in page.elements.iter_mut() {
+                            if ids.contains(&el.id) {
+                                el.x += off;
+                            }
+                        }
+                    }
+                    // Snap-Visual im Canvas-Status speichern.
+                    app.snap_center = true;
+                } else {
+                    app.snap_center = false;
                 }
                 app.touch();
             }
