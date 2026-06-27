@@ -94,6 +94,8 @@ pub enum Interaction {
     Crop { id: u64, edge: CropEdge, start_crop: crate::model::Crop },
     /// Auswahl-Rechteck ziehen.
     SelectionBox { start: egui::Pos2 },
+    /// Linien-Endpunkt ziehen (id, true=start, false=end).
+    LineEndpoint { id: u64, is_start: bool },
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -154,6 +156,8 @@ pub struct EditorApp {
     pub pasting: bool,
     /// Snap-Visual: vertikale Mittellinie aktiv (beim Drag).
     pub snap_center: bool,
+    /// Linien-Zeichenmodus: None oder Some(start_point) wenn erster Punkt gesetzt.
+    pub line_drawing: Option<(f32, f32)>,
     /// Theme-Fade: Quell-Thema.
     pub theme_from: crate::model::Theme,
     /// Theme-Fade: Ziel-Thema (= settings.theme).
@@ -219,6 +223,7 @@ impl Default for EditorApp {
             clip_origins: Vec::new(),
             pasting: false,
             snap_center: false,
+            line_drawing: None,
             theme_from: crate::model::Theme::default(),
             theme_target: crate::model::Theme::default(),
             theme_anim: 1.0,
@@ -334,6 +339,31 @@ impl EditorApp {
         self.crop_mode = false;
         self.modified = true;
         self.status = String::from("Linie hinzugefügt.");
+    }
+
+    /// Erstellt eine Linie zwischen zwei Punkten (start, end).
+    pub fn add_line_between(&mut self, start: (f32, f32), end: (f32, f32)) {
+        self.push_history();
+        let id = self.next_id();
+        let dx = end.0 - start.0;
+        let dy = end.1 - start.1;
+        let len = dx.hypot(dy).max(1.0);
+        let rotation = dy.atan2(dx).to_degrees();
+        let cx = (start.0 + end.0) / 2.0;
+        let cy = (start.1 + end.1) / 2.0;
+        let mut el = Element::new_line(id, 0.0, 0.0);
+        el.x = cx - len / 2.0;
+        el.y = cy;
+        el.w = len;
+        el.rotation = rotation;
+        if let Some(page) = self.doc.current_page_mut(self.page_index) {
+            page.elements.push(el);
+        }
+        self.select_only(id);
+        self.modified = true;
+        self.status = String::from("Linie gezeichnet.");
+        // Modus aktiv lassen für weitere Linien (AutoCAD-Verhalten).
+        self.line_drawing = Some((f32::NAN, f32::NAN));
     }
 
     pub fn add_image_from_bytes(&mut self, bytes: Vec<u8>, at: Option<(f32, f32)>) {
@@ -852,6 +882,17 @@ impl EditorApp {
                     ui.add(egui::DragValue::new(&mut el.font_size).range(4.0..=400.0).speed(0.5).suffix("pt"));
                 });
                 ui.horizontal(|ui| {
+                    if ui.selectable_label(el.bold, egui::RichText::new("B").strong()).clicked() {
+                        el.bold = !el.bold;
+                    }
+                    if ui.selectable_label(el.italic, egui::RichText::new("I").italics()).clicked() {
+                        el.italic = !el.italic;
+                    }
+                    if ui.selectable_label(el.underline, egui::RichText::new("U").underline()).clicked() {
+                        el.underline = !el.underline;
+                    }
+                });
+                ui.horizontal(|ui| {
                     ui.label("Einzug:");
                     ui.add(egui::DragValue::new(&mut el.indent).range(0.0..=400.0).speed(0.5).suffix("pt"));
                 });
@@ -861,7 +902,7 @@ impl EditorApp {
                         el.color[0], el.color[1], el.color[2], el.color[3],
                     );
                     ui.color_edit_button_srgba(&mut c);
-                    el.color = [c.r(), c.g(), c.b(), c.a()];
+                    el.color = c.to_srgba_unmultiplied();
                 });
                 ui.horizontal(|ui| {
                     ui.label("Horizontal:");
@@ -907,7 +948,7 @@ impl EditorApp {
                         el.stroke_color[0], el.stroke_color[1], el.stroke_color[2], el.stroke_color[3],
                     );
                     ui.color_edit_button_srgba(&mut c);
-                    el.stroke_color = [c.r(), c.g(), c.b(), c.a()];
+                    el.stroke_color = c.to_srgba_unmultiplied();
                 });
                 ui.horizontal(|ui| {
                     ui.label("Rahmenstärke:");
@@ -920,7 +961,7 @@ impl EditorApp {
                             el.fill_color[0], el.fill_color[1], el.fill_color[2], el.fill_color[3],
                         );
                         ui.color_edit_button_srgba(&mut c);
-                        el.fill_color = [c.r(), c.g(), c.b(), c.a()];
+                        el.fill_color = c.to_srgba_unmultiplied();
                     });
                     ui.horizontal(|ui| {
                         ui.label("Eckradius:");

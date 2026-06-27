@@ -2,7 +2,7 @@
 //! Maus-Interaktion (verschieben, skalieren, drehen, zuschneiden).
 
 use egui::{
-    epaint::{Mesh, Vertex}, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke, Vec2,
+    epaint::{Mesh, Vertex}, Color32, FontFamily, FontId, Pos2, Rect, Sense, Shape, Stroke, Vec2,
 };
 
 use crate::app::{CropEdge, EditorApp, Interaction};
@@ -442,8 +442,45 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
         }
     }
 
-    // --- Neue Interaktion starten (nur wenn nicht am Pasten) ---
+    // --- Linien-Zeichenmodus ---
+    let drawing_line = app.line_drawing.is_some();
+    if drawing_line {
+        // Vorschau rendern wenn Startpunkt gesetzt.
+        let has_start = app.line_drawing.map(|(x, _)| !x.is_nan()).unwrap_or(false);
+        if has_start {
+            if let (Some(start), Some(pt)) = (app.line_drawing, pointer) {
+                let sp = to_screen(Pos2::new(start.0, start.1));
+                painter.line_segment(
+                    [sp, pt],
+                    Stroke::new(2.0, Color32::from_rgb(40, 120, 220)),
+                );
+                painter.circle_filled(sp, 5.0, Color32::from_rgb(40, 120, 220));
+                painter.circle_stroke(pt, 5.0, Stroke::new(1.5, Color32::from_rgb(40, 120, 220)));
+            }
+        } else if let Some(pt) = pointer {
+            painter.circle_stroke(pt, 5.0, Stroke::new(1.5, Color32::from_rgb(40, 120, 220)));
+        }
+        // Klick-Handling.
+        if primary_pressed && pointer_in_canvas && !click_on_ui {
+            if let Some(pt) = pointer {
+                let p = to_page(pt);
+                let current = app.line_drawing.unwrap();
+                if current.0.is_nan() {
+                    // Erster Klick → Startpunkt setzen.
+                    app.line_drawing = Some((p.x, p.y));
+                    app.status = String::from("Linie: Klicke den Endpunkt.");
+                } else {
+                    // Zweiter Klick → Linie erstellen.
+                    app.add_line_between((current.0, current.1), (p.x, p.y));
+                    app.status = String::from("Linie: Klicke den nächsten Startpunkt (Esc zum Beenden).");
+                }
+            }
+        }
+    }
+
+    // --- Neue Interaktion starten (nur wenn nicht am Pasten/Linien-Zeichnen) ---
     if !app.pasting
+        && !drawing_line
         && matches!(app.interaction, Interaction::None)
         && primary_pressed
         && !editing_active
@@ -578,11 +615,24 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
             if app.pasting {
                 app.pasting = false;
                 app.status = String::from("Einfügen abgebrochen.");
+            } else if app.line_drawing.is_some() {
+                app.line_drawing = None;
+                app.status = String::from("Linie abgebrochen.");
             } else {
                 app.crop_mode = false;
                 app.editing = None;
                 app.clear_selection();
                 app.interaction = Interaction::None;
+            }
+        }
+        // L = Linien-Zeichenmodus starten/abbrechen.
+        if i.key_pressed(egui::Key::L) && app.editing.is_none() && !app.pasting {
+            if app.line_drawing.is_some() {
+                app.line_drawing = None;
+                app.status = String::from("Linien-Modus beendet.");
+            } else {
+                app.line_drawing = Some((f32::NAN, f32::NAN)); // Marker: Modus aktiv, wartet auf ersten Klick.
+                app.status = String::from("Linie: Klicke den Startpunkt.");
             }
         }
 
@@ -641,7 +691,17 @@ fn draw_element(
 ) {
     match el.kind {
         ElementKind::Text => {
-            let font = FontId::new(el.font_size * zoom, crate::fonts::family_for(&el.font));
+            let mut font = FontId::new(el.font_size * zoom, crate::fonts::family_for(&el.font));
+            // Bold/Italic über egui's eingebaute italics/strong wenn Default-Font.
+            if el.font == "default" || el.font.is_empty() {
+                if el.bold && el.italic {
+                    font = FontId::new(el.font_size * zoom, FontFamily::Name("Bold Italic".into()));
+                } else if el.bold {
+                    font = FontId::new(el.font_size * zoom, FontFamily::Name("Bold".into()));
+                } else if el.italic {
+                    font = FontId::new(el.font_size * zoom, FontFamily::Name("Italics".into()));
+                }
+            }
             let color = Color32::from_rgba_unmultiplied(
                 el.color[0], el.color[1], el.color[2], el.color[3],
             );
@@ -663,6 +723,15 @@ fn draw_element(
                 }
             }
             painter.galley(pos, galley, color);
+            // Unterstrich.
+            if el.underline {
+                let galley_h = (el.font_size * zoom * 1.2).max(1.0);
+                let underline_y = pos.y + galley_h - 2.0;
+                painter.line_segment(
+                    [Pos2::new(pos.x, underline_y), Pos2::new(pos.x + el.w * zoom, underline_y)],
+                    Stroke::new(1.0, color),
+                );
+            }
         }
         ElementKind::Image => {
             if let Some(tex) = images.texture(el.id, ctx) {

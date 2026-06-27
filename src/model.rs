@@ -500,6 +500,12 @@ pub struct Element {
     #[serde(default = "default_font_key")]
     pub font: String,
     pub color: [u8; 4],
+    #[serde(default)]
+    pub bold: bool,
+    #[serde(default)]
+    pub italic: bool,
+    #[serde(default)]
+    pub underline: bool,
     pub align: TextAlign,
     #[serde(default)]
     pub valign: VAlign,
@@ -555,6 +561,9 @@ impl Element {
             font_size: 14.0,
             font: default_font_key(),
             color: [20, 20, 20, 255],
+            bold: false,
+            italic: false,
+            underline: false,
             align: TextAlign::Left,
             valign: VAlign::default(),
             indent: 0.0,
@@ -586,6 +595,9 @@ impl Element {
             font_size: 14.0,
             font: default_font_key(),
             color: [255, 255, 255, 255],
+            bold: false,
+            italic: false,
+            underline: false,
             align: TextAlign::Left,
             valign: VAlign::default(),
             indent: 0.0,
@@ -612,6 +624,9 @@ impl Element {
             font_size: 14.0,
             font: default_font_key(),
             color: [20, 20, 20, 255],
+            bold: false,
+            italic: false,
+            underline: false,
             align: TextAlign::Left,
             valign: VAlign::default(),
             indent: 0.0,
@@ -638,6 +653,9 @@ impl Element {
             font_size: 14.0,
             font: default_font_key(),
             color: [20, 20, 20, 255],
+            bold: false,
+            italic: false,
+            underline: false,
             align: TextAlign::Left,
             valign: VAlign::default(),
             indent: 0.0,
