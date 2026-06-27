@@ -295,8 +295,8 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                     let e = to_page(cur);
                     let (min_x, max_x) = (s.x.min(e.x), s.x.max(e.x));
                     let (min_y, max_y) = (s.y.min(e.y), s.y.max(e.y));
-                    let shift = ui.input(|i| i.modifiers.shift);
-                    if !shift {
+                    let additive = ui.input(|i| i.modifiers.shift || i.modifiers.ctrl);
+                    if !additive {
                         app.clear_selection();
                     }
                     let hits: Vec<u64> = app.doc.pages[page_idx]
@@ -311,10 +311,13 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                         .map(|el| el.id)
                         .collect();
                     for id in hits {
-                        if !shift || !app.is_selected(id) {
+                        if additive && app.is_selected(id) {
+                            // Bereits ausgewählt → entfernen (Toggle).
+                            if let Some(pos) = app.selection.iter().position(|&x| x == id) {
+                                app.selection.swap_remove(pos);
+                            }
+                        } else if !app.is_selected(id) {
                             app.selection.push(id);
-                        } else if shift {
-                            // Shift: bereits ausgewählte bleiben ausgewählt
                         }
                     }
                 }
@@ -489,8 +492,8 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
         && !click_on_ui
     {
         if let Some(pointer) = pointer {
-            let shift = ui.input(|i| i.modifiers.shift);
-            start_interaction(app, page_idx, pointer, to_screen, to_page, zoom, shift);
+            let additive = ui.input(|i| i.modifiers.shift || i.modifiers.ctrl);
+            start_interaction(app, page_idx, pointer, to_screen, to_page, zoom, additive);
         }
     }
 
@@ -1021,7 +1024,7 @@ fn start_interaction(
                 app.push_history();
                 app.interaction = Interaction::DragBodies { start_pointer: pointer, starts };
             } else if shift_held {
-                // Shift+Klick → Auswahl umschalten.
+                // Shift/Ctrl+Klick → Auswahl umschalten (hinzufügen/entfernen).
                 app.toggle_selected(id);
                 app.crop_mode = false;
             } else {
