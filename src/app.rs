@@ -292,6 +292,50 @@ impl EditorApp {
         self.status = String::from("Text erstellt – tippe los.");
     }
 
+    pub fn add_rectangle(&mut self, at: Option<(f32, f32)>) {
+        self.push_history();
+        let id = self.next_id();
+        let (cx, cy) = match at {
+            Some((x, y)) => (x, y),
+            None => {
+                let (w, h) = page_size_pt(self.doc.format, self.doc.orientation);
+                (w / 2.0, h / 2.0)
+            }
+        };
+        let mut el = Element::new_rectangle(id, 0.0, 0.0);
+        el.x = cx - el.w / 2.0;
+        el.y = cy - el.h / 2.0;
+        if let Some(page) = self.doc.current_page_mut(self.page_index) {
+            page.elements.push(el);
+        }
+        self.select_only(id);
+        self.crop_mode = false;
+        self.modified = true;
+        self.status = String::from("Rechteck hinzugefügt.");
+    }
+
+    pub fn add_line(&mut self, at: Option<(f32, f32)>) {
+        self.push_history();
+        let id = self.next_id();
+        let (cx, cy) = match at {
+            Some((x, y)) => (x, y),
+            None => {
+                let (w, h) = page_size_pt(self.doc.format, self.doc.orientation);
+                (w / 2.0, h / 2.0)
+            }
+        };
+        let mut el = Element::new_line(id, 0.0, 0.0);
+        el.x = cx - el.w / 2.0;
+        el.y = cy - el.h / 2.0;
+        if let Some(page) = self.doc.current_page_mut(self.page_index) {
+            page.elements.push(el);
+        }
+        self.select_only(id);
+        self.crop_mode = false;
+        self.modified = true;
+        self.status = String::from("Linie hinzugefügt.");
+    }
+
     pub fn add_image_from_bytes(&mut self, bytes: Vec<u8>, at: Option<(f32, f32)>) {
         self.push_history();
         let id = self.next_id();
@@ -540,6 +584,16 @@ impl EditorApp {
                         crate::io::open_image_dialog(self);
                         ui.close_menu();
                     }
+                    ui.separator();
+                    if ui.button("Rechteck").clicked() {
+                        self.add_rectangle(None);
+                        ui.close_menu();
+                    }
+                    if ui.button("Linie").clicked() {
+                        self.add_line(None);
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     if ui.button("Seite").clicked() {
                         self.add_page();
                         ui.close_menu();
@@ -837,6 +891,42 @@ impl EditorApp {
                         el.rotation = 0.0;
                     }
                 });
+                if ui.button("90° drehen").clicked() {
+                    el.rotation += 90.0;
+                }
+            }
+            ElementKind::Rectangle | ElementKind::Line => {
+                ui.heading(if el.kind == ElementKind::Rectangle { "Rechteck" } else { "Linie" });
+                ui.horizontal(|ui| {
+                    ui.label("Drehung:");
+                    ui.add(egui::DragValue::new(&mut el.rotation).range(-360.0..=360.0).speed(0.5).suffix("°"));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Rahmenfarbe:");
+                    let mut c = Color32::from_rgba_unmultiplied(
+                        el.stroke_color[0], el.stroke_color[1], el.stroke_color[2], el.stroke_color[3],
+                    );
+                    ui.color_edit_button_srgba(&mut c);
+                    el.stroke_color = [c.r(), c.g(), c.b(), c.a()];
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Rahmenstärke:");
+                    ui.add(egui::DragValue::new(&mut el.stroke_width).range(0.0..=50.0).speed(0.2).suffix("pt"));
+                });
+                if el.kind == ElementKind::Rectangle {
+                    ui.horizontal(|ui| {
+                        ui.label("Füllfarbe:");
+                        let mut c = Color32::from_rgba_unmultiplied(
+                            el.fill_color[0], el.fill_color[1], el.fill_color[2], el.fill_color[3],
+                        );
+                        ui.color_edit_button_srgba(&mut c);
+                        el.fill_color = [c.r(), c.g(), c.b(), c.a()];
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Eckradius:");
+                        ui.add(egui::DragValue::new(&mut el.corner_radius).range(0.0..=100.0).speed(0.2).suffix("pt"));
+                    });
+                }
                 if ui.button("90° drehen").clicked() {
                     el.rotation += 90.0;
                 }

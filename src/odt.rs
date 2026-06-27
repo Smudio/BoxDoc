@@ -173,6 +173,7 @@ fn frame_xml(el: &Element, image_files: &[(u64, String, &'static str)]) -> Strin
                 "<draw:image xlink:href=\"{href}\" xlink:type=\"simple\" xlink:actuate=\"onLoad\"/>"
             )
         }
+        ElementKind::Rectangle | ElementKind::Line => String::new(),
     };
 
     format!(

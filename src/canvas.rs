@@ -690,6 +690,54 @@ fn draw_element(
                 painter.rect_filled(r, 0.0, Color32::from_rgb(120, 120, 120));
             }
         }
+        ElementKind::Rectangle => {
+            let center = to_screen(Pos2::new(el.x + el.w / 2.0, el.y + el.h / 2.0));
+            let cl = local_corners(el.w * zoom, el.h * zoom);
+            let pts: Vec<Pos2> = cl
+                .iter()
+                .map(|lc| local_to_world(center, el.rotation, *lc))
+                .collect();
+
+            let fill = Color32::from_rgba_unmultiplied(
+                el.fill_color[0], el.fill_color[1], el.fill_color[2], el.fill_color[3],
+            );
+            let stroke = Stroke::new(
+                el.stroke_width * zoom,
+                Color32::from_rgba_unmultiplied(
+                    el.stroke_color[0], el.stroke_color[1], el.stroke_color[2], el.stroke_color[3],
+                ),
+            );
+            let radius = el.corner_radius * zoom;
+
+            if fill.a() > 0 {
+                let mut mesh = Mesh::default();
+                for (i, p) in pts.iter().enumerate() {
+                    mesh.vertices.push(Vertex { pos: *p, uv: [0.0, 0.0].into(), color: fill });
+                    if i >= 2 {
+                        mesh.indices.extend_from_slice(&[0, (i - 1) as u32, i as u32]);
+                    }
+                }
+                painter.add(Shape::mesh(mesh));
+            }
+            if stroke.width > 0.0 {
+                let mut line = pts.clone();
+                line.push(pts[0]);
+                painter.add(Shape::line(line, stroke));
+            }
+            let _ = radius;
+        }
+        ElementKind::Line => {
+            let center = to_screen(Pos2::new(el.x + el.w / 2.0, el.y + el.h / 2.0));
+            let start = local_to_world(center, el.rotation, Vec2::new(-el.w * zoom / 2.0, 0.0));
+            let end = local_to_world(center, el.rotation, Vec2::new(el.w * zoom / 2.0, 0.0));
+            let stroke = Stroke::new(
+                el.stroke_width * zoom,
+                Color32::from_rgba_unmultiplied(
+                    el.stroke_color[0], el.stroke_color[1], el.stroke_color[2], el.stroke_color[3],
+                ),
+            );
+            painter.line_segment([start, end], stroke);
+        }
     }
 }
 

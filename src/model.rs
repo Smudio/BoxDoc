@@ -474,6 +474,8 @@ impl Crop {
 pub enum ElementKind {
     Text,
     Image,
+    Rectangle,
+    Line,
 }
 
 /// Ein einzelnes Objekt auf der Seite: Text oder Bild.
@@ -509,6 +511,30 @@ pub struct Element {
     /// Originale Pixelgröße des geladenen Bilds.
     pub image_w: u32,
     pub image_h: u32,
+
+    // --- Shape (Rechteck / Linie) ---
+    /// Füllfarbe (RGBA). Alpha = 0 → transparent.
+    #[serde(default = "default_fill_color")]
+    pub fill_color: [u8; 4],
+    /// Rahmen-Stärke in pt (0 = kein Rahmen).
+    #[serde(default = "default_stroke_width")]
+    pub stroke_width: f32,
+    /// Rahmen-Farbe.
+    #[serde(default = "default_stroke_color")]
+    pub stroke_color: [u8; 4],
+    /// Eckradius für Rechtecke.
+    #[serde(default)]
+    pub corner_radius: f32,
+}
+
+fn default_fill_color() -> [u8; 4] {
+    [80, 140, 220, 60]
+}
+fn default_stroke_width() -> f32 {
+    2.0
+}
+fn default_stroke_color() -> [u8; 4] {
+    [40, 100, 180, 255]
 }
 
 impl Element {
@@ -535,6 +561,10 @@ impl Element {
             crop: Crop::default(),
             image_w: 0,
             image_h: 0,
+            fill_color: default_fill_color(),
+            stroke_width: default_stroke_width(),
+            stroke_color: default_stroke_color(),
+            corner_radius: 0.0,
         }
     }
 
@@ -562,6 +592,62 @@ impl Element {
             crop: Crop::default(),
             image_w: w as u32,
             image_h: h as u32,
+            fill_color: default_fill_color(),
+            stroke_width: default_stroke_width(),
+            stroke_color: default_stroke_color(),
+            corner_radius: 0.0,
+        }
+    }
+
+    pub fn new_rectangle(id: u64, x: f32, y: f32) -> Self {
+        Element {
+            id,
+            kind: ElementKind::Rectangle,
+            x,
+            y,
+            w: 160.0,
+            h: 100.0,
+            rotation: 0.0,
+            text: String::new(),
+            font_size: 14.0,
+            font: default_font_key(),
+            color: [20, 20, 20, 255],
+            align: TextAlign::Left,
+            valign: VAlign::default(),
+            indent: 0.0,
+            crop: Crop::default(),
+            image_w: 0,
+            image_h: 0,
+            fill_color: default_fill_color(),
+            stroke_width: default_stroke_width(),
+            stroke_color: default_stroke_color(),
+            corner_radius: 0.0,
+        }
+    }
+
+    pub fn new_line(id: u64, x: f32, y: f32) -> Self {
+        Element {
+            id,
+            kind: ElementKind::Line,
+            x,
+            y,
+            w: 200.0,
+            h: 0.0,
+            rotation: 0.0,
+            text: String::new(),
+            font_size: 14.0,
+            font: default_font_key(),
+            color: [20, 20, 20, 255],
+            align: TextAlign::Left,
+            valign: VAlign::default(),
+            indent: 0.0,
+            crop: Crop::default(),
+            image_w: 0,
+            image_h: 0,
+            fill_color: [0, 0, 0, 0],
+            stroke_width: 2.0,
+            stroke_color: [40, 40, 40, 255],
+            corner_radius: 0.0,
         }
     }
 }

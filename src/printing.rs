@@ -102,6 +102,7 @@ pub fn export_pdf(
                     draw_text(&layer, el, ph_mm, &font);
                 }
                 ElementKind::Image => draw_image(&layer, el, ph_mm, images),
+                ElementKind::Rectangle | ElementKind::Line => {}
             }
         }
     }
