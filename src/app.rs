@@ -430,6 +430,42 @@ impl EditorApp {
         self.status = s.into();
     }
 
+    /// Lädt ein Projekt aus einer JSON-Zeichenkette (Web File-Dialog).
+    fn load_project_from_json(&mut self, json: &str) {
+        match serde_json::from_str::<crate::io::Project>(json) {
+            Ok(project) => {
+                use base64::Engine;
+                let mut images = crate::store::ImageStore::default();
+                let mut max_id = 0u64;
+                for img in project.images {
+                    let png = base64::engine::general_purpose::STANDARD
+                        .decode(&img.png_base64)
+                        .unwrap_or_default();
+                    let dim = image::load_from_memory(&png)
+                        .map(|i| (i.width(), i.height()))
+                        .unwrap_or((0, 0));
+                    images.insert(img.id, png, dim);
+                }
+                for page in &project.doc.pages {
+                    for el in &page.elements {
+                        max_id = max_id.max(el.id);
+                    }
+                }
+                self.doc = project.doc;
+                self.images = images;
+                self.page_index = 0;
+                self.next_id = max_id + 1;
+                self.clear_selection();
+                self.editing = None;
+                self.crop_mode = false;
+                self.interaction = Interaction::None;
+                self.modified = false;
+                self.set_status("Dokument geöffnet.");
+            }
+            Err(e) => self.set_status(format!("Fehler beim Öffnen: {e}")),
+        }
+    }
+
     // ===================================================================
     // Undo / Redo
     // ===================================================================
@@ -540,6 +576,11 @@ impl eframe::App for EditorApp {
         // Web: asynchron geladenes Bild aus dem File-Dialog oder Zwischenablage.
         if let Some(bytes) = crate::io::take_pending_image() {
             self.add_image_from_bytes(bytes, None);
+        }
+
+        // Web: asynchron geladene Projekt-Datei (.boxdoc).
+        if let Some(json) = crate::io::take_pending_project() {
+            self.load_project_from_json(&json);
         }
     }
 }

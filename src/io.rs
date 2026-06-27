@@ -10,15 +10,15 @@ use crate::model::Document;
 use crate::store::ImageStore;
 
 #[derive(Serialize, Deserialize)]
-struct ProjectImage {
-    id: u64,
-    png_base64: String,
+pub struct ProjectImage {
+    pub id: u64,
+    pub png_base64: String,
 }
 
 #[derive(Serialize, Deserialize)]
-struct Project {
-    doc: Document,
-    images: Vec<ProjectImage>,
+pub struct Project {
+    pub doc: Document,
+    pub images: Vec<ProjectImage>,
 }
 
 // ===========================================================================
@@ -247,7 +247,8 @@ mod web_impl {
     use base64::Engine;
 
     pub fn open_project_dialog(app: &mut EditorApp) {
-        app.set_status("Web: Datei per Drag&Drop auf die Zeichenfläche ziehen.");
+        super::trigger_project_file_input();
+        app.set_status(".boxdoc-Datei auswählen…");
     }
 
     pub fn save_project_dialog(app: &mut EditorApp, _save_as: bool) {
@@ -346,6 +347,9 @@ pub use web_impl::*;
 static PENDING_IMAGE: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
 
 #[cfg(target_arch = "wasm32")]
+static PENDING_PROJECT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+#[cfg(target_arch = "wasm32")]
 fn trigger_file_input() {
     use wasm_bindgen::JsCast;
     use web_sys::HtmlInputElement;
@@ -378,6 +382,53 @@ fn trigger_file_input() {
                         let uint8 = js_sys::Uint8Array::new(&result).to_vec();
                         if let Ok(mut p) = PENDING_IMAGE.lock() {
                             *p = Some(uint8);
+                        }
+                    }
+                })
+            };
+            reader.set_onload(Some(onload.as_ref().unchecked_ref()));
+            onload.forget();
+        });
+
+    input.set_onchange(Some(onchange.as_ref().unchecked_ref()));
+    onchange.forget();
+    input.click();
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn trigger_project_file_input() {
+    use wasm_bindgen::JsCast;
+    use web_sys::HtmlInputElement;
+
+    let document = web_sys::window().unwrap().document().unwrap();
+    let input = document
+        .create_element("input")
+        .unwrap()
+        .dyn_into::<HtmlInputElement>()
+        .unwrap();
+    input.set_type("file");
+    input.set_accept(".boxdoc,application/json");
+    input.set_multiple(false);
+
+    let onchange: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)> =
+        wasm_bindgen::closure::Closure::new(move |event: web_sys::Event| {
+            let input: Option<HtmlInputElement> = event
+                .target()
+                .and_then(|t| t.dyn_into::<HtmlInputElement>().ok());
+            let Some(input) = input else { return };
+            let Some(file) = input.files().and_then(|f| f.get(0)) else { return };
+
+            let reader = web_sys::FileReader::new().unwrap();
+            let _ = reader.read_as_text(&file);
+
+            let onload: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)> = {
+                let reader = reader.clone();
+                wasm_bindgen::closure::Closure::new(move |_e: web_sys::Event| {
+                    if let Ok(result) = reader.result() {
+                        if let Some(text) = result.as_string() {
+                            if let Ok(mut p) = PENDING_PROJECT.lock() {
+                                *p = Some(text);
+                            }
                         }
                     }
                 })
@@ -430,6 +481,17 @@ pub fn install_clipboard_paste_listener() {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn install_clipboard_paste_listener() {}
+
+/// Auf Web: gibt die zuletzt geladene Projekt-JSON zurück und leert den Puffer.
+#[cfg(target_arch = "wasm32")]
+pub fn take_pending_project() -> Option<String> {
+    PENDING_PROJECT.lock().unwrap().take()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn take_pending_project() -> Option<String> {
+    None
+}
 
 /// Auf Web: gibt die zuletzt geladenen Bild-Bytes zurück (falls vorhanden)
 /// und leert den Puffer. Auf Native immer `None`.
