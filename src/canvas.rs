@@ -439,9 +439,8 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
     }
 
     // --- Tastatur: Copy/Paste ---
-    // egui 0.34 wandelt Ctrl+C/V in Event::Copy/Event::Paste um, nicht in
-    // Event::Key. Wir prüfen beide und konsumieren sie, damit TextEdit-Widgets
-    // sie nicht bekommen, wenn wir nicht im Edit-Modus sind.
+    // Auf Native: egui wandelt Ctrl+C/V in Event::Copy/Event::Paste um.
+    // Auf Web: oft nur als Event::Key sichtbar. Wir prüfen BEIDE Wege.
     let mut do_copy = false;
     let mut do_paste = false;
     ctx.input_mut(|i| {
@@ -450,7 +449,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                 egui::Event::Copy => {
                     if app.editing.is_none() {
                         do_copy = true;
-                        false // konsumieren
+                        false
                     } else {
                         true
                     }
@@ -458,7 +457,24 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                 egui::Event::Paste(_) => {
                     if app.editing.is_none() {
                         do_paste = true;
-                        false // konsumieren
+                        false
+                    } else {
+                        true
+                    }
+                }
+                egui::Event::Key { key, pressed: true, modifiers, .. } => {
+                    if app.editing.is_none() {
+                        match *key {
+                            egui::Key::C if modifiers.ctrl => {
+                                do_copy = true;
+                                false // konsumieren
+                            }
+                            egui::Key::V if modifiers.ctrl => {
+                                do_paste = true;
+                                false
+                            }
+                            _ => true,
+                        }
                     } else {
                         true
                     }

@@ -208,7 +208,7 @@ impl Default for EditorApp {
             file_path: None,
             modified: false,
             status: String::from("Bereit. Tipp: Bild per Drag&Drop hereinziehen."),
-            settings: Settings::default(),
+            settings: crate::settings_io::load_or_detect(),
             multi_anchor: BBoxAnchor::default(),
             pos_x: 0.0,
             pos_y: 0.0,
@@ -554,6 +554,7 @@ impl EditorApp {
                         self.theme_target = theme;
                         self.theme_anim = 0.0;
                         self.settings.theme = theme;
+                        crate::settings_io::save(&self.settings);
                     }
 
                     ui.separator();
@@ -565,6 +566,7 @@ impl EditorApp {
                     }
                     if side != self.settings.panel_side {
                         self.settings.panel_side = side;
+                        crate::settings_io::save(&self.settings);
                     }
 
                     ui.separator();
