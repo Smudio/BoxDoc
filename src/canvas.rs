@@ -17,6 +17,7 @@ use crate::store::ImageStore;
 enum Active {
     Drag(Vec<(u64, f32, f32)>, Pos2),
     Resize(u64, Pos2, f32, f32),
+    ResizeEdge(u64, CropEdge, f32, Pos2),
     Rotate(u64),
     Crop(u64, CropEdge, crate::model::Crop),
     SelectionBox(Pos2),
@@ -323,6 +324,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
             }
             Interaction::DragBodies { .. }
             | Interaction::Resize { .. }
+            | Interaction::ResizeEdge { .. }
             | Interaction::Rotate { .. }
             | Interaction::Crop { .. }
             | Interaction::LineEndpoint { .. } => {
@@ -345,6 +347,12 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
             rotation,
             start_aspect,
         } => Some(Active::Resize(*id, *anchor, *rotation, *start_aspect)),
+        Interaction::ResizeEdge {
+            id,
+            edge,
+            rotation,
+            anchor,
+        } => Some(Active::ResizeEdge(*id, *edge, *rotation, *anchor)),
         Interaction::Rotate { id } => Some(Active::Rotate(*id)),
         Interaction::Crop {
             id,
@@ -405,6 +413,12 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                 if let Some(el) = element_mut(app, page_idx, id) {
                     let shift = ui.input(|i| i.modifiers.shift);
                     resize_to_pointer(el, anchor, rotation, to_page(pointer), shift, start_aspect);
+                    app.touch();
+                }
+            }
+            Active::ResizeEdge(id, edge, rotation, anchor) => {
+                if let Some(el) = element_mut(app, page_idx, id) {
+                    resize_edge_to_pointer(el, edge, anchor, rotation, to_page(pointer));
                     app.touch();
                 }
             }
@@ -1006,6 +1020,22 @@ fn draw_selection(
             painter.circle_filled(*p, 5.0, Color32::WHITE);
             painter.circle_stroke(*p, 5.0, Stroke::new(1.5, handle_color));
         }
+        // Kanten-Griffe (Mitten) nur für Rechtecke.
+        if el.kind == ElementKind::Rectangle {
+            for p in edge_mid_positions(el, &to_screen, zoom) {
+                painter.rect_filled(
+                    Rect::from_center_size(p, Vec2::splat(8.0)),
+                    1.5,
+                    Color32::WHITE,
+                );
+                painter.rect_stroke(
+                    Rect::from_center_size(p, Vec2::splat(8.0)),
+                    1.5,
+                    Stroke::new(1.5, handle_color),
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
     }
 }
 
@@ -1065,6 +1095,25 @@ fn corner_positions(el: &Element, to_screen: &impl Fn(Pos2) -> Pos2, zoom: f32) 
     let mut out = [Pos2::ZERO; 4];
     for i in 0..4 {
         out[i] = local_to_world(center, el.rotation, cl[i]);
+    }
+    out
+}
+
+/// Mittelpunkte der vier Kanten in Bildschirmkoordinaten.
+/// Reihenfolge: [Left, Right, Top, Bottom].
+fn edge_mid_positions(el: &Element, to_screen: &impl Fn(Pos2) -> Pos2, zoom: f32) -> [Pos2; 4] {
+    let center = to_screen(Pos2::new(el.x + el.w / 2.0, el.y + el.h / 2.0));
+    let hw = el.w * zoom / 2.0;
+    let hh = el.h * zoom / 2.0;
+    let local = [
+        Vec2::new(-hw, 0.0),
+        Vec2::new(hw, 0.0),
+        Vec2::new(0.0, -hh),
+        Vec2::new(0.0, hh),
+    ];
+    let mut out = [Pos2::ZERO; 4];
+    for i in 0..4 {
+        out[i] = local_to_world(center, el.rotation, local[i]);
     }
     out
 }
@@ -1154,7 +1203,38 @@ fn start_interaction(
         }
     }
 
-    // 4) Ecken (Größe ändern — nicht für Linien)
+    // 4) Kanten (Größe in einer Richtung ändern — nicht für Linien)
+    if let Some(id) = sel {
+        if let Some(el) = app.doc.pages[page_idx].elements.iter().find(|e| e.id == id) {
+            if el.kind != ElementKind::Line && !(crop_mode && el.kind == ElementKind::Image) {
+                let edges = edge_mid_positions(el, &to_screen, zoom);
+                // [Left, Right, Top, Bottom]
+                for (i, ep) in edges.iter().enumerate() {
+                    if ep.distance(pointer) < 9.0 {
+                        let (edge, anchor_idx) = match i {
+                            0 => (CropEdge::Left, 1),
+                            1 => (CropEdge::Right, 0),
+                            2 => (CropEdge::Top, 3),
+                            _ => (CropEdge::Bottom, 2),
+                        };
+                        let a = to_page(edges[anchor_idx]);
+                        let anchor = Pos2::new(a.x, a.y);
+                        let rotation = el.rotation;
+                        app.push_history();
+                        app.interaction = Interaction::ResizeEdge {
+                            id,
+                            edge,
+                            rotation,
+                            anchor,
+                        };
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    // 5) Ecken (Größe ändern — nicht für Linien)
     if let Some(id) = sel {
         if let Some(el) = app.doc.pages[page_idx].elements.iter().find(|e| e.id == id) {
             if el.kind != ElementKind::Line && !(crop_mode && el.kind == ElementKind::Image) {
@@ -1269,6 +1349,43 @@ fn resize_to_pointer(
     el.h = new_h;
     el.x = new_center.x - new_w / 2.0;
     el.y = new_center.y - new_h / 2.0;
+}
+
+/// Ändert nur eine Dimension (Breite bei Left/Right, Höhe bei Top/Bottom).
+/// Die gegenüberliegende Kante bleibt fixiert (anchor = ihr Mittelpunkt).
+fn resize_edge_to_pointer(
+    el: &mut Element,
+    edge: CropEdge,
+    anchor: Pos2,
+    rotation: f32,
+    pointer_page: Vec2,
+) {
+    let pointer_page = Pos2::new(pointer_page.x, pointer_page.y);
+    let dv = pointer_page - anchor;
+    let local = rotate_vec(dv, -rotation);
+    match edge {
+        CropEdge::Left | CropEdge::Right => {
+            // Breite = |lokale x-Distanz|, Höhe bleibt unverändert.
+            let new_w = local.x.abs().max(2.0);
+            let sign_x = if local.x >= 0.0 { 1.0 } else { -1.0 };
+            let half_local = Vec2::new(sign_x * new_w / 2.0, 0.0);
+            let center_offset = rotate_vec(half_local, rotation);
+            let new_center = anchor + center_offset;
+            el.w = new_w;
+            el.x = new_center.x - new_w / 2.0;
+            el.y = new_center.y - el.h / 2.0;
+        }
+        CropEdge::Top | CropEdge::Bottom => {
+            let new_h = local.y.abs().max(2.0);
+            let sign_y = if local.y >= 0.0 { 1.0 } else { -1.0 };
+            let half_local = Vec2::new(0.0, sign_y * new_h / 2.0);
+            let center_offset = rotate_vec(half_local, rotation);
+            let new_center = anchor + center_offset;
+            el.h = new_h;
+            el.y = new_center.y - new_h / 2.0;
+            el.x = new_center.x - el.w / 2.0;
+        }
+    }
 }
 
 fn crop_to_pointer(

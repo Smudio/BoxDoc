@@ -96,6 +96,13 @@ pub enum Interaction {
         rotation: f32,
         start_aspect: f32,
     },
+    /// Kante ziehen (Größe in einer Richtung ändern); gegenüberliegende Kante bleibt fix.
+    ResizeEdge {
+        id: u64,
+        edge: CropEdge,
+        rotation: f32,
+        anchor: egui::Pos2,
+    },
     /// Drehen.
     Rotate {
         id: u64,
