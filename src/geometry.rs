@@ -37,26 +37,14 @@ pub fn world_to_local(center: Pos2, rotation_deg: f32, world: Pos2) -> Vec2 {
 /// 45°-Raster liegt (0°, 45°, 90°, 135°, …). Die Länge des Vektors bleibt
 /// erhalten. Dies ergibt horizontale, vertikale und 45°-Diagonal-Richtungen.
 pub fn snap_angle_45(fixed: Pos2, p: Pos2) -> Pos2 {
-    snap_angle_step(fixed, p, std::f32::consts::FRAC_PI_4)
-}
-
-/// Snapt den Punkt `p` so, dass der Vektor von `fixed` zu `p` auf einem
-/// 90°-Raster liegt (0°, 90°, 180°, 270°) – also exakt horizontal oder
-/// vertikal. Die Länge des Vektors bleibt erhalten.
-pub fn snap_angle_90(fixed: Pos2, p: Pos2) -> Pos2 {
-    snap_angle_step(fixed, p, std::f32::consts::FRAC_PI_2)
-}
-
-/// Allgemeiner Winkel-Snap: der Vektor von `fixed` nach `p` wird auf das
-/// nächste Vielfache von `step` (Bogenmaß) gerundet, die Länge bleibt erhalten.
-pub fn snap_angle_step(fixed: Pos2, p: Pos2, step: f32) -> Pos2 {
     let dx = p.x - fixed.x;
     let dy = p.y - fixed.y;
     let len = dx.hypot(dy);
-    if len < 0.001 || step <= 0.0 {
+    if len < 0.001 {
         return p;
     }
     let angle = dy.atan2(dx);
+    let step = std::f32::consts::FRAC_PI_4;
     let snapped = (angle / step).round() * step;
     Pos2::new(fixed.x + snapped.cos() * len, fixed.y + snapped.sin() * len)
 }

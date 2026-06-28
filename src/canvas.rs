@@ -7,7 +7,7 @@ use egui::{
 };
 
 use crate::app::{CropEdge, EditorApp, Interaction};
-use crate::geometry::{local_corners, local_to_world, rotate_vec, snap_angle_90, world_to_local};
+use crate::geometry::{local_corners, local_to_world, rotate_vec, snap_angle_45, world_to_local};
 use crate::model::{page_size_pt, Element, ElementKind, PageAlign, ScrollMode};
 use crate::store::ImageStore;
 
@@ -193,13 +193,8 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
             [top, bot],
             Stroke::new(1.5, Color32::from_rgb(80, 200, 120)),
         );
-        painter.text(
-            Pos2::new(cx, top.y - 4.0),
-            egui::Align2::CENTER_BOTTOM,
-            "◉",
-            FontId::proportional(14.0),
-            Color32::from_rgb(80, 200, 120),
-        );
+        let marker_color = Color32::from_rgb(80, 200, 120);
+        painter.circle_filled(Pos2::new(cx, top.y), 4.0, marker_color);
     }
 
     // --- Paste: Ghost + Preview Rendering ---
@@ -275,12 +270,14 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
             }
 
             if snapped {
+                let snap_color = Color32::from_rgb(80, 200, 120);
+                painter.circle_filled(pt + Vec2::new(4.0, -14.0), 4.0, snap_color);
                 painter.text(
                     pt + Vec2::new(12.0, -20.0),
                     egui::Align2::LEFT_BOTTOM,
-                    "◉ Snap",
+                    "Snap",
                     FontId::proportional(12.0),
-                    Color32::from_rgb(80, 200, 120),
+                    snap_color,
                 );
             }
         }
@@ -355,9 +352,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
             start_crop,
         } => Some(Active::Crop(*id, *edge, *start_crop)),
         Interaction::SelectionBox { start } => Some(Active::SelectionBox(*start)),
-        Interaction::LineEndpoint { id, is_start } => {
-            Some(Active::LineEndpoint(*id, *is_start))
-        }
+        Interaction::LineEndpoint { id, is_start } => Some(Active::LineEndpoint(*id, *is_start)),
         _ => None,
     };
     if let (Some(a), Some(pointer)) = (active, pointer) {
@@ -427,31 +422,6 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                     app.touch();
                 }
             }
-            Active::LineEndpoint(id, is_start) => {
-                if let Some(el) = element_mut(app, page_idx, id) {
-                    let shift = ui.input(|i| i.modifiers.shift);
-                    let center = Pos2::new(el.x + el.w / 2.0, el.y);
-                    let start = local_to_world(center, el.rotation, Vec2::new(-el.w / 2.0, 0.0));
-                    let end = local_to_world(center, el.rotation, Vec2::new(el.w / 2.0, 0.0));
-                    let fixed = if is_start { end } else { start };
-                    let mut p = to_page(pointer).to_pos2();
-                    if shift {
-                        p = snap_angle_45(fixed, p);
-                    }
-                    let (new_start, new_end) = if is_start { (p, fixed) } else { (fixed, p) };
-                    let dx = new_end.x - new_start.x;
-                    let dy = new_end.y - new_start.y;
-                    let len = dx.hypot(dy).max(0.1);
-                    let rotation = dy.atan2(dx).to_degrees();
-                    let cx = (new_start.x + new_end.x) / 2.0;
-                    let cy = (new_start.y + new_end.y) / 2.0;
-                    el.x = cx - len / 2.0;
-                    el.y = cy;
-                    el.w = len;
-                    el.rotation = rotation;
-                    app.touch();
-                }
-            }
             Active::SelectionBox(start) => {
                 // Auswahl-Rechteck zeichnen. `start` und `pointer` sind
                 // beide Screen-Koordinaten — keine Transformation nötig.
@@ -464,6 +434,37 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                     Stroke::new(1.0, Color32::from_rgb(40, 120, 220)),
                     egui::StrokeKind::Inside,
                 ));
+            }
+            Active::LineEndpoint(id, is_start) => {
+                if let Some(el) = element_mut(app, page_idx, id) {
+                    // Aktuelle Endpunkte in Seitenkoordinaten berechnen.
+                    let center = Pos2::new(el.x + el.w / 2.0, el.y);
+                    let start = local_to_world(center, el.rotation, Vec2::new(-el.w / 2.0, 0.0));
+                    let end = local_to_world(center, el.rotation, Vec2::new(el.w / 2.0, 0.0));
+                    // Der nicht-gezogene Endpunkt bleibt fixiert.
+                    let fixed = if is_start { end } else { start };
+                    let ptr_page = to_page(pointer);
+                    let mut target = Pos2::new(ptr_page.x, ptr_page.y);
+                    // Shift → auf 45°-Raster schnappen (H/V + Diagonalen).
+                    let shift = ui.input(|i| i.modifiers.shift);
+                    if shift {
+                        target = snap_angle_45(fixed, target);
+                    }
+                    // Neue Geometrie aus (start, end) herleiten.
+                    let (s, e) = if is_start {
+                        (target, fixed)
+                    } else {
+                        (fixed, target)
+                    };
+                    let dx = e.x - s.x;
+                    let dy = e.y - s.y;
+                    let len = dx.hypot(dy).max(1.0);
+                    el.w = len;
+                    el.rotation = dy.atan2(dx).to_degrees();
+                    el.x = (s.x + e.x) / 2.0 - len / 2.0;
+                    el.y = (s.y + e.y) / 2.0;
+                    app.touch();
+                }
             }
         }
     }

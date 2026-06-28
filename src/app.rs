@@ -73,7 +73,10 @@ pub struct View {
 impl Default for View {
     fn default() -> Self {
         // Pan X = 0, denn die horizontale Ausrichtung wird dynamisch berechnet.
-        View { zoom: 1.0, pan: Vec2::new(0.0, 24.0) }
+        View {
+            zoom: 1.0,
+            pan: Vec2::new(0.0, 24.0),
+        }
     }
 }
 
@@ -87,15 +90,31 @@ pub enum Interaction {
         starts: Vec<(u64, f32, f32)>,
     },
     /// Größe ändern; gegenüberliegende Ecke bleibt fix.
-    Resize { id: u64, anchor: egui::Pos2, rotation: f32, start_aspect: f32 },
+    Resize {
+        id: u64,
+        anchor: egui::Pos2,
+        rotation: f32,
+        start_aspect: f32,
+    },
     /// Drehen.
-    Rotate { id: u64 },
+    Rotate {
+        id: u64,
+    },
     /// Bild zuschneiden.
-    Crop { id: u64, edge: CropEdge, start_crop: crate::model::Crop },
+    Crop {
+        id: u64,
+        edge: CropEdge,
+        start_crop: crate::model::Crop,
+    },
     /// Auswahl-Rechteck ziehen.
-    SelectionBox { start: egui::Pos2 },
+    SelectionBox {
+        start: egui::Pos2,
+    },
     /// Linien-Endpunkt ziehen (id, true=start, false=end).
-    LineEndpoint { id: u64, is_start: bool },
+    LineEndpoint {
+        id: u64,
+        is_start: bool,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -419,7 +438,9 @@ impl EditorApp {
     }
 
     pub fn current_elements_mut(&mut self) -> Option<&mut Vec<Element>> {
-        self.doc.current_page_mut(self.page_index).map(|p| &mut p.elements)
+        self.doc
+            .current_page_mut(self.page_index)
+            .map(|p| &mut p.elements)
     }
 
     pub fn touch(&mut self) {
@@ -526,12 +547,7 @@ impl eframe::App for EditorApp {
         if self.theme_anim < 1.0 {
             let dt = ctx.input(|i| i.unstable_dt).min(0.1);
             self.theme_anim = (self.theme_anim + dt / crate::themes::fade_duration()).min(1.0);
-            crate::themes::tick_fade(
-                &ctx,
-                self.theme_from,
-                self.theme_target,
-                self.theme_anim,
-            );
+            crate::themes::tick_fade(&ctx, self.theme_from, self.theme_target, self.theme_anim);
         }
 
         self.show_menu(&ctx);
@@ -638,8 +654,16 @@ impl EditorApp {
                         ui.separator();
                         ui.label("Seitenwechsel beim Scrollen:");
                         let mut sm = self.settings.scroll_mode;
-                        ui.selectable_value(&mut sm, ScrollMode::Continuous, "Fortlaufend (Scrollen wechselt Seite)");
-                        ui.selectable_value(&mut sm, ScrollMode::PageByPage, "Seitenweise (über Eigenschaften)");
+                        ui.selectable_value(
+                            &mut sm,
+                            ScrollMode::Continuous,
+                            "Fortlaufend (Scrollen wechselt Seite)",
+                        );
+                        ui.selectable_value(
+                            &mut sm,
+                            ScrollMode::PageByPage,
+                            "Seitenweise (über Eigenschaften)",
+                        );
                         if sm != self.settings.scroll_mode {
                             self.settings.scroll_mode = sm;
                         }
@@ -742,10 +766,10 @@ impl EditorApp {
 
                 ui.separator();
                 ui.label(format!("{:.0}%", self.view.zoom * 100.0));
-                if ui.button("−").clicked() {
+                if ui.button("-").clicked() {
                     self.view.zoom = (self.view.zoom * 0.9).max(0.1);
                 }
-                if ui.button("＋").clicked() {
+                if ui.button("+").clicked() {
                     self.view.zoom = (self.view.zoom * 1.1).min(6.0);
                 }
             });
@@ -772,16 +796,16 @@ impl EditorApp {
                     ));
                     ui.horizontal(|ui| {
                         ui.add_enabled_ui(app.page_index > 0, |ui| {
-                            if ui.button("◀").clicked() {
+                            if ui.button("<").clicked() {
                                 app.page_index -= 1;
                                 app.clear_selection();
                             }
                         });
-                        if ui.button("＋ Seite").clicked() {
+                        if ui.button("+ Seite").clicked() {
                             app.add_page();
                         }
                         ui.add_enabled_ui(app.page_index + 1 < app.doc.pages.len(), |ui| {
-                            if ui.button("▶").clicked() {
+                            if ui.button(">").clicked() {
                                 app.page_index += 1;
                                 app.clear_selection();
                             }
@@ -790,7 +814,9 @@ impl EditorApp {
                     ui.separator();
 
                     let Some(sel) = app.primary() else {
-                        ui.label("Kein Objekt ausgewählt.\nKlicke oder ziehe ein Auswahl-Rechteck.");
+                        ui.label(
+                            "Kein Objekt ausgewählt.\nKlicke oder ziehe ein Auswahl-Rechteck.",
+                        );
                         return;
                     };
                     if app.selection.len() == 1 {
@@ -879,16 +905,31 @@ impl EditorApp {
             });
             ui.horizontal(|ui| {
                 ui.label("B:");
-                ui.add(egui::DragValue::new(&mut w_d).range(0.01..=2000.0).speed(0.1).suffix(suffix));
-                ui.label("H:");
-                ui.add(egui::DragValue::new(&mut h_d).range(0.01..=2000.0).speed(0.1).suffix(suffix));
+                ui.add(
+                    egui::DragValue::new(&mut w_d)
+                        .range(0.01..=2000.0)
+                        .speed(0.1)
+                        .suffix(suffix),
+                );
+                // Linien haben keine Höhe (h = 0) — Feld ausblenden.
+                if el.kind != ElementKind::Line {
+                    ui.label("H:");
+                    ui.add(
+                        egui::DragValue::new(&mut h_d)
+                            .range(0.01..=2000.0)
+                            .speed(0.1)
+                            .suffix(suffix),
+                    );
+                }
             });
 
             // Zurückschreiben: Element-Position = eingegebener Wert − Offset.
             el.x = unit.to_pt(x_d) - ox;
             el.y = unit.to_pt(y_d) - oy;
             el.w = unit.to_pt(w_d);
-            el.h = unit.to_pt(h_d);
+            if el.kind != ElementKind::Line {
+                el.h = unit.to_pt(h_d);
+            }
         }
 
         // --- Element-spezifische Eigenschaften ---
@@ -920,27 +961,49 @@ impl EditorApp {
                 });
                 ui.horizontal(|ui| {
                     ui.label("Schriftgröße:");
-                    ui.add(egui::DragValue::new(&mut el.font_size).range(4.0..=400.0).speed(0.5).suffix("pt"));
+                    ui.add(
+                        egui::DragValue::new(&mut el.font_size)
+                            .range(4.0..=400.0)
+                            .speed(0.5)
+                            .suffix("pt"),
+                    );
                 });
                 ui.horizontal(|ui| {
-                    if ui.selectable_label(el.bold, egui::RichText::new("B").strong()).clicked() {
+                    if ui
+                        .selectable_label(el.bold, egui::RichText::new("B").strong())
+                        .clicked()
+                    {
                         el.bold = !el.bold;
                     }
-                    if ui.selectable_label(el.italic, egui::RichText::new("I").italics()).clicked() {
+                    if ui
+                        .selectable_label(el.italic, egui::RichText::new("I").italics())
+                        .clicked()
+                    {
                         el.italic = !el.italic;
                     }
-                    if ui.selectable_label(el.underline, egui::RichText::new("U").underline()).clicked() {
+                    if ui
+                        .selectable_label(el.underline, egui::RichText::new("U").underline())
+                        .clicked()
+                    {
                         el.underline = !el.underline;
                     }
                 });
                 ui.horizontal(|ui| {
                     ui.label("Einzug:");
-                    ui.add(egui::DragValue::new(&mut el.indent).range(0.0..=400.0).speed(0.5).suffix("pt"));
+                    ui.add(
+                        egui::DragValue::new(&mut el.indent)
+                            .range(0.0..=400.0)
+                            .speed(0.5)
+                            .suffix("pt"),
+                    );
                 });
                 ui.horizontal(|ui| {
                     ui.label("Farbe:");
                     let mut c = Color32::from_rgba_unmultiplied(
-                        el.color[0], el.color[1], el.color[2], el.color[3],
+                        el.color[0],
+                        el.color[1],
+                        el.color[2],
+                        el.color[3],
                     );
                     ui.color_edit_button_srgba(&mut c);
                     el.color = c.to_srgba_unmultiplied();
@@ -962,7 +1025,12 @@ impl EditorApp {
                 ui.label(format!("Bildgröße: {}×{}", el.image_w, el.image_h));
                 ui.horizontal(|ui| {
                     ui.label("Drehung:");
-                    ui.add(egui::DragValue::new(&mut el.rotation).range(-360.0..=360.0).speed(0.5).suffix("°"));
+                    ui.add(
+                        egui::DragValue::new(&mut el.rotation)
+                            .range(-360.0..=360.0)
+                            .speed(0.5)
+                            .suffix("°"),
+                    );
                 });
                 ui.horizontal(|ui| {
                     if ui.button("Crop-Modus").clicked() {
@@ -978,35 +1046,79 @@ impl EditorApp {
                 }
             }
             ElementKind::Rectangle | ElementKind::Line => {
-                ui.heading(if el.kind == ElementKind::Rectangle { "Rechteck" } else { "Linie" });
-                ui.horizontal(|ui| {
-                    ui.label("Drehung:");
-                    ui.add(egui::DragValue::new(&mut el.rotation).range(-360.0..=360.0).speed(0.5).suffix("°"));
+                ui.heading(if el.kind == ElementKind::Rectangle {
+                    "Rechteck"
+                } else {
+                    "Linie"
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Rahmenfarbe:");
+                    ui.label("Drehung:");
+                    ui.add(
+                        egui::DragValue::new(&mut el.rotation)
+                            .range(-360.0..=360.0)
+                            .speed(0.5)
+                            .suffix("°"),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    let is_line = el.kind == ElementKind::Line;
+                    ui.label(if is_line {
+                        "Linienfarbe:"
+                    } else {
+                        "Rahmenfarbe:"
+                    });
                     let mut c = Color32::from_rgba_unmultiplied(
-                        el.stroke_color[0], el.stroke_color[1], el.stroke_color[2], el.stroke_color[3],
+                        el.stroke_color[0],
+                        el.stroke_color[1],
+                        el.stroke_color[2],
+                        el.stroke_color[3],
                     );
                     ui.color_edit_button_srgba(&mut c);
                     el.stroke_color = c.to_srgba_unmultiplied();
                 });
                 ui.horizontal(|ui| {
+                    let is_line = el.kind == ElementKind::Line;
+                    ui.label(if is_line {
+                        "Linienstärke:"
+                    } else {
+                        "Rahmenstärke:"
+                    });
+                    ui.add(
+                        egui::DragValue::new(&mut el.stroke_width)
+                            .range(0.0..=50.0)
+                            .speed(0.2)
+                            .suffix("pt"),
+                    );
+                });
+                ui.horizontal(|ui| {
                     ui.label("Rahmenstärke:");
-                    ui.add(egui::DragValue::new(&mut el.stroke_width).range(0.0..=50.0).speed(0.2).suffix("pt"));
+                    ui.add(
+                        egui::DragValue::new(&mut el.stroke_width)
+                            .range(0.0..=50.0)
+                            .speed(0.2)
+                            .suffix("pt"),
+                    );
                 });
                 if el.kind == ElementKind::Rectangle {
                     ui.horizontal(|ui| {
                         ui.label("Füllfarbe:");
                         let mut c = Color32::from_rgba_unmultiplied(
-                            el.fill_color[0], el.fill_color[1], el.fill_color[2], el.fill_color[3],
+                            el.fill_color[0],
+                            el.fill_color[1],
+                            el.fill_color[2],
+                            el.fill_color[3],
                         );
                         ui.color_edit_button_srgba(&mut c);
                         el.fill_color = c.to_srgba_unmultiplied();
                     });
                     ui.horizontal(|ui| {
                         ui.label("Eckradius:");
-                        ui.add(egui::DragValue::new(&mut el.corner_radius).range(0.0..=100.0).speed(0.2).suffix("pt"));
+                        ui.add(
+                            egui::DragValue::new(&mut el.corner_radius)
+                                .range(0.0..=100.0)
+                                .speed(0.2)
+                                .suffix("pt"),
+                        );
                     });
                 }
                 if ui.button("90° drehen").clicked() {
@@ -1037,26 +1149,40 @@ impl EditorApp {
         // --- Ankerpunkt-Raster (3×3) ---
         // ui.horizontal + ui.vertical => jedes Array ist eine visuelle Spalte.
         ui.label("Referenzpunkt:");
-        let anchor_clicked = ui.horizontal(|ui| {
-            let columns = [
-                [BBoxAnchor::TopLeft, BBoxAnchor::MidLeft, BBoxAnchor::BotLeft],
-                [BBoxAnchor::TopCenter, BBoxAnchor::Center, BBoxAnchor::BotCenter],
-                [BBoxAnchor::TopRight, BBoxAnchor::MidRight, BBoxAnchor::BotRight],
-            ];
-            let mut changed = false;
-            for col in &columns {
-                ui.vertical(|ui| {
-                    for anchor in col {
-                        let sel = self.multi_anchor == *anchor;
-                        if ui.selectable_label(sel, "●").clicked() {
-                            self.multi_anchor = *anchor;
-                            changed = true;
+        let anchor_clicked = ui
+            .horizontal(|ui| {
+                let columns = [
+                    [
+                        BBoxAnchor::TopLeft,
+                        BBoxAnchor::MidLeft,
+                        BBoxAnchor::BotLeft,
+                    ],
+                    [
+                        BBoxAnchor::TopCenter,
+                        BBoxAnchor::Center,
+                        BBoxAnchor::BotCenter,
+                    ],
+                    [
+                        BBoxAnchor::TopRight,
+                        BBoxAnchor::MidRight,
+                        BBoxAnchor::BotRight,
+                    ],
+                ];
+                let mut changed = false;
+                for col in &columns {
+                    ui.vertical(|ui| {
+                        for anchor in col {
+                            let sel = self.multi_anchor == *anchor;
+                            if ui.selectable_label(sel, "•").clicked() {
+                                self.multi_anchor = *anchor;
+                                changed = true;
+                            }
                         }
-                    }
-                });
-            }
-            changed
-        }).inner;
+                    });
+                }
+                changed
+            })
+            .inner;
 
         // Ankerposition berechnen.
         let (fx, fy) = self.multi_anchor.frac();
@@ -1088,7 +1214,12 @@ impl EditorApp {
         let sel_ids = self.selection.clone();
         let page_ref = self.doc.pages.get(self.page_index);
         let sel_els: Vec<&Element> = page_ref
-            .map(|p| p.elements.iter().filter(|e| sel_ids.contains(&e.id)).collect())
+            .map(|p| {
+                p.elements
+                    .iter()
+                    .filter(|e| sel_ids.contains(&e.id))
+                    .collect()
+            })
             .unwrap_or_default();
 
         let widths: Vec<f32> = sel_els.iter().map(|e| e.w).collect();
@@ -1107,24 +1238,34 @@ impl EditorApp {
             0.0
         };
 
-        let rw = ui.horizontal(|ui| {
-            ui.label("B:");
-            let mut dv = egui::DragValue::new(&mut dw).range(0.0..=2000.0).speed(0.1).suffix(suffix);
-            if !w_uniform {
-                // Wert auf 0.0 lassen und nur als "—" anzeigen.
-                // changed() wird durch den custom_formatter nicht ausgelöst.
-                dv = dv.custom_formatter(|_, _| String::from("—"));
-            }
-            ui.add(dv)
-        }).inner;
-        let rh = ui.horizontal(|ui| {
-            ui.label("H:");
-            let mut dv = egui::DragValue::new(&mut dh).range(0.0..=2000.0).speed(0.1).suffix(suffix);
-            if !h_uniform {
-                dv = dv.custom_formatter(|_, _| String::from("—"));
-            }
-            ui.add(dv)
-        }).inner;
+        let rw = ui
+            .horizontal(|ui| {
+                ui.label("B:");
+                let mut dv = egui::DragValue::new(&mut dw)
+                    .range(0.0..=2000.0)
+                    .speed(0.1)
+                    .suffix(suffix);
+                if !w_uniform {
+                    // Wert auf 0.0 lassen und nur als "—" anzeigen.
+                    // changed() wird durch den custom_formatter nicht ausgelöst.
+                    dv = dv.custom_formatter(|_, _| String::from("—"));
+                }
+                ui.add(dv)
+            })
+            .inner;
+        let rh = ui
+            .horizontal(|ui| {
+                ui.label("H:");
+                let mut dv = egui::DragValue::new(&mut dh)
+                    .range(0.0..=2000.0)
+                    .speed(0.1)
+                    .suffix(suffix);
+                if !h_uniform {
+                    dv = dv.custom_formatter(|_, _| String::from("—"));
+                }
+                ui.add(dv)
+            })
+            .inner;
 
         // Nur anwenden, wenn der Wert vom Nutzer aktiv geändert wurde
         // und nicht der "—" Indikator ist.
@@ -1185,24 +1326,48 @@ impl EditorApp {
 
         // Horizontal-Buttons (Links / X-Mitte / Rechts)
         ui.horizontal(|ui| {
-            if ui.button("⟨ Links").on_hover_text("Alle an der linken Kante ausrichten").clicked() {
+            if ui
+                .button("Links")
+                .on_hover_text("Alle an der linken Kante ausrichten")
+                .clicked()
+            {
                 self.align_objects(AlignOp::Left);
             }
-            if ui.button("X Mitte").on_hover_text("Alle horizontal mittig ausrichten").clicked() {
+            if ui
+                .button("X Mitte")
+                .on_hover_text("Alle horizontal mittig ausrichten")
+                .clicked()
+            {
                 self.align_objects(AlignOp::CenterX);
             }
-            if ui.button("Rechts ⟩").on_hover_text("Alle an der rechten Kante ausrichten").clicked() {
+            if ui
+                .button("Rechts")
+                .on_hover_text("Alle an der rechten Kante ausrichten")
+                .clicked()
+            {
                 self.align_objects(AlignOp::Right);
             }
         });
         ui.horizontal(|ui| {
-            if ui.button("⟨ Oben").on_hover_text("Alle an der oberen Kante ausrichten").clicked() {
+            if ui
+                .button("Oben")
+                .on_hover_text("Alle an der oberen Kante ausrichten")
+                .clicked()
+            {
                 self.align_objects(AlignOp::Top);
             }
-            if ui.button("Y Mitte").on_hover_text("Alle vertikal mittig ausrichten").clicked() {
+            if ui
+                .button("Y Mitte")
+                .on_hover_text("Alle vertikal mittig ausrichten")
+                .clicked()
+            {
                 self.align_objects(AlignOp::CenterY);
             }
-            if ui.button("Unten ⟩").on_hover_text("Alle an der unteren Kante ausrichten").clicked() {
+            if ui
+                .button("Unten")
+                .on_hover_text("Alle an der unteren Kante ausrichten")
+                .clicked()
+            {
                 self.align_objects(AlignOp::Bottom);
             }
         });
@@ -1210,10 +1375,18 @@ impl EditorApp {
         ui.separator();
         ui.label("Abstände verteilen:");
         ui.horizontal(|ui| {
-            if ui.button("⇿ Horizontal").on_hover_text("Gleiche horizontale Abstände zwischen allen Objekten").clicked() {
+            if ui
+                .button("Horizontal")
+                .on_hover_text("Gleiche horizontale Abstände zwischen allen Objekten")
+                .clicked()
+            {
                 self.distribute_objects(DistributeOp::Horizontal);
             }
-            if ui.button("⇕ Vertikal").on_hover_text("Gleiche vertikale Abstände zwischen allen Objekten").clicked() {
+            if ui
+                .button("Vertikal")
+                .on_hover_text("Gleiche vertikale Abstände zwischen allen Objekten")
+                .clicked()
+            {
                 self.distribute_objects(DistributeOp::Vertical);
             }
         });
@@ -1226,29 +1399,45 @@ impl EditorApp {
         let page_idx = self.page_index;
 
         // Referenzwert aus dem ersten ausgewählten Element berechnen.
-        let Some(page) = self.doc.pages.get(page_idx) else { return };
-        let sel_els: Vec<&Element> = page.elements.iter().filter(|e| sel_ids.contains(&e.id)).collect();
+        let Some(page) = self.doc.pages.get(page_idx) else {
+            return;
+        };
+        let sel_els: Vec<&Element> = page
+            .elements
+            .iter()
+            .filter(|e| sel_ids.contains(&e.id))
+            .collect();
         if sel_els.len() < 2 {
             return;
         }
 
         let ref_val = match op {
             AlignOp::Left => sel_els.iter().map(|e| e.x).fold(f32::INFINITY, f32::min),
-            AlignOp::Right => sel_els.iter().map(|e| e.x + e.w).fold(f32::NEG_INFINITY, f32::max),
+            AlignOp::Right => sel_els
+                .iter()
+                .map(|e| e.x + e.w)
+                .fold(f32::NEG_INFINITY, f32::max),
             AlignOp::CenterX => {
                 let (min, max) = sel_els
                     .iter()
                     .map(|e| e.x)
-                    .fold((f32::INFINITY, f32::NEG_INFINITY), |(mn, mx), x| (mn.min(x), mx.max(x)));
+                    .fold((f32::INFINITY, f32::NEG_INFINITY), |(mn, mx), x| {
+                        (mn.min(x), mx.max(x))
+                    });
                 (min + max) / 2.0
             }
             AlignOp::Top => sel_els.iter().map(|e| e.y).fold(f32::INFINITY, f32::min),
-            AlignOp::Bottom => sel_els.iter().map(|e| e.y + e.h).fold(f32::NEG_INFINITY, f32::max),
+            AlignOp::Bottom => sel_els
+                .iter()
+                .map(|e| e.y + e.h)
+                .fold(f32::NEG_INFINITY, f32::max),
             AlignOp::CenterY => {
                 let (min, max) = sel_els
                     .iter()
                     .map(|e| e.y)
-                    .fold((f32::INFINITY, f32::NEG_INFINITY), |(mn, my), y| (mn.min(y), my.max(y)));
+                    .fold((f32::INFINITY, f32::NEG_INFINITY), |(mn, my), y| {
+                        (mn.min(y), my.max(y))
+                    });
                 (min + max) / 2.0
             }
         };
@@ -1279,7 +1468,9 @@ impl EditorApp {
         let sel_ids = self.selection.clone();
         let page_idx = self.page_index;
 
-        let Some(page) = self.doc.pages.get(page_idx) else { return };
+        let Some(page) = self.doc.pages.get(page_idx) else {
+            return;
+        };
         // (id, start, size) für jede Achse.
         let mut items: Vec<(u64, f32, f32)> = page
             .elements
@@ -1412,8 +1603,8 @@ impl EditorApp {
                 let mut chosen: Option<String> = None;
                 for def in crate::model::FONT_CHOICES {
                     let selected = data[0].font == def.key;
-                    let text = egui::RichText::new(def.display)
-                        .family(crate::fonts::family_for(def.key));
+                    let text =
+                        egui::RichText::new(def.display).family(crate::fonts::family_for(def.key));
                     if ui.selectable_label(selected, text).clicked() {
                         chosen = Some(def.key.to_string());
                     }
@@ -1436,23 +1627,23 @@ impl EditorApp {
         });
 
         // --- Schriftgröße ---
-        let size_uniform = data.iter().all(|d| (d.font_size - data[0].font_size).abs() < 0.01);
-        let mut ds = if size_uniform {
-            data[0].font_size
-        } else {
-            0.0
-        };
-        let rs = ui.horizontal(|ui| {
-            ui.label("Schriftgröße:");
-            let mut dv = egui::DragValue::new(&mut ds)
-                .range(4.0..=400.0)
-                .speed(0.5)
-                .suffix("pt");
-            if !size_uniform {
-                dv = dv.custom_formatter(|_, _| String::from("—"));
-            }
-            ui.add(dv)
-        }).inner;
+        let size_uniform = data
+            .iter()
+            .all(|d| (d.font_size - data[0].font_size).abs() < 0.01);
+        let mut ds = if size_uniform { data[0].font_size } else { 0.0 };
+        let rs = ui
+            .horizontal(|ui| {
+                ui.label("Schriftgröße:");
+                let mut dv = egui::DragValue::new(&mut ds)
+                    .range(4.0..=400.0)
+                    .speed(0.5)
+                    .suffix("pt");
+                if !size_uniform {
+                    dv = dv.custom_formatter(|_, _| String::from("—"));
+                }
+                ui.add(dv)
+            })
+            .inner;
         if rs.changed() {
             self.push_history();
             let ids = self.selection.clone();
@@ -1507,11 +1698,7 @@ impl EditorApp {
         }
         self.push_history();
         let ref_origin = self.clip_origins[0];
-        let paste_ref = if snapped {
-            ref_origin
-        } else {
-            cursor_page
-        };
+        let paste_ref = if snapped { ref_origin } else { cursor_page };
 
         // Daten vorab klonen, um Borrow-Konflikte zu vermeiden.
         let items: Vec<(Element, (f32, f32))> = self
@@ -1583,8 +1770,11 @@ impl EditorApp {
                 } else {
                     Color32::from_rgb(110, 200, 120)
                 };
-                ui.painter()
-                    .circle_filled(ui.min_rect().left_center() + Vec2::new(12.0, 0.0), 4.0, dot);
+                ui.painter().circle_filled(
+                    ui.min_rect().left_center() + Vec2::new(12.0, 0.0),
+                    4.0,
+                    dot,
+                );
                 ui.label(&self.status);
             });
         });
