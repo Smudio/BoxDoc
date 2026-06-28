@@ -2,11 +2,12 @@
 //! Maus-Interaktion (verschieben, skalieren, drehen, zuschneiden).
 
 use egui::{
-    epaint::{Mesh, Vertex}, Color32, FontFamily, FontId, Pos2, Rect, Sense, Shape, Stroke, Vec2,
+    epaint::{Mesh, Vertex},
+    Color32, FontFamily, FontId, Pos2, Rect, Sense, Shape, Stroke, Vec2,
 };
 
 use crate::app::{CropEdge, EditorApp, Interaction};
-use crate::geometry::{local_corners, local_to_world, rotate_vec, world_to_local};
+use crate::geometry::{local_corners, local_to_world, rotate_vec, snap_angle_90, world_to_local};
 use crate::model::{page_size_pt, Element, ElementKind, PageAlign, ScrollMode};
 use crate::store::ImageStore;
 
@@ -19,6 +20,8 @@ enum Active {
     Rotate(u64),
     Crop(u64, CropEdge, crate::model::Crop),
     SelectionBox(Pos2),
+    /// Linien-Endpunkt ziehen (id, is_start).
+    LineEndpoint(u64, bool),
 }
 
 pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) {
@@ -106,9 +109,8 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
     let zoom = app.view.zoom;
     let align_offset_x = compute_align_x(zoom);
     let pan = app.view.pan;
-    let to_screen = |p: Pos2| {
-        base + Vec2::new(align_offset_x + pan.x, pan.y) + Vec2::new(p.x, p.y) * zoom
-    };
+    let to_screen =
+        |p: Pos2| base + Vec2::new(align_offset_x + pan.x, pan.y) + Vec2::new(p.x, p.y) * zoom;
     let to_page = |s: Pos2| {
         Vec2::new(
             (s.x - base.x - align_offset_x - pan.x) / zoom,
@@ -117,7 +119,8 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
     };
 
     // --- Seite zeichnen ---
-    let page_rect_screen = Rect::from_min_size(to_screen(Pos2::ZERO), Vec2::new(pw_pt, ph_pt) * zoom);
+    let page_rect_screen =
+        Rect::from_min_size(to_screen(Pos2::ZERO), Vec2::new(pw_pt, ph_pt) * zoom);
     painter.rect_filled(
         page_rect_screen.translate(Vec2::new(4.0, 6.0)),
         2.0,
@@ -158,10 +161,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
             });
         if let Some(r) = el_rect {
             let buf = &mut app.editing.as_mut().unwrap().1;
-            let out = ui.put(
-                r,
-                egui::TextEdit::multiline(buf).desired_width(r.width()),
-            );
+            let out = ui.put(r, egui::TextEdit::multiline(buf).desired_width(r.width()));
             if app.edit_focus {
                 out.request_focus();
                 app.edit_focus = false;
@@ -210,13 +210,14 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
         // Ghost an Originalpositionen.
         for (i, el) in app.clipboard.iter().enumerate() {
             let (gx, gy) = app.clip_origins[i];
-            let r = Rect::from_min_size(
-                to_screen(Pos2::new(gx, gy)),
-                Vec2::new(el.w, el.h) * zoom,
-            );
+            let r = Rect::from_min_size(to_screen(Pos2::new(gx, gy)), Vec2::new(el.w, el.h) * zoom);
             painter.rect_filled(r, 2.0, ghost_fill);
             painter.add(egui::epaint::RectShape::new(
-                r, 2.0, Color32::TRANSPARENT, ghost_stroke, egui::StrokeKind::Inside,
+                r,
+                2.0,
+                Color32::TRANSPARENT,
+                ghost_stroke,
+                egui::StrokeKind::Inside,
             ));
             // Ghost-Text rendern.
             if el.kind == ElementKind::Text && !el.text.is_empty() {
@@ -234,11 +235,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
             let ref_screen = to_screen(Pos2::new(ref_origin.0, ref_origin.1));
             let snapped = pt.distance(ref_screen) < 16.0;
 
-            let paste_ref = if snapped {
-                ref_origin
-            } else {
-                (cp.x, cp.y)
-            };
+            let paste_ref = if snapped { ref_origin } else { (cp.x, cp.y) };
 
             let (p_fill, p_stroke) = if snapped {
                 (
@@ -256,19 +253,23 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                 let rel_x = app.clip_origins[i].0 - ref_origin.0;
                 let rel_y = app.clip_origins[i].1 - ref_origin.1;
                 let (px, py) = (paste_ref.0 + rel_x, paste_ref.1 + rel_y);
-                let r = Rect::from_min_size(
-                    to_screen(Pos2::new(px, py)),
-                    Vec2::new(el.w, el.h) * zoom,
-                );
+                let r =
+                    Rect::from_min_size(to_screen(Pos2::new(px, py)), Vec2::new(el.w, el.h) * zoom);
                 painter.rect_filled(r, 2.0, p_fill);
                 painter.add(egui::epaint::RectShape::new(
-                    r, 2.0, Color32::TRANSPARENT, p_stroke, egui::StrokeKind::Inside,
+                    r,
+                    2.0,
+                    Color32::TRANSPARENT,
+                    p_stroke,
+                    egui::StrokeKind::Inside,
                 ));
                 // Preview-Text rendern.
                 if el.kind == ElementKind::Text && !el.text.is_empty() {
                     let font = FontId::new(el.font_size * zoom, crate::fonts::family_for(&el.font));
-                    let color = Color32::from_rgba_unmultiplied(el.color[0], el.color[1], el.color[2], 160);
-                    let galley = painter.layout(el.text.clone(), font, color, (el.w * zoom).max(1.0));
+                    let color =
+                        Color32::from_rgba_unmultiplied(el.color[0], el.color[1], el.color[2], 160);
+                    let galley =
+                        painter.layout(el.text.clone(), font, color, (el.w * zoom).max(1.0));
                     painter.galley(to_screen(Pos2::new(px, py)), galley, color);
                 }
             }
@@ -326,7 +327,8 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
             Interaction::DragBodies { .. }
             | Interaction::Resize { .. }
             | Interaction::Rotate { .. }
-            | Interaction::Crop { .. } => {
+            | Interaction::Crop { .. }
+            | Interaction::LineEndpoint { .. } => {
                 app.interaction = Interaction::None;
                 app.snap_center = false;
             }
@@ -336,17 +338,26 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
 
     // --- Aktive Interaktion fortsetzen ---
     let active = match &app.interaction {
-        Interaction::DragBodies { start_pointer, starts } => {
-            Some(Active::Drag(starts.clone(), *start_pointer))
-        }
-        Interaction::Resize { id, anchor, rotation, start_aspect } => {
-            Some(Active::Resize(*id, *anchor, *rotation, *start_aspect))
-        }
+        Interaction::DragBodies {
+            start_pointer,
+            starts,
+        } => Some(Active::Drag(starts.clone(), *start_pointer)),
+        Interaction::Resize {
+            id,
+            anchor,
+            rotation,
+            start_aspect,
+        } => Some(Active::Resize(*id, *anchor, *rotation, *start_aspect)),
         Interaction::Rotate { id } => Some(Active::Rotate(*id)),
-        Interaction::Crop { id, edge, start_crop } => {
-            Some(Active::Crop(*id, *edge, *start_crop))
-        }
+        Interaction::Crop {
+            id,
+            edge,
+            start_crop,
+        } => Some(Active::Crop(*id, *edge, *start_crop)),
         Interaction::SelectionBox { start } => Some(Active::SelectionBox(*start)),
+        Interaction::LineEndpoint { id, is_start } => {
+            Some(Active::LineEndpoint(*id, *is_start))
+        }
         _ => None,
     };
     if let (Some(a), Some(pointer)) = (active, pointer) {
@@ -365,7 +376,13 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                 let page_cx = pw_pt_snap / 2.0;
                 let mut snap_offset_x: Option<f32> = None;
                 for (id, _, _) in &starts {
-                    let Some(el) = app.doc.pages[page_idx].elements.iter().find(|e| e.id == *id) else { continue };
+                    let Some(el) = app.doc.pages[page_idx]
+                        .elements
+                        .iter()
+                        .find(|e| e.id == *id)
+                    else {
+                        continue;
+                    };
                     let el_cx = el.x + el.w / 2.0;
                     let dist = (el_cx - page_cx).abs() / app.view.zoom;
                     if dist < snap_px {
@@ -410,6 +427,31 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                     app.touch();
                 }
             }
+            Active::LineEndpoint(id, is_start) => {
+                if let Some(el) = element_mut(app, page_idx, id) {
+                    let shift = ui.input(|i| i.modifiers.shift);
+                    let center = Pos2::new(el.x + el.w / 2.0, el.y);
+                    let start = local_to_world(center, el.rotation, Vec2::new(-el.w / 2.0, 0.0));
+                    let end = local_to_world(center, el.rotation, Vec2::new(el.w / 2.0, 0.0));
+                    let fixed = if is_start { end } else { start };
+                    let mut p = to_page(pointer).to_pos2();
+                    if shift {
+                        p = snap_angle_45(fixed, p);
+                    }
+                    let (new_start, new_end) = if is_start { (p, fixed) } else { (fixed, p) };
+                    let dx = new_end.x - new_start.x;
+                    let dy = new_end.y - new_start.y;
+                    let len = dx.hypot(dy).max(0.1);
+                    let rotation = dy.atan2(dx).to_degrees();
+                    let cx = (new_start.x + new_end.x) / 2.0;
+                    let cy = (new_start.y + new_end.y) / 2.0;
+                    el.x = cx - len / 2.0;
+                    el.y = cy;
+                    el.w = len;
+                    el.rotation = rotation;
+                    app.touch();
+                }
+            }
             Active::SelectionBox(start) => {
                 // Auswahl-Rechteck zeichnen. `start` und `pointer` sind
                 // beide Screen-Koordinaten — keine Transformation nötig.
@@ -448,17 +490,36 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
     // --- Linien-Zeichenmodus ---
     let drawing_line = app.line_drawing.is_some();
     if drawing_line {
+        let shift = ui.input(|i| i.modifiers.shift);
         // Vorschau rendern wenn Startpunkt gesetzt.
         let has_start = app.line_drawing.map(|(x, _)| !x.is_nan()).unwrap_or(false);
         if has_start {
             if let (Some(start), Some(pt)) = (app.line_drawing, pointer) {
-                let sp = to_screen(Pos2::new(start.0, start.1));
-                painter.line_segment(
-                    [sp, pt],
-                    Stroke::new(2.0, Color32::from_rgb(40, 120, 220)),
-                );
-                painter.circle_filled(sp, 5.0, Color32::from_rgb(40, 120, 220));
-                painter.circle_stroke(pt, 5.0, Stroke::new(1.5, Color32::from_rgb(40, 120, 220)));
+                let start_pos = Pos2::new(start.0, start.1);
+                let end_page = if shift {
+                    snap_angle_45(start_pos, to_page(pt).to_pos2())
+                } else {
+                    to_page(pt).to_pos2()
+                };
+                let sp = to_screen(start_pos);
+                let ep = to_screen(end_page);
+                let color = if shift {
+                    Color32::from_rgb(80, 200, 120)
+                } else {
+                    Color32::from_rgb(40, 120, 220)
+                };
+                painter.line_segment([sp, ep], Stroke::new(2.0, color));
+                painter.circle_filled(sp, 5.0, color);
+                painter.circle_stroke(ep, 5.0, Stroke::new(1.5, color));
+                if shift {
+                    painter.text(
+                        ep + Vec2::new(10.0, -6.0),
+                        egui::Align2::LEFT_BOTTOM,
+                        "45°",
+                        FontId::proportional(11.0),
+                        color,
+                    );
+                }
             }
         } else if let Some(pt) = pointer {
             painter.circle_stroke(pt, 5.0, Stroke::new(1.5, Color32::from_rgb(40, 120, 220)));
@@ -471,11 +532,18 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                 if current.0.is_nan() {
                     // Erster Klick → Startpunkt setzen.
                     app.line_drawing = Some((p.x, p.y));
-                    app.status = String::from("Linie: Klicke den Endpunkt.");
+                    app.status = String::from("Linie: Klicke den Endpunkt (Shift = 45°-Raster).");
                 } else {
-                    // Zweiter Klick → Linie erstellen.
-                    app.add_line_between((current.0, current.1), (p.x, p.y));
-                    app.status = String::from("Linie: Klicke den nächsten Startpunkt (Esc zum Beenden).");
+                    // Zweiter Klick → Linie erstellen (mit Snap wenn Shift).
+                    let start_pos = Pos2::new(current.0, current.1);
+                    let end_pos = if shift {
+                        snap_angle_45(start_pos, p.to_pos2())
+                    } else {
+                        p.to_pos2()
+                    };
+                    app.add_line_between((start_pos.x, start_pos.y), (end_pos.x, end_pos.y));
+                    app.status =
+                        String::from("Linie: Klicke den nächsten Startpunkt (Esc zum Beenden).");
                 }
             }
         }
@@ -550,7 +618,12 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                         true
                     }
                 }
-                egui::Event::Key { key, pressed: true, modifiers, .. } => {
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => {
                     if app.editing.is_none() {
                         match *key {
                             egui::Key::C if modifiers.ctrl => {
@@ -590,7 +663,13 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
         let mut u = false;
         let mut r = false;
         for event in &i.events {
-            if let egui::Event::Key { key, pressed: true, modifiers, .. } = event {
+            if let egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } = event
+            {
                 match *key {
                     egui::Key::Z if modifiers.ctrl && !modifiers.shift => u = true,
                     egui::Key::Z if modifiers.ctrl && modifiers.shift => r = true,
@@ -681,7 +760,12 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
 }
 
 fn element_mut<'a>(app: &'a mut EditorApp, page_idx: usize, id: u64) -> Option<&'a mut Element> {
-    app.doc.pages.get_mut(page_idx)?.elements.iter_mut().find(|e| e.id == id)
+    app.doc
+        .pages
+        .get_mut(page_idx)?
+        .elements
+        .iter_mut()
+        .find(|e| e.id == id)
 }
 
 fn draw_element(
@@ -705,9 +789,8 @@ fn draw_element(
                     font = FontId::new(el.font_size * zoom, FontFamily::Name("Italics".into()));
                 }
             }
-            let color = Color32::from_rgba_unmultiplied(
-                el.color[0], el.color[1], el.color[2], el.color[3],
-            );
+            let color =
+                Color32::from_rgba_unmultiplied(el.color[0], el.color[1], el.color[2], el.color[3]);
             let galley = painter.layout(el.text.clone(), font, color, (el.w * zoom).max(1.0));
             el.h = (galley.size().y / zoom).max(el.font_size * 1.2);
             let mut pos = to_screen(Pos2::new(el.x, el.y)) + Vec2::new(el.indent * zoom, 0.0);
@@ -731,7 +814,10 @@ fn draw_element(
                 let galley_h = (el.font_size * zoom * 1.2).max(1.0);
                 let underline_y = pos.y + galley_h - 2.0;
                 painter.line_segment(
-                    [Pos2::new(pos.x, underline_y), Pos2::new(pos.x + el.w * zoom, underline_y)],
+                    [
+                        Pos2::new(pos.x, underline_y),
+                        Pos2::new(pos.x + el.w * zoom, underline_y),
+                    ],
                     Stroke::new(1.0, color),
                 );
             }
@@ -750,7 +836,11 @@ fn draw_element(
                 mesh.texture_id = tex.id();
                 for (i, lc) in cl.iter().enumerate() {
                     let pos = local_to_world(center, el.rotation, *lc);
-                    mesh.vertices.push(Vertex { pos, uv: uv[i].into(), color: Color32::WHITE });
+                    mesh.vertices.push(Vertex {
+                        pos,
+                        uv: uv[i].into(),
+                        color: Color32::WHITE,
+                    });
                 }
                 mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
                 painter.add(Shape::mesh(mesh));
@@ -771,12 +861,18 @@ fn draw_element(
                 .collect();
 
             let fill = Color32::from_rgba_unmultiplied(
-                el.fill_color[0], el.fill_color[1], el.fill_color[2], el.fill_color[3],
+                el.fill_color[0],
+                el.fill_color[1],
+                el.fill_color[2],
+                el.fill_color[3],
             );
             let stroke = Stroke::new(
                 el.stroke_width * zoom,
                 Color32::from_rgba_unmultiplied(
-                    el.stroke_color[0], el.stroke_color[1], el.stroke_color[2], el.stroke_color[3],
+                    el.stroke_color[0],
+                    el.stroke_color[1],
+                    el.stroke_color[2],
+                    el.stroke_color[3],
                 ),
             );
             let radius = el.corner_radius * zoom;
@@ -784,9 +880,14 @@ fn draw_element(
             if fill.a() > 0 {
                 let mut mesh = Mesh::default();
                 for (i, p) in pts.iter().enumerate() {
-                    mesh.vertices.push(Vertex { pos: *p, uv: [0.0, 0.0].into(), color: fill });
+                    mesh.vertices.push(Vertex {
+                        pos: *p,
+                        uv: [0.0, 0.0].into(),
+                        color: fill,
+                    });
                     if i >= 2 {
-                        mesh.indices.extend_from_slice(&[0, (i - 1) as u32, i as u32]);
+                        mesh.indices
+                            .extend_from_slice(&[0, (i - 1) as u32, i as u32]);
                     }
                 }
                 painter.add(Shape::mesh(mesh));
@@ -805,7 +906,10 @@ fn draw_element(
             let stroke = Stroke::new(
                 el.stroke_width * zoom,
                 Color32::from_rgba_unmultiplied(
-                    el.stroke_color[0], el.stroke_color[1], el.stroke_color[2], el.stroke_color[3],
+                    el.stroke_color[0],
+                    el.stroke_color[1],
+                    el.stroke_color[2],
+                    el.stroke_color[3],
                 ),
             );
             painter.line_segment([start, end], stroke);
@@ -827,7 +931,10 @@ fn draw_multi_selection_box(
         .map(|lc| local_to_world(center, el.rotation, *lc))
         .collect();
     pts.push(pts[0]);
-    painter.add(Shape::line(pts, Stroke::new(1.5, Color32::from_rgb(40, 120, 220))));
+    painter.add(Shape::line(
+        pts,
+        Stroke::new(1.5, Color32::from_rgb(40, 120, 220)),
+    ));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -838,6 +945,19 @@ fn draw_selection(
     zoom: f32,
     crop_mode: bool,
 ) {
+    // Linien: nur Endpunkt-Griffe, keine Box.
+    if el.kind == ElementKind::Line {
+        let center = to_screen(Pos2::new(el.x + el.w / 2.0, el.y));
+        let start = local_to_world(center, el.rotation, Vec2::new(-el.w * zoom / 2.0, 0.0));
+        let end = local_to_world(center, el.rotation, Vec2::new(el.w * zoom / 2.0, 0.0));
+        let handle_color = Color32::from_rgb(40, 120, 220);
+        for p in [start, end] {
+            painter.circle_filled(p, 6.0, Color32::WHITE);
+            painter.circle_stroke(p, 6.0, Stroke::new(2.0, handle_color));
+        }
+        return;
+    }
+
     let center = to_screen(Pos2::new(el.x + el.w / 2.0, el.y + el.h / 2.0));
     let cl = local_corners(el.w * zoom, el.h * zoom);
     let pts: Vec<Pos2> = cl
@@ -847,12 +967,22 @@ fn draw_selection(
 
     let mut line = pts.clone();
     line.push(pts[0]);
-    painter.add(Shape::line(line, Stroke::new(1.5, Color32::from_rgb(40, 120, 220))));
+    painter.add(Shape::line(
+        line,
+        Stroke::new(1.5, Color32::from_rgb(40, 120, 220)),
+    ));
 
     if el.kind == ElementKind::Image && !crop_mode {
         let top_mid = local_to_world(center, el.rotation, Vec2::new(0.0, -el.h * zoom / 2.0));
-        let grip = local_to_world(center, el.rotation, Vec2::new(0.0, -el.h * zoom / 2.0 - 24.0));
-        painter.line_segment([top_mid, grip], Stroke::new(1.5, Color32::from_rgb(40, 120, 220)));
+        let grip = local_to_world(
+            center,
+            el.rotation,
+            Vec2::new(0.0, -el.h * zoom / 2.0 - 24.0),
+        );
+        painter.line_segment(
+            [top_mid, grip],
+            Stroke::new(1.5, Color32::from_rgb(40, 120, 220)),
+        );
         painter.circle_filled(grip, 6.0, Color32::from_rgb(40, 120, 220));
     }
 
@@ -911,6 +1041,18 @@ fn point_in_element(
     to_screen: &impl Fn(Pos2) -> Pos2,
     zoom: f32,
 ) -> bool {
+    // Linien: Distanz zur Linie prüfen (mit Toleranz).
+    if el.kind == ElementKind::Line {
+        let center = to_screen(Pos2::new(el.x + el.w / 2.0, el.y));
+        let start = local_to_world(center, el.rotation, Vec2::new(-el.w * zoom / 2.0, 0.0));
+        let end = local_to_world(center, el.rotation, Vec2::new(el.w * zoom / 2.0, 0.0));
+        let ab = end - start;
+        let ap = pointer_screen - start;
+        let t = (ap.dot(ab) / ab.dot(ab)).clamp(0.0, 1.0);
+        let closest = start + ab * t;
+        return pointer_screen.distance(closest) < 8.0;
+    }
+
     let center = to_screen(Pos2::new(el.x + el.w / 2.0, el.y + el.h / 2.0));
     let local = world_to_local(center, el.rotation, pointer_screen);
     local.x.abs() <= el.w * zoom / 2.0 && local.y.abs() <= el.h * zoom / 2.0
@@ -955,7 +1097,11 @@ fn start_interaction(
                             };
                             let start_crop = el.crop;
                             app.push_history();
-                            app.interaction = Interaction::Crop { id, edge, start_crop };
+                            app.interaction = Interaction::Crop {
+                                id,
+                                edge,
+                                start_crop,
+                            };
                             return;
                         }
                     }
@@ -964,13 +1110,40 @@ fn start_interaction(
         }
     }
 
-    // 2) Drehgriff
+    // 2) Linien-Endpunkte
+    if let Some(id) = sel {
+        if let Some(el) = app.doc.pages[page_idx].elements.iter().find(|e| e.id == id) {
+            if el.kind == ElementKind::Line {
+                let center = to_screen(Pos2::new(el.x + el.w / 2.0, el.y));
+                let start = local_to_world(center, el.rotation, Vec2::new(-el.w * zoom / 2.0, 0.0));
+                let end = local_to_world(center, el.rotation, Vec2::new(el.w * zoom / 2.0, 0.0));
+                if start.distance(pointer) < 9.0 {
+                    app.push_history();
+                    app.interaction = Interaction::LineEndpoint { id, is_start: true };
+                    return;
+                }
+                if end.distance(pointer) < 9.0 {
+                    app.push_history();
+                    app.interaction = Interaction::LineEndpoint {
+                        id,
+                        is_start: false,
+                    };
+                    return;
+                }
+            }
+        }
+    }
+
+    // 3) Drehgriff
     if let Some(id) = sel {
         if let Some(el) = app.doc.pages[page_idx].elements.iter().find(|e| e.id == id) {
             if el.kind == ElementKind::Image && !crop_mode {
                 let center = to_screen(Pos2::new(el.x + el.w / 2.0, el.y + el.h / 2.0));
-                let grip =
-                    local_to_world(center, el.rotation, Vec2::new(0.0, -el.h * zoom / 2.0 - 24.0));
+                let grip = local_to_world(
+                    center,
+                    el.rotation,
+                    Vec2::new(0.0, -el.h * zoom / 2.0 - 24.0),
+                );
                 if grip.distance(pointer) < 9.0 {
                     app.push_history();
                     app.interaction = Interaction::Rotate { id };
@@ -980,10 +1153,10 @@ fn start_interaction(
         }
     }
 
-    // 3) Ecken (Größe ändern)
+    // 4) Ecken (Größe ändern — nicht für Linien)
     if let Some(id) = sel {
         if let Some(el) = app.doc.pages[page_idx].elements.iter().find(|e| e.id == id) {
-            if !(crop_mode && el.kind == ElementKind::Image) {
+            if el.kind != ElementKind::Line && !(crop_mode && el.kind == ElementKind::Image) {
                 let corners = corner_positions(el, &to_screen, zoom);
                 for (i, cp) in corners.iter().enumerate() {
                     if cp.distance(pointer) < 9.0 {
@@ -993,7 +1166,12 @@ fn start_interaction(
                         let rotation = el.rotation;
                         let start_aspect = if el.h != 0.0 { el.w / el.h } else { 1.0 };
                         app.push_history();
-                        app.interaction = Interaction::Resize { id, anchor, rotation, start_aspect };
+                        app.interaction = Interaction::Resize {
+                            id,
+                            anchor,
+                            rotation,
+                            start_aspect,
+                        };
                         return;
                     }
                 }
@@ -1022,7 +1200,10 @@ fn start_interaction(
                     .map(|e| (e.id, e.x, e.y))
                     .collect();
                 app.push_history();
-                app.interaction = Interaction::DragBodies { start_pointer: pointer, starts };
+                app.interaction = Interaction::DragBodies {
+                    start_pointer: pointer,
+                    starts,
+                };
             } else if shift_held {
                 // Shift/Ctrl+Klick → Auswahl umschalten (hinzufügen/entfernen).
                 app.toggle_selected(id);
@@ -1096,7 +1277,11 @@ fn crop_to_pointer(
     pointer_page: Vec2,
 ) {
     let center = Pos2::new(el.x + el.w / 2.0, el.y + el.h / 2.0);
-    let local = world_to_local(center, el.rotation, Pos2::new(pointer_page.x, pointer_page.y));
+    let local = world_to_local(
+        center,
+        el.rotation,
+        Pos2::new(pointer_page.x, pointer_page.y),
+    );
     let u = ((local.x + el.w / 2.0) / el.w).clamp(0.0, 1.0);
     let v = ((local.y + el.h / 2.0) / el.h).clamp(0.0, 1.0);
     let min = 0.02;
