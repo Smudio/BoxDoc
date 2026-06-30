@@ -56,12 +56,34 @@ pub fn install(ctx: &egui::Context) {
 
         if let Some(bytes) = bytes {
             let family = FontFamily::Name(def.key.into());
-            fonts.font_data.insert(
-                def.key.to_owned(),
-                Arc::new(FontData::from_owned(bytes)),
-            );
-            fonts.families.entry(family).or_default().push(def.key.to_owned());
+            fonts
+                .font_data
+                .insert(def.key.to_owned(), Arc::new(FontData::from_owned(bytes)));
+            fonts
+                .families
+                .entry(family)
+                .or_default()
+                .push(def.key.to_owned());
             registered().lock().unwrap().push(def.key.to_string());
+        }
+    }
+
+    // Alias-Familien für Bold/Italic beim Default-Font (Proportional).
+    // canvas.rs nutzt FontFamily::Name("Bold"|"Italics"|"Bold Italic") für
+    // Default-Font-Elemente mit bold/italic. Diese müssen gebunden sein,
+    // sonst panicert egui beim Text-Shaping.
+    let prop_fonts: Vec<String> = fonts
+        .families
+        .get(&FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+    if !prop_fonts.is_empty() {
+        for alias in ["Bold", "Italics", "Bold Italic"] {
+            fonts
+                .families
+                .entry(FontFamily::Name(alias.into()))
+                .or_default()
+                .extend(prop_fonts.iter().cloned());
         }
     }
 

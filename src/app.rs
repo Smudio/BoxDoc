@@ -194,6 +194,22 @@ pub struct EditorApp {
     pub history: crate::history::History,
     /// Flag: Snapshot beim nächsten DragValue-Focus-Gain machen.
     pub prop_snapshot_pending: bool,
+
+    // --- File-Watch (AI-Schnittstelle) ---
+    /// Lauft ein File-Watcher? Wird gedroppt → Watching stoppt.
+    pub file_watcher: Option<crate::file_watch::FileWatcher>,
+    /// Empfänger für externe Dateiänderungen.
+    pub file_watch_rx: Option<std::sync::mpsc::Receiver<std::path::PathBuf>>,
+    /// Der aktuell beobachtete Pfad (zum Erkennen von Pfadwechseln).
+    pub watched_path: Option<std::path::PathBuf>,
+    /// mtime/last-write der zuletzt geladenen oder selbst geschriebenen Datei.
+    /// Dient dazu, eigene Schreibvorgänge vom Watcher zu unterscheiden.
+    pub last_disk_write: Option<std::time::SystemTime>,
+    /// Eine externe Änderung wurde erkannt, aber nicht angewendet, weil die
+    /// GUI ungespeicherte eigene Änderungen hat → Konflikt-Dialog zeigen.
+    pub pending_external_change: bool,
+    /// Konflikt-Dialog anzeigen.
+    pub show_conflict_dialog: bool,
 }
 
 impl EditorApp {
@@ -226,6 +242,8 @@ impl EditorApp {
 
 impl Default for EditorApp {
     fn default() -> Self {
+        let settings = crate::settings_io::load_or_detect();
+        let theme = settings.theme;
         EditorApp {
             doc: Document::default(),
             page_index: 0,
@@ -240,7 +258,7 @@ impl Default for EditorApp {
             file_path: None,
             modified: false,
             status: String::from("Bereit. Tipp: Bild per Drag&Drop hereinziehen."),
-            settings: crate::settings_io::load_or_detect(),
+            settings,
             multi_anchor: BBoxAnchor::default(),
             pos_x: 0.0,
             pos_y: 0.0,
@@ -250,11 +268,17 @@ impl Default for EditorApp {
             pasting: false,
             snap_center: false,
             line_drawing: None,
-            theme_from: crate::model::Theme::default(),
-            theme_target: crate::model::Theme::default(),
+            theme_from: theme,
+            theme_target: theme,
             theme_anim: 1.0,
             history: crate::history::History::default(),
             prop_snapshot_pending: false,
+            file_watcher: None,
+            file_watch_rx: None,
+            watched_path: None,
+            last_disk_write: None,
+            pending_external_change: false,
+            show_conflict_dialog: false,
         }
         .with_init_history()
     }
@@ -542,13 +566,223 @@ impl EditorApp {
             self.interaction = Interaction::None;
             self.touch();
             self.set_status("Wiederhergestellt.");
+            // Undo/Redo schreibt den Stand zurück, damit Datei und GUI synchron
+            // bleiben (KI-Agent sieht konsistenten Zustand).
+            self.write_back_to_disk();
         }
+    }
+
+    // ===================================================================
+    // File-Watch (AI-Schnittstelle)
+    // ===================================================================
+
+    /// Öffnet eine Datei beim Start (z. B. per Kommandozeilen-Argument).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_path(&mut self, path: std::path::PathBuf) {
+        match crate::io::load_project(&path) {
+            Ok((doc, images, next_id)) => {
+                self.doc = doc;
+                self.images = images;
+                self.page_index = 0;
+                self.next_id = next_id;
+                self.clear_selection();
+                self.editing = None;
+                self.crop_mode = false;
+                self.interaction = Interaction::None;
+                self.file_path = Some(path);
+                self.modified = false;
+                self.last_disk_write = self.disk_mtime();
+                self.history.init(self.snapshot());
+                self.set_status("Dokument geöffnet (Datei wird beobachtet).");
+            }
+            Err(e) => self.set_status(format!("Öffnen fehlgeschlagen: {e}")),
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn open_path(&mut self, _path: std::path::PathBuf) {}
+
+    /// mtime der aktuell gebundenen Datei, falls vorhanden.
+    fn disk_mtime(&self) -> Option<std::time::SystemTime> {
+        let path = self.file_path.as_ref()?;
+        std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
+    }
+
+    /// Gleicht den File-Watcher an `file_path` an (starten/stoppen/neustarten).
+    /// Wird jeden Frame aufgerufen – idempotent.
+    fn reconcile_watcher(&mut self) {
+        let same = match (&self.file_path, &self.watched_path) {
+            (Some(a), Some(b)) => a == b,
+            (None, None) => true,
+            _ => false,
+        };
+        if same {
+            return;
+        }
+        // Alten Watcher verwerfen.
+        self.file_watcher = None;
+        self.file_watch_rx = None;
+        self.watched_path = None;
+        // Neuen starten, falls ein Pfad gesetzt ist.
+        if let Some(path) = self.file_path.clone() {
+            match crate::file_watch::FileWatcher::start(path.clone()) {
+                Ok((w, rx)) => {
+                    self.file_watcher = Some(w);
+                    self.file_watch_rx = Some(rx);
+                    self.watched_path = Some(path);
+                }
+                Err(_e) => {
+                    self.set_status("Datei-Beobachtung nicht verfügbar.");
+                }
+            }
+        }
+    }
+
+    /// Lädt die Datei neu und übernimmt sie als History-Schritt (Undo-fähig).
+    fn reload_from_disk(&mut self) {
+        let Some(path) = self.file_path.clone() else {
+            return;
+        };
+        let Ok(json) = std::fs::read_to_string(&path) else {
+            self.set_status("Datei konnte nicht gelesen werden.");
+            return;
+        };
+        // Nur gültiges JSON übernehmen – teilschreibende Agenten sind unkritisch.
+        let project: crate::io::Project = match serde_json::from_str(&json) {
+            Ok(p) => p,
+            Err(_e) => {
+                self.set_status("Datei enthält ungültiges JSON – Reload ignoriert.");
+                return;
+            }
+        };
+        use base64::Engine;
+        let mut images = crate::store::ImageStore::default();
+        let mut max_id = 0u64;
+        for img in project.images {
+            let png = base64::engine::general_purpose::STANDARD
+                .decode(&img.png_base64)
+                .unwrap_or_default();
+            let dim = image::load_from_memory(&png)
+                .map(|i| (i.width(), i.height()))
+                .unwrap_or((0, 0));
+            images.insert(img.id, png, dim);
+        }
+        for page in &project.doc.pages {
+            for el in &page.elements {
+                max_id = max_id.max(el.id);
+            }
+        }
+        // Aktuellen Zustand als Undo-Schritt sichern.
+        self.push_history();
+        self.doc = project.doc;
+        self.images = images;
+        self.next_id = max_id + 1;
+        self.modified = false;
+        self.last_disk_write = self.disk_mtime();
+        self.editing = None;
+        self.crop_mode = false;
+        self.interaction = Interaction::None;
+        self.set_status("Dokument von extern aktualisiert.");
+    }
+
+    /// Schreibt den aktuellen GUI-Stand leise in die Datei (ohne Dialog),
+    /// aktualisiert `last_disk_write`, sodass der Watcher das eigene
+    /// Schreibereignis ignoriert. Setzt `modified` auf false.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn write_back_to_disk(&mut self) {
+        let Some(path) = self.file_path.clone() else {
+            return;
+        };
+        if crate::io::save_project(&path, self).is_ok() {
+            self.last_disk_write = self.disk_mtime();
+            self.modified = false;
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn write_back_to_disk(&mut self) {}
+
+    /// Pumpt ankommende Watcher-Ereignisse ab. Muss jeden Frame aufgerufen
+    /// werden. Behandelt die Selbst-Schreib-Unterdrückung und Konflikte.
+    fn poll_file_watcher(&mut self) {
+        // Konflikt-Dialog blockiert automatische Anwendung weiterer Events
+        // (nicht aber das Entgegennehmen).
+        let mut events: Vec<std::path::PathBuf> = Vec::new();
+        if let Some(rx) = &self.file_watch_rx {
+            while let Ok(p) = rx.try_recv() {
+                events.push(p);
+            }
+        }
+        if events.is_empty() {
+            return;
+        }
+        // Eigenes Schreiben ignorieren: wenn die mtime <= last_disk_write,
+        // handelt es sich um unseren eigenen Schreibvorgang.
+        if let Some(last) = self.last_disk_write {
+            if let Some(m) = self.disk_mtime() {
+                if m <= last {
+                    return;
+                }
+            }
+        }
+        // Konflikt: GUI hat ungespeicherte eigene Änderungen.
+        if self.modified {
+            self.pending_external_change = true;
+            self.show_conflict_dialog = true;
+            return;
+        }
+        self.reload_from_disk();
+    }
+
+    /// Wendet eine anstehende externe Änderung an (Konflikt → "Übernehmen").
+    pub fn accept_external_change(&mut self) {
+        self.pending_external_change = false;
+        self.show_conflict_dialog = false;
+        self.reload_from_disk();
+    }
+
+    /// Behält den eigenen GUI-Stand und überschreibt die externe Datei
+    /// (Konflikt → "Meine behalten").
+    pub fn keep_local_version(&mut self) {
+        self.pending_external_change = false;
+        self.show_conflict_dialog = false;
+        self.write_back_to_disk();
+        self.set_status("Eigene Änderungen beibehalten.");
     }
 }
 
 impl eframe::App for EditorApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
+        // File-Watch: Watcher an file_path anpassen und ankommende Ereignisse
+        // abpumpen (AI-Schnittstelle).
+        self.reconcile_watcher();
+        self.poll_file_watcher();
+
+        // Konflikt-Dialog (externe Änderung bei ungespeicherten eigenen Änderungen).
+        if self.show_conflict_dialog {
+            egui::Window::new("Datei extern geändert")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(&ctx, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.label("Die geöffnete Datei wurde von außen geändert");
+                        ui.label("(z. B. durch eine KI), aber es gibt ungespeicherte");
+                        ui.label("eigene Änderungen in der GUI.");
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Externe übernehmen").clicked() {
+                                self.accept_external_change();
+                            }
+                            if ui.button("Eigene behalten").clicked() {
+                                self.keep_local_version();
+                            }
+                        });
+                    });
+                });
+        }
 
         // Theme-Fade animieren.
         if self.theme_anim < 1.0 {
@@ -1637,7 +1871,14 @@ impl EditorApp {
         let size_uniform = data
             .iter()
             .all(|d| (d.font_size - data[0].font_size).abs() < 0.01);
-        let mut ds = if size_uniform { data[0].font_size } else { 0.0 };
+        // Bei gemischten Größen: Startwert innerhalb des Range wählen, damit der
+        // DragValue ihn nicht clamp't und dadurch fälschlich `changed()` auslöst.
+        let initial = if size_uniform {
+            data[0].font_size
+        } else {
+            14.0
+        };
+        let mut ds = initial;
         let rs = ui
             .horizontal(|ui| {
                 ui.label("Schriftgröße:");
@@ -1651,7 +1892,8 @@ impl EditorApp {
                 ui.add(dv)
             })
             .inner;
-        if rs.changed() {
+        // Nur anwenden, wenn sich der Wert durch den Nutzer wirklich geändert hat.
+        if rs.changed() && (ds - initial).abs() > 0.01 {
             self.push_history();
             let ids = self.selection.clone();
             if let Some(page) = self.doc.pages.get_mut(self.page_index) {

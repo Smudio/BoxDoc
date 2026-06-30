@@ -1,0 +1,123 @@
+# BoxDoc – AI-Schnittstelle (Datei-basiert)
+
+> **Vollständige, verbindliche Spezifikation: [`AGENTS.md`](AGENTS.md).** Diese
+> Datei ist eine kompakte Kurzform, die als System-Prompt oder Kontext-Datei
+> verwendet werden kann. Im Zweifelsfall gilt `AGENTS.md`.
+
+BoxDoc-Dokumente sind `.boxdoc`-Dateien: Pretty-JSON, UTF-8. Das ist die
+komplette AI-Schnittstelle – es gibt kein zusätzliches Protokoll, keine
+Sockets, keine API. **opencode (oder jeder andere Agent) liest und
+bearbeitet die Datei direkt mit seinen normalen Datei-Werkzeugen.**
+
+BoxDoc beobachtet die geöffnete Datei und übernimmt externe Änderungen
+automatisch (≤ 300 ms) als Undo-Schritt. Der Nutzer sieht jede Änderung
+live und kann sie mit Strg+Z zurückrollen.
+
+---
+
+## Dateiformat
+
+```json
+{
+  "doc": {
+    "format": "A4" | "A3" | "A5" | "Letter" | "Legal",
+    "orientation": "Portrait" | "Landscape",
+    "pages": [
+      { "elements": [ <Element>, ... ] }
+    ]
+  },
+  "images": [
+    { "id": <u64>, "png_base64": "<base64-PNG-Bytes>" }
+  ]
+}
+```
+
+### Element
+
+```json
+{
+  "id": <u64>,
+  "kind": "Text" | "Image" | "Rectangle" | "Line",
+
+  "x": <f32 pt>,   // linke obere Ecke (unrotiert)
+  "y": <f32 pt>,
+  "w": <f32 pt>,
+  "h": <f32 pt>,
+  "rotation": <Grad, gegen Uhrzeigersinn>,
+
+  "text": "<Inhalt>",
+  "font_size": <pt>,
+  "font": "default" | "inter" | "roboto" | "lora" | "jetbrains" | "pacifico",
+  "color": [r, g, b, a],            // 0..255
+  "bold": <bool>,
+  "italic": <bool>,
+  "underline": <bool>,
+  "align": "Left" | "Center" | "Right",
+  "valign": "Top" | "Middle" | "Bottom",
+  "indent": <pt>,
+
+  "crop": { "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 },   // nur Image, normalisiert 0..1
+  "image_w": <px>,                                       // nur Image
+  "image_h": <px>,                                       // nur Image
+
+  "fill_color": [r, g, b, a],       // Shape; Alpha 0 = transparent
+  "stroke_width": <pt>,             // Shape; 0 = kein Rahmen
+  "stroke_color": [r, g, b, a],     // Shape
+  "corner_radius": <pt>             // Rectangle
+}
+```
+
+### Koordinatensystem
+
+- Maßeinheit: **Punkt** (1 pt = 1/72 Zoll; 1 Zoll = 25,4 mm).
+- Ursprung: **oben-links**, y zeigt nach **unten**.
+- A4 Hochformat: 595 × 842 pt.
+
+---
+
+## Regeln für die KI
+
+1. **Lies** die Datei als JSON und verstehe das Dokument.
+2. **Ändere** Felder direkt (Text, Position, Größe, Farben, Schrift, Format …).
+   Nutze dafür die normalen Editier-Werkzeuge – wie bei einer Quellcode-Datei.
+3. **IDs** sind `u64` und **stabil**. Erfinde nie eigene IDs; referenziere nur
+   existierende, wenn du ein Element aktualisierst. Neue Elemente erhalten die
+   nächste freie ID (verwende den Maximalwert + 1 und erhöhe ggf. nichts anderes).
+4. **Bilder**: Lass `"images"` und alle `"png_base64"`-/`"image_w"`-/`"image_h"`-
+   Felder **unverändert**. Bearbeite nur Text, Layout und Styling.
+5. **Nach jedem Speichern** übernimmt BoxDoc die Änderung automatisch (≤ 300 ms)
+   und legt sie als Undo-Schritt ab.
+6. Der Nutzer kann deine Änderungen mit **Strg+Z** zurückrollen; BoxDoc
+   schreibt dann den zurückgesetzten Stand in die Datei zurück.
+7. Ungültiges JSON wird still ignoriert – ein Reload findet nur statt, wenn die
+   Datei sauber parsbar ist.
+
+---
+
+## Beispiel-Workflow (Lebenslauf anlegen)
+
+1. `boxdoc lebenslauf.boxdoc` starten (BoxDoc legt die Datei beim ersten
+   Speichern an; opencode kann sie auch selbst erstellen).
+2. opencode öffnet `lebenslauf.boxdoc`, sieht eine leere A4-Seite.
+3. opencode fügt Text-Elemente ein (`kind: "Text"`, passende `x`/`y`/`font_size`).
+4. BoxDoc zeigt jeden Schritt live. Der Nutzer beobachtet und passt ggf. an.
+5. Fertig – der Nutzer speichert oder exportiert als PDF/ODT.
+
+---
+
+## Warum Datei-basiert statt API?
+
+- **opencode-nativ:** Dateien lesen/schreiben ist die Kernkompetenz jedes Code-Agents.
+  Kein MCP-Setup, kein curl, kein System-Prompt nötig.
+- **Tool-stabil:** Jeder Agent (opencode, Cursor, Aider, Claude Code) funktioniert
+  ohne Anpassung.
+- **Debug-freundlich:** Die Datei ist jederzeit mit jedem Editor inspizierbar.
+- **Rückgängig:** Integriert in die bestehende Undo-History.
+
+---
+
+## Vollständige Spezifikation
+
+Die vollständige, verbindliche Dokumentation mit allen Element-Typen, Feldern,
+Koordinaten, Beispielen für jede Operation und Design-Leitlinien findet sich in
+**[`AGENTS.md`](AGENTS.md)**. Diese wird von opencode automatisch eingelesen.
