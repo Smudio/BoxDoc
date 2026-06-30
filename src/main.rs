@@ -2,6 +2,7 @@
 
 mod app;
 mod canvas;
+mod file_watch;
 mod fonts;
 mod geometry;
 mod history;
@@ -29,9 +30,15 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| {
             fonts::install(&cc.egui_ctx);
-            themes::apply(&cc.egui_ctx, model::Theme::default());
+            let saved = settings_io::load_or_detect();
+            themes::apply(&cc.egui_ctx, saved.theme);
             io::install_clipboard_paste_listener();
-            Ok(Box::new(app::EditorApp::default()))
+            let mut app = app::EditorApp::default();
+            // Optional: Datei als Startargument (z. B. für KI-Agenten-Workflows).
+            if let Some(arg) = std::env::args().nth(1) {
+                app.open_path(std::path::PathBuf::from(arg));
+            }
+            Ok(Box::new(app))
         }),
     )
 }
@@ -58,7 +65,8 @@ fn main() {
                 web_options,
                 Box::new(|cc| {
                     fonts::install(&cc.egui_ctx);
-                    themes::apply(&cc.egui_ctx, model::Theme::default());
+                    let saved = settings_io::load_or_detect();
+                    themes::apply(&cc.egui_ctx, saved.theme);
                     io::install_clipboard_paste_listener();
                     Ok(Box::new(app::EditorApp::default()))
                 }),

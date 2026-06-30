@@ -19,6 +19,9 @@ eframe = { version = "0.34", default-features = false, features = ["glow", "wayl
 rfd = "0.15"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 printpdf = "0.7"
+notify = "6"
+notify-debouncer-mini = "0.4"
+crossbeam-channel = "0.5"
 
 # Web-only Dependencies
 [target.'cfg(target_arch = "wasm32")'.dependencies]

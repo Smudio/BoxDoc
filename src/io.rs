@@ -198,7 +198,7 @@ mod native {
         }
     }
 
-    fn save_project(path: &std::path::Path, app: &EditorApp) -> std::io::Result<()> {
+    pub fn save_project(path: &std::path::Path, app: &EditorApp) -> std::io::Result<()> {
         let images: Vec<ProjectImage> = app
             .images
             .map
@@ -217,7 +217,7 @@ mod native {
         std::fs::write(path, json)
     }
 
-    fn load_project(path: &std::path::Path) -> std::io::Result<(Document, ImageStore, u64)> {
+    pub fn load_project(path: &std::path::Path) -> std::io::Result<(Document, ImageStore, u64)> {
         let json = std::fs::read_to_string(path)?;
         let project: Project = serde_json::from_str(&json)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -370,7 +370,9 @@ fn trigger_file_input() {
                 .target()
                 .and_then(|t| t.dyn_into::<HtmlInputElement>().ok());
             let Some(input) = input else { return };
-            let Some(file) = input.files().and_then(|f| f.get(0)) else { return };
+            let Some(file) = input.files().and_then(|f| f.get(0)) else {
+                return;
+            };
 
             let reader = web_sys::FileReader::new().unwrap();
             let _ = reader.read_as_array_buffer(&file);
@@ -416,7 +418,9 @@ pub fn trigger_project_file_input() {
                 .target()
                 .and_then(|t| t.dyn_into::<HtmlInputElement>().ok());
             let Some(input) = input else { return };
-            let Some(file) = input.files().and_then(|f| f.get(0)) else { return };
+            let Some(file) = input.files().and_then(|f| f.get(0)) else {
+                return;
+            };
 
             let reader = web_sys::FileReader::new().unwrap();
             let _ = reader.read_as_text(&file);
@@ -449,8 +453,12 @@ pub fn install_clipboard_paste_listener() {
     use wasm_bindgen::JsCast;
     let cb: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)> =
         wasm_bindgen::closure::Closure::new(|event: web_sys::Event| {
-            let Some(evt) = event.dyn_ref::<web_sys::ClipboardEvent>() else { return };
-            let Some(data) = evt.clipboard_data() else { return };
+            let Some(evt) = event.dyn_ref::<web_sys::ClipboardEvent>() else {
+                return;
+            };
+            let Some(data) = evt.clipboard_data() else {
+                return;
+            };
             let Some(files) = data.files() else { return };
             for i in 0..files.length() {
                 let Some(file) = files.get(i) else { continue };
