@@ -210,6 +210,22 @@ pub struct EditorApp {
     pub pending_external_change: bool,
     /// Konflikt-Dialog anzeigen.
     pub show_conflict_dialog: bool,
+
+    // --- Web-Sync (WASM-only, AI-Schnittstelle für den Browser) ---
+    #[cfg(target_arch = "wasm32")]
+    pub web_doc: Option<crate::web_sync::WebDoc>,
+    /// Zeitstempel des letzten Polls (Sekunden, egui-time).
+    #[cfg(target_arch = "wasm32")]
+    pub web_last_poll: f64,
+    /// Zeitstempel der letzten eigenen Änderung (für Auto-Save-Debounce).
+    #[cfg(target_arch = "wasm32")]
+    pub web_last_modified: f64,
+    /// True, wenn gerade ein PUT läuft.
+    #[cfg(target_arch = "wasm32")]
+    pub web_save_in_flight: bool,
+    /// Status-Text für die Web-Sync-Anzeige.
+    #[cfg(target_arch = "wasm32")]
+    pub web_status: String,
 }
 
 impl EditorApp {
@@ -279,6 +295,17 @@ impl Default for EditorApp {
             last_disk_write: None,
             pending_external_change: false,
             show_conflict_dialog: false,
+
+            #[cfg(target_arch = "wasm32")]
+            web_doc: crate::web_sync::WebDoc::from_url(),
+            #[cfg(target_arch = "wasm32")]
+            web_last_poll: 0.0,
+            #[cfg(target_arch = "wasm32")]
+            web_last_modified: 0.0,
+            #[cfg(target_arch = "wasm32")]
+            web_save_in_flight: false,
+            #[cfg(target_arch = "wasm32")]
+            web_status: String::new(),
         }
         .with_init_history()
     }
@@ -749,6 +776,134 @@ impl EditorApp {
         self.write_back_to_disk();
         self.set_status("Eigene Änderungen beibehalten.");
     }
+
+    // ===================================================================
+    // Web-Sync (WASM-only): Backend-Anbindung für die Browser-Version
+    // ===================================================================
+
+    #[cfg(target_arch = "wasm32")]
+    fn tick_web_sync(&mut self, ctx: &egui::Context) {
+        use crate::web_sync::{next_event, WebEvent};
+
+        let now = ctx.input(|i| i.time);
+        let needs_initial_load = match &self.web_doc {
+            Some(w) => w.last_content_hash == 0,
+            None => false,
+        };
+
+        // 1) Initiales Laden (einmalig pro WebDoc).
+        if needs_initial_load {
+            if let Some(w) = &self.web_doc {
+                w.spawn_initial_load();
+                self.web_status = "Lade Dokument…".to_string();
+            }
+        }
+
+        // 2) Events abpumpen (sync, vom Hintergrund-Task gepusht).
+        while let Some(ev) = next_event() {
+            match ev {
+                WebEvent::Loaded(json) => self.apply_web_doc(&json),
+                WebEvent::Saved => {
+                    self.web_save_in_flight = false;
+                    self.modified = false;
+                    self.web_status = "Gespeichert.".to_string();
+                }
+                WebEvent::Error(msg) => {
+                    self.web_save_in_flight = false;
+                    self.web_status = msg;
+                }
+            }
+        }
+
+        // 3) Auto-Save: 2 s nach der letzten eigenen Änderung, falls modified.
+        if self.modified && !self.web_save_in_flight && self.web_last_modified > 0.0 {
+            if now - self.web_last_modified > 2.0 {
+                if let Some(w) = &self.web_doc {
+                    self.web_save_in_flight = true;
+                    self.web_status = "Speichern…".to_string();
+                    w.spawn_save(self.doc.clone(), self.images.clone());
+                }
+            }
+        }
+
+        // 4) Polling: alle 2 s nach externen Änderungen suchen.
+        if !needs_initial_load && (now - self.web_last_poll) > 2.0 {
+            self.web_last_poll = now;
+            if let Some(w) = &self.web_doc {
+                // Bei ungespeicherten eigenen Änderungen nicht reloaden, nur pollen.
+                // Spawn_poll pusht nur bei Hash-Unterschied ein Event.
+                w.spawn_poll();
+            }
+        }
+
+        // 5) Wenn modified sich ändert: Auto-Save-Timer neu starten.
+        if self.modified {
+            self.web_last_modified = now;
+        }
+    }
+
+    /// Wendet ein vom Backend geladenes JSON als neuen Dokumentstand an.
+    /// Dient als Undo-Schritt, damit externe Änderungen zurückrollbar sind.
+    #[cfg(target_arch = "wasm32")]
+    fn apply_web_doc(&mut self, json: &str) {
+        let project: crate::io::Project = match serde_json::from_str(json) {
+            Ok(p) => p,
+            Err(e) => {
+                self.web_status = format!("Ungültiges JSON: {}", e);
+                return;
+            }
+        };
+
+        use base64::Engine;
+        let mut images = crate::store::ImageStore::default();
+        let mut max_id = 0u64;
+        for img in project.images {
+            let png = base64::engine::general_purpose::STANDARD
+                .decode(&img.png_base64)
+                .unwrap_or_default();
+            let dim = image::load_from_memory(&png)
+                .map(|i| (i.width(), i.height()))
+                .unwrap_or((0, 0));
+            images.insert(img.id, png, dim);
+        }
+        for page in &project.doc.pages {
+            for el in &page.elements {
+                max_id = max_id.max(el.id);
+            }
+        }
+
+        // Hash aktualisieren, damit der nächste Poll unsere eigene Loaded-Aktion
+        // nicht sofort als externe Änderung erkennt.
+        let hash = crate::web_sync::hash_of(json);
+        let initial_load = match &self.web_doc {
+            Some(w) => w.last_content_hash == 0,
+            None => false,
+        };
+
+        // History nur beim Folge-Reload, nicht beim initialen Load (sonst
+        // landet der Start-Zustand als Undo-Schritt).
+        if !initial_load {
+            self.push_history();
+        }
+
+        self.doc = project.doc;
+        self.images = images;
+        self.next_id = max_id + 1;
+        self.modified = false;
+        self.editing = None;
+        self.crop_mode = false;
+        self.interaction = Interaction::None;
+        self.web_status = if initial_load {
+            "Geladen.".to_string()
+        } else {
+            "Extern aktualisiert.".to_string()
+        };
+
+        if let Some(w) = &mut self.web_doc {
+            w.last_content_hash = hash;
+            w.last_known_modified = js_sys::Date::now() / 1000.0;
+        }
+    }
 }
 
 impl eframe::App for EditorApp {
@@ -759,6 +914,10 @@ impl eframe::App for EditorApp {
         // abpumpen (AI-Schnittstelle).
         self.reconcile_watcher();
         self.poll_file_watcher();
+
+        // Web-Sync (WASM): Polling, Auto-Save, Event-Verarbeitung.
+        #[cfg(target_arch = "wasm32")]
+        self.tick_web_sync(&ctx);
 
         // Konflikt-Dialog (externe Änderung bei ungespeicherten eigenen Änderungen).
         if self.show_conflict_dialog {

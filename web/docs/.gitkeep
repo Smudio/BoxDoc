@@ -1,0 +1,7 @@
+Dokumentenspeicher. PHP legt hier für jedes Dokument an:
+  <slug>.boxdoc        JSON-Inhalt
+  <slug>.meta.json     { token, created, modified }
+  <slug>.events.log    Event-Log für SSE (wird beim PUT angehängt)
+
+Berechtigungen sollten so gesetzt sein, dass der Webserver (www-data, apache,
+nginx, etc.) Lese- und Schreibzugriff hat: chmod 0700, chown www-data:www-data

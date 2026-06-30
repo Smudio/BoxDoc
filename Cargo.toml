@@ -28,7 +28,14 @@ crossbeam-channel = "0.5"
 eframe = { version = "0.34", default-features = false, features = ["glow", "default_fonts"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlAnchorElement", "Blob", "Url", "FileReader", "File", "FileList", "HtmlInputElement", "ClipboardEvent", "DataTransfer", "DataTransferItem"] }
+web-sys = { version = "0.3", features = [
+    "Window", "Document", "Element", "HtmlAnchorElement", "HtmlScriptElement",
+    "Blob", "Url", "FileReader", "File", "FileList", "HtmlInputElement",
+    "ClipboardEvent", "DataTransfer", "DataTransferItem",
+    # Web-Sync (Backend)
+    "Location", "Request", "RequestInit", "RequestMode", "Response", "Headers",
+    "Navigator",
+] }
 js-sys = "0.3"
 
 [profile.release]
