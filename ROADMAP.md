@@ -31,16 +31,18 @@ Ein vollständiges Versionsprotokoll, das jede Aktion erfasst und zeitlich zurü
 
 ## Phase 2 — Web & Browser
 
-### WASM-Portierung
+### PHP-Dokumenten-Backend
 
 BoxDoc soll direkt im Browser laufen — ohne Installation, ohne Plugin.
 
-- **Kompilierung nach WebAssembly** — Rust + egui kompilieren nativ nach WASM
-- **Statischer Webserver** — die kompilierte App besteht aus statischen Dateien (`index.html`, `.wasm`, `.js`, Assets), die auf jedem einfachen Webserver liegen können (nginx, Apache, `python -m http.server`, GitHub Pages)
-- **Kein Backend erforderlich** — die gesamte Logik läuft clientseitig im Browser
-- **Dateizugriff im Browser** — Save/Open über die File System Access API oder Download/Upload
+- **WASM-Kompilierung** — Rust + egui kompilieren nativ nach WebAssembly
+- **Statischer Webserver** — Frontend (index.html, .wasm, .js) liegt als statische Datei auf jedem Webserver (nginx, Apache, `python -m http.server`, GitHub Pages)
+- **PHP-Dokumenten-Backend** — kleines, framework-freies `api.php` (~120 Zeilen) speichert Dokumente serverseitig in `docs/<slug>.boxdoc`. URL-basierter Zugriff via `boxdoc.at/d/<slug>?t=<token>`.
+- **Server-Side Rendering für KI** — `index.php` bettet den Dokument-Inhalt + vollständige AI-Anleitung direkt in den HTML-Quellcode ein. opencode (oder jeder andere Agent) sieht beim `curl` alles Nötige: JSON-Inhalt + Anleitung wie man per PUT ändert.
+- **Kein Framework, kein Build** — das Backend ist eine einzige `api.php` + optionale `.htaccess`. Läuft auf jedem Shared-Hosting mit PHP 7.4+.
+- **Token-Schutz** — jedes Dokument hat ein 32-Zeichen-Token (Capability URL, wie Google Docs). Schreibzugriff nur mit Token.
 
-### Responsive Layout
+### Responsives Layout
 
 - Anpassung an verschiedene Bildschirmgrößen (Desktop, Tablet)
 - Touch-Bedienung für mobile Geräte (grundlegend)
@@ -49,21 +51,20 @@ BoxDoc soll direkt im Browser laufen — ohne Installation, ohne Plugin.
 
 ## Phase 3 — Echtzeit-Kollaboration
 
-### Multi-User Zusammenarbeit über WebRTC
+### Hybrid: Server-Sent Events (Daten) + WebRTC (Cursor)
 
-Mehrere Nutzer arbeiten gleichzeitig am selben Dokument — in Echtzeit, ohne zentralen Server.
+Mehrere Nutzer arbeiten gleichzeitig am selben Dokument — in Echtzeit.
 
-- **WebRTC Direct Connections** — Browser verbinden sich direkt miteinander (Peer-to-Peer). Kein zusätzlicher Application-Server nötig; lediglich ein STUN/TURN-Server für die Verbindungsherstellung (kostenlose öffentliche STUN-Server verfügbar)
-- **Dezentraler Ansatz** — jeder Peer hält eine lokale Kopie des Dokuments. Änderungen werden über den Datenkanal (DataChannel) an alle verbundenen Peers gesendet
-- **Echtzeit-Synchronisation** — wenn ein Nutzer ein Objekt verschiebt, Text bearbeitet oder ein Bild einfügt, sehen alle anderen Peers die Änderung sofort
-- **Konfliktlösung** — Object-basierte CRDT-ähnliche Synchronisation: jedes Objekt hat eine eindeutige ID, Änderungen werden pro Objekt angewendet (Last-Write-Wins pro Element)
-- **Präsenz** — farbige Cursor oder Markierungen zeigen, wo andere Nutzer arbeiten
+- **SSE für Dokument-Sync** — Browser öffnen eine `EventSource`-Verbindung zu `stream.php`. Jede Änderung (von anderem Tab oder von opencode per PUT) wird an alle verbundene Clients gepusht (<200 ms). Datei-basierte Event-Queue, kein Redis nötig.
+- **WebRTC für Präsenz** — für low-latency Cursor und Auswahl-Markierungen verbinden sich Browser direkt (Peer-to-Peer via DataChannel). STUN-Server kostenlos; nur für die Cursor, nicht für die Dokumentdaten.
+- **Last-Write-Wins pro Element** — jedes Objekt hat eindeutige `id`. Bei Konflikten gewinnt die zuletzt geschriebene Version pro Element (einfach, deterministisch).
+- **Präsenz** — farbige Cursor, Namen, Auswahl-Markierungen zeigen, wo andere Nutzer arbeiten.
+- **opencode-freundlich** — KI-Agenten brauchen nur HTTP (PUT/GET), kein WebSocket. Browser nutzen SSE für Live-Updates.
 
 ### Session-Verwaltung
 
-- **Room-System** — ein Dokument entspricht einem Raum; Nutzer treten über einen Link bei
-- **WebSocket-Signalisierung** — für die initiale Verbindungsherstellung (Wer ist im Raum?) reicht ein minimaler WebSocket-Server oder eine signalisierungsfreie Verbindung über geteilte Links
-- **Skalierbarkeit** — für kleine Teams (2–10 Peers) optimiert; Broadcasting über Mesh-Topologie
+- **Room-System** — ein Dokument entspricht einem Raum; Nutzer treten über die geteilte URL bei
+- **Skalierbarkeit** — für kleine Teams (2–10 Peers) optimiert; SSE für Daten, WebRTC-Mesh für Cursor
 
 ---
 
@@ -96,9 +97,8 @@ Mehrere Nutzer arbeiten gleichzeitig am selben Dokument — in Echtzeit, ohne ze
 
 | Version | Fokus |
 |---|---|
-| v0.2 (aktuell) | Lokaler Editor, Objekte, ODT/PDF |
-| v0.3 | Undo/Redo, Auto-Save |
-| v0.4 | WASM-Portierung, Browser-Version |
-| v0.5 | Echtzeit-Kollaboration (WebRTC) |
+| v0.3 (aktuell) | Lokaler Editor, Objekte, ODT/PDF, AI-Datei-Schnittstelle |
+| v0.4 | WASM-Portierung, PHP-Dokumenten-Backend, SSR für KI |
+| v0.5 | Echtzeit-Kollaboration (SSE + WebRTC für Cursor) |
 | v0.6 | Mobile (iOS/Android) |
 | v1.0 | Stabilisiert, poliert, bereit für breiten Einsatz |

@@ -15,10 +15,130 @@ pub struct ProjectImage {
     pub png_base64: String,
 }
 
+/// Vollständige AI-Anleitung, die in jede .boxdoc-Datei eingebettet wird,
+/// damit opencode (und jeder andere Agent) sofort weiß, wie das Format
+/// funktioniert und wie man es bearbeitet. BoxDoc ignoriert dieses Feld beim
+/// Laden; es dient ausschließlich der Maschinen-Lesbarkeit.
+pub const AI_HINT: &str = r#"BoxDoc-Dokument-Format (.boxdoc) — Anleitung für KI-Agenten
+=======================================================
+
+Diese Datei ist die komplette AI-Schnittstelle. Es gibt kein zusätzliches
+Protokoll, keine API, keine Sockets. Du (die KI) liest und bearbeitest die
+Datei direkt mit deinen normalen Datei-Werkzeugen — wie eine Quellcode-Datei.
+
+Wenn BoxDoc läuft und diese Datei geöffnet hat, übernimmt es jede externe
+Änderung automatisch (≤ 300 ms) als Undo-Schritt. Der Nutzer sieht sie live
+und kann sie mit Strg+Z zurückrollen.
+
+DATEIFORMAT
+-----------
+{
+  "doc": {
+    "format": "A4" | "A3" | "A5" | "Letter" | "Legal",
+    "orientation": "Portrait" | "Landscape",
+    "pages": [ { "elements": [ <Element>, ... ] } ]
+  },
+  "images": [ { "id": <u64>, "png_base64": "<base64-PNG-Bytes>" } ]
+}
+
+ELEMENT (je nach "kind" sind verschiedene Felder relevant)
+---------------------------------------------------------
+{
+  "id": <u64>,                       // stabil, niemals ändern beim Update
+  "kind": "Text" | "Image" | "Rectangle" | "Line",
+  "x": <f32 pt>,                     // linke obere Ecke (unrotiert)
+  "y": <f32 pt>,
+  "w": <f32 pt>,                     // Breite
+  "h": <f32 pt>,                     // Höhe (bei "Line" = 0)
+  "rotation": <Grad>,                // gegen Uhrzeigersinn
+  "text": "<Inhalt>",                // kann \n enthalten
+  "font_size": <pt>,
+  "font": "default"|"inter"|"roboto"|"lora"|"jetbrains"|"pacifico",
+  "color": [r, g, b, a],             // 0..255; a=255 deckend
+  "bold": <bool>, "italic": <bool>, "underline": <bool>,
+  "align": "Left"|"Center"|"Right", "valign": "Top"|"Middle"|"Bottom",
+  "indent": <pt>,
+  "crop": { "x":0.0, "y":0.0, "w":1.0, "h":1.0 },  // Image; normalisiert 0..1
+  "image_w": <px>, "image_h": <px>,                // Image
+  "fill_color": [r,g,b,a],           // Shape; Alpha 0 = transparent
+  "stroke_width": <pt>,              // Shape; 0 = kein Rahmen
+  "stroke_color": [r,g,b,a],         // Shape
+  "corner_radius": <pt>              // Rectangle
+}
+
+ELEMENT-TYPEN
+-------------
+Text       : text, font_size, font, color, bold, italic, underline, align, valign
+Rectangle  : fill_color, stroke_width, stroke_color, corner_radius
+Line       : stroke_width, stroke_color (Linie = Box mit h=0 + rotation)
+Image      : id (verweist auf images[].id), crop, image_w, image_h
+
+KOOORDINATENSYSTEM
+------------------
+- Maßeinheit: Punkt (1 pt = 1/72 Zoll; 1 Zoll = 25,4 mm)
+- Ursprung: oben-links, y zeigt nach UNTEN
+- A4 Hochformat: 595 x 842 pt | A4 Querformat: 842 x 595 pt
+- 1 cm ≈ 28,3 pt | 1 mm ≈ 2,83 pt
+- Z-Order: Elemente weiter hinten im Array liegen OBEN (werden zuletzt gezeichnet)
+
+REGELN FÜR DIE KI
+-----------------
+1. Lies die Datei als JSON, verstehe das Dokument.
+2. Ändere Felder direkt mit deinen normalen Edit-Tools.
+3. IDs sind u64 und stabil. Beim Aktualisieren nur existierende IDs verwenden.
+   Für neue Elemente: höchste vorhandene ID + 1.
+4. Bilder (images, png_base64, image_w, image_h) UNVERÄNDERT lassen.
+5. Nach jedem Speichern übernimmt BoxDoc die Änderung automatisch (≤ 300 ms).
+6. Der Nutzer kann mit Strg+Z zurückrollen; BoxDoc schreibt den alten Stand zurück.
+7. Ungültiges JSON wird still ignoriert — teilschreibende Dateien sind unkritisch.
+
+DESIGN-LEITFADEN
+----------------
+- Titel 28-36pt bold, Überschrift 18-22pt bold, Fließtext 10-12pt, Footer 8-9pt
+- Zeilenabstand: ca. 1,3x Schriftgröße
+- Seitenrand: mindestens ~50 pt (≈ 1,8 cm)
+- Eine Hauptfarbe + eine Akzentfarbe für ein ruhiges Bild
+- Aufzählungen mit "• " prefixen, eine Zeile pro Punkt
+- Z-Order: Dekorationen (Hintergrundbalken) VORNE im Array, Text HINTEN
+
+BEISPIEL: Neues Text-Element hinzufügen (an elements anhängen)
+--------------------------------------------------------------
+{
+  "id": <nächste freie ID>, "kind": "Text",
+  "x": 100.0, "y": 200.0, "w": 400.0, "h": 40.0, "rotation": 0.0,
+  "text": "Neuer Absatz", "font_size": 14.0, "font": "default",
+  "color": [20,20,20,255], "bold": false, "italic": false, "underline": false,
+  "align": "Left", "valign": "Top", "indent": 0.0,
+  "crop": {"x":0,"y":0,"w":1,"h":1}, "image_w": 0, "image_h": 0,
+  "fill_color": [80,140,220,60], "stroke_width": 2.0,
+  "stroke_color": [40,100,180,255], "corner_radius": 0.0
+}
+
+Hinweis: Dieses Feld (_ai_hint) wird von BoxDoc beim Laden ignoriert.
+Du kannst es beim Bearbeiten unverändert lassen oder löschen — BoxDoc wird
+es beim nächsten Speichern wieder automatisch einfügen.
+"#;
+
 #[derive(Serialize, Deserialize)]
 pub struct Project {
     pub doc: Document,
     pub images: Vec<ProjectImage>,
+    /// Selbst-Dokumentation für KI-Agenten. Wird beim Speichern automatisch
+    /// eingefügt und beim Laden ignoriert.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _ai_hint: Option<String>,
+}
+
+impl Project {
+    /// Erzeugt ein Project mit eingebettetem AI-Hint (für den regulären
+    /// Speichern-Fluss).
+    pub fn for_save(doc: Document, images: Vec<ProjectImage>) -> Self {
+        Project {
+            doc,
+            images,
+            _ai_hint: Some(AI_HINT.to_string()),
+        }
+    }
 }
 
 // ===========================================================================
@@ -208,10 +328,7 @@ mod native {
                 png_base64: base64::engine::general_purpose::STANDARD.encode(&e.png),
             })
             .collect();
-        let project = Project {
-            doc: app.doc.clone(),
-            images,
-        };
+        let project = Project::for_save(app.doc.clone(), images);
         let json = serde_json::to_string_pretty(&project)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         std::fs::write(path, json)
@@ -261,10 +378,7 @@ mod web_impl {
                 png_base64: base64::engine::general_purpose::STANDARD.encode(&e.png),
             })
             .collect();
-        let project = Project {
-            doc: app.doc.clone(),
-            images,
-        };
+        let project = Project::for_save(app.doc.clone(), images);
         match serde_json::to_string_pretty(&project) {
             Ok(json) => {
                 download_file(&json, "dokument.boxdoc", "application/json");
