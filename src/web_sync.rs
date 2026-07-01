@@ -80,23 +80,22 @@ impl WebDoc {
         let window = web_sys::window()?;
         let location = window.location();
 
-        // Pfad: /d/<slug> ODER ?doc=<slug>
+        // Pfad: /<slug> (saubere URL, z. B. boxdoc.at/lebenslauf)
         let path = location.pathname().ok()?;
         let mut slug = String::new();
 
-        if let Some(rest) = path.strip_prefix("/d/") {
-            // /d/<slug>
-            slug = rest.trim_end_matches('/').to_string();
-        } else if let Some(rest) = path.rsplit('/').next() {
-            // Letztes Pfad-Segment, falls es wie ein Slug aussieht.
-            if rest.len() >= 8 && rest.chars().all(|c| c.is_ascii_alphanumeric()) {
+        // Letztes Pfad-Segment prüfen, falls es wie ein Slug aussieht.
+        if let Some(rest) = path.rsplit('/').next() {
+            if rest.len() >= 4 && rest.len() <= 32
+                && rest.chars().all(|c| c.is_ascii_alphanumeric())
+                && rest.chars().next().map(|c| c.is_ascii_lowercase()).unwrap_or(false)
+            {
                 slug = rest.to_string();
             }
         }
 
-        // Query-String: location.search() gibt Result<String, JsValue>.
+        // Query-Parameter ?doc=<slug> hat Vorrang (Fallback ohne Rewriting)
         let query = location.search().unwrap_or_default();
-        // Query-Parameter ?doc=<slug> hat Vorrang
         if let Some(qs) = url_param(&query, "doc") {
             slug = qs;
         }
@@ -107,20 +106,8 @@ impl WebDoc {
 
         let token = url_param(&query, "t").unwrap_or_default();
 
-        // Basis-URL: Protokoll + Host (+ evtl. Pfad-Präfix)
-        let origin = location.origin().ok()?;
-        let base = if path.starts_with("/d/") || path.ends_with(&slug) {
-            // Wir sind unter /d/... — Basis ist der Root.
-            origin.clone()
-        } else {
-            // Index.php liegt evtl. in einem Unterverzeichnis.
-            let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-            if dir.is_empty() {
-                origin.clone()
-            } else {
-                format!("{}{}", origin, dir)
-            }
-        };
+        // Basis-URL: Origin (Server-Root). api.php liegt im Root.
+        let base = location.origin().ok().unwrap_or_default();
 
         Some(WebDoc {
             slug,
@@ -182,9 +169,13 @@ impl WebDoc {
         format!("{}/api.php?put={}&t={}", self.base, self.slug, self.token)
     }
 
-    /// Geteilbare URL für Nutzer.
+    /// Geteilbare URL für Nutzer (saubere URL: boxdoc.at/<slug>).
     pub fn share_url(&self) -> String {
-        format!("{}/d/{}?t={}", self.base, self.slug, self.token)
+        if self.token.is_empty() {
+            format!("{}/{}", self.base, self.slug)
+        } else {
+            format!("{}/{}?t={}", self.base, self.slug, self.token)
+        }
     }
 
     /// Lädt das Dokument vom Server. Liefert (Document, ImageStore, next_id).
@@ -319,7 +310,10 @@ impl WebDoc {
 // -----------------------------------------------------------------------------
 
 fn is_valid_slug(s: &str) -> bool {
-    s.len() >= 8 && s.len() <= 32 && s.chars().all(|c| c.is_ascii_alphanumeric())
+    s.len() >= 4
+        && s.len() <= 32
+        && s.chars().all(|c| c.is_ascii_alphanumeric())
+        && s.chars().next().map(|c| c.is_ascii_lowercase()).unwrap_or(false)
 }
 
 fn url_param(query: &str, key: &str) -> Option<String> {

@@ -1,47 +1,54 @@
 # =============================================================================
-# BoxDoc — Apache-Konfiguration (optional)
+# BoxDoc — Apache-Konfiguration
 # =============================================================================
-# Diese Datei konfiguriert hübsche URLs und CORS. Falls der Webserver kein
-# .htaccess unterstützt (nginx, etc.), können diese Regeln in die Server-Config
-# übernommen werden. BoxDoc funktioniert auch ohne .htaccess, dann eben mit
-# api.php?get=... URLs direkt.
+# Sorgt für saubere URLs und CORS. Funktioniert auch ohne .htaccess (dann
+# allerdings nur via boxdoc.at/?doc=<slug>).
 # =============================================================================
 
-# CORS für api.php und stream.php
+# CORS für api.php / stream.php
 <IfModule mod_headers.c>
     Header set Access-Control-Allow-Origin "*"
     Header set Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
     Header set Access-Control-Allow-Headers "Content-Type, X-BoxDoc-Token"
 </IfModule>
 
-# PUT-Methode erlauben (manche Hosts sind restriktiv)
 <Limit GET POST PUT DELETE OPTIONS>
     Order allow,deny
     Allow from all
 </Limit>
 
-# Hübsche URLs: /d/<slug> → /index.php?doc=<slug>
+# Hübsche URLs: boxdoc.at/<slug> → index.php
+# NUR wenn der Pfad keine echte Datei/Verzeichnis ist (sonst kollidiert es
+# mit index.html, api.php, boxdoc-*.js, docs/ etc.).
 <IfModule mod_rewrite.c>
     RewriteEngine On
 
-    # /d/<slug> → index.php
-    RewriteRule ^d/([a-z0-9]{8,32})/?$ /index.php?doc=$1 [L,QSA]
+    # OPTIONS-Preflight direkt durchlassen
+    RewriteCond %{REQUEST_METHOD} OPTIONS
+    RewriteRule ^ - [L]
 
-    # /d/<slug>?t=<token> wird durch QSA automatisch weitergereicht
+    # Existierende Dateien/Verzeichnisse nicht anfassen
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+    # Nur reine Slugs (a-z0-9, 4-32 Zeichen) an index.php leiten
+    RewriteRule ^([a-z0-9]{4,32})/?$ index.php [L,QSA]
 </IfModule>
 
 # docs/ vor direktem Zugriff schützen
 <IfModule mod_authz_core.c>
-    # Apache 2.4+
     Require all denied
 </IfModule>
 <IfModule !mod_authz_core.c>
-    # Apache 2.2
     Order deny,allow
     Deny from all
 </IfModule>
 
-# Dateityp .boxdoc registrieren (für Download)
+# .boxdoc als JSON ausliefern
 <IfModule mod_mime.c>
     AddType application/json .boxdoc
+</IfModule>
+
+# index.php vor index.html bevorzugen (Front-Controller)
+<IfModule mod_dir.c>
+    DirectoryIndex index.php index.html
 </IfModule>

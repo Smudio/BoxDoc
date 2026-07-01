@@ -123,16 +123,18 @@ WEB / SERVER (falls das Doc auf boxdoc.at liegt)
 Wenn dieses Dokument auf einem BoxDoc-Server liegt (z. B. boxdoc.at),
 kannst du es über einfache HTTP-Requests lesen und ändern:
 
-  Lesen:    GET  /api.php?get=<slug>
-  Ändern:   PUT  /api.php?put=<slug>   (Body = dieses JSON)
+  Lesen:    GET  https://boxdoc.at/<slug>
+  Ändern:   PUT  https://boxdoc.at/api.php?put=<slug>   (Body = dieses JSON)
+  Neu:      POST https://boxdoc.at/api.php?new=1&name=<slug>
 
-Der <slug> ist der Dokumentname in der URL. Standardmäßig sind Dokumente
-öffentlich (kein Token nötig). Nur wenn der Nutzer ein Token gesetzt hat,
-musst du &t=<token> an die URL hängen.
+Der <slug> ist der Dokumentname in der URL (z. B. "lebenslauf").
+Standardmäßig sind Dokumente öffentlich (kein Token nötig). Nur wenn der
+Nutzer ein Token gesetzt hat, hängst du ?t=<token> an die URL.
 
-Beispiel:
-  curl https://boxdoc.at/api.php?get=meindoc
-  curl -X PUT --data-binary @doc.json https://boxdoc.at/api.php?put=meindoc
+Beispiele:
+  curl https://boxdoc.at/lebenslauf
+  curl -X PUT --data-binary @doc.json https://boxdoc.at/api.php?put=lebenslauf
+  curl -X POST https://boxdoc.at/api.php?new=1&name=lebenslauf
 "#;
 
 #[derive(Serialize, Deserialize)]

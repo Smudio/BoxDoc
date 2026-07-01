@@ -51,10 +51,13 @@ function error(string $msg, int $code = 400): void
     send_json(['error' => $msg], $code);
 }
 
-/** Validiert einen Slug: a-z0-9, 4-32 Zeichen. */
+/** Validiert einen Slug: a-z0-9, 4-32 Zeichen, keine reservierten Namen. */
 function valid_slug(string $slug): bool
 {
-    return preg_match('/^[a-z0-9]{4,32}$/', $slug) === 1;
+    if (!preg_match('/^[a-z0-9]{4,32}$/', $slug)) return false;
+    // Reservierte Namen (wg. Dateien/Verzeichnissen auf dem Server).
+    $reserved = ['docs', 'api', 'index', 'stream', 'assets', 'static', 'dist'];
+    return !in_array($slug, $reserved, true);
 }
 
 function slug_path(string $slug): string
