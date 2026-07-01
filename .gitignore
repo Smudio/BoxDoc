@@ -13,5 +13,6 @@ desktop.ini
 # Build artifacts
 build_errors.txt
 
-# Trunk/Web build output (wird via `trunk build` erzeugt)
+# Trunk/Web build output (wird via `trunk build` / `build-web.ps1` erzeugt)
 /dist
+/deploy
