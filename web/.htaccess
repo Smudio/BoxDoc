@@ -1,5 +1,5 @@
 # =============================================================================
-# BoxDoc — Apache-Konfiguration
+# BoxDoc — Apache-Konfiguration (Root)
 # =============================================================================
 # Sorgt für saubere URLs und CORS. Funktioniert auch ohne .htaccess (dann
 # allerdings nur via boxdoc.at/?doc=<slug>).
@@ -12,14 +12,7 @@
     Header set Access-Control-Allow-Headers "Content-Type, X-BoxDoc-Token"
 </IfModule>
 
-<Limit GET POST PUT DELETE OPTIONS>
-    Order allow,deny
-    Allow from all
-</Limit>
-
 # Hübsche URLs: boxdoc.at/<slug> → index.php
-# NUR wenn der Pfad keine echte Datei/Verzeichnis ist (sonst kollidiert es
-# mit index.html, api.php, boxdoc-*.js, docs/ etc.).
 <IfModule mod_rewrite.c>
     RewriteEngine On
 
@@ -32,15 +25,6 @@
     RewriteCond %{REQUEST_FILENAME} !-d
     # Nur reine Slugs (a-z0-9, 4-32 Zeichen) an index.php leiten
     RewriteRule ^([a-z0-9]{4,32})/?$ index.php [L,QSA]
-</IfModule>
-
-# docs/ vor direktem Zugriff schützen
-<IfModule mod_authz_core.c>
-    Require all denied
-</IfModule>
-<IfModule !mod_authz_core.c>
-    Order deny,allow
-    Deny from all
 </IfModule>
 
 # .boxdoc als JSON ausliefern
