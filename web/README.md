@@ -1,68 +1,53 @@
 # BoxDoc Web-Backend
 
-Dieses Verzeichnis enthält das PHP-Backend für die BoxDoc-Web-Version.
+PHP-Dateien für den Server. Der Build-Prozess ist **unverändert**:
+`trunk build --release` erzeugt `dist/` (wie bisher). Diese PHP-Dateien
+werden beim Deploy einfach mitkopiert.
 
-## Deployment
+## Build (unverändert)
 
-1. **WASM-Build erstellen** (im Repo-Root):
-   ```bash
-   trunk build --release
-   # Erzeugt dist/index.html, dist/boxdoc-*.js, dist/boxdoc-*.wasm
-   ```
+```bash
+trunk build --release
+# → dist/index.html, dist/boxdoc-*.js, dist/boxdoc-*.wasm
+```
 
-2. **Dateien auf den Server kopieren:**
-   ```
-   web/api.php            → server/index.php nicht überschreiben!
-   web/stream.php         → server/
-   web/index.php          → server/
-   web/.htaccess          → server/
-   dist/index.html        → server/
-   dist/boxdoc-*.js       → server/
-   dist/boxdoc-*.wasm     → server/
-   ```
+## Deploy (ein Ordner auf dem Server)
 
-3. **`docs/` beschreibbar machen:**
-   ```bash
-   chmod 0700 docs/
-   chown www-data:www-data docs/   # oder apache:apache
-   ```
+```
+server/
+├── index.html          ← aus dist/
+├── boxdoc-*.js         ← aus dist/
+├── boxdoc-*.wasm       ← aus dist/
+├── api.php             ← aus web/
+├── stream.php          ← aus web/ (für Phase 3, harmlos wenn ungenutzt)
+├── .htaccess           ← aus web/ (optional, Apache)
+└── docs/               ← wird von PHP angelegt (chmod 0700)
+```
 
-## Funktionsweise
+Also: Inhalt von `dist/` + Inhalt von `web/` in denselben Ordner auf dem Server.
 
-| URL | Liefert |
-|-----|---------|
-| `boxdoc.at/` | SPA-Startseite (neues Doc erstellen / öffnen) |
-| `boxdoc.at/d/<slug>?t=<token>` | SSR-Seite mit eingebettetem Doc-Inhalt + AI-Anleitung |
-| `boxdoc.at/api.php?new=1` | Neues Doc erstellen → JSON mit slug, token, url |
-| `boxdoc.at/api.php?get=<slug>` | Reines JSON des Docs |
-| `boxdoc.at/api.php?put=<slug>&t=<token>` | Doc überschreiben (PUT) |
-| `boxdoc.at/api.php?list=1` | Liste aller Docs (slug, modified, size) |
-| `boxdoc.at/stream.php?slug=<slug>&t=<token>` | SSE-Live-Stream (für später) |
+## Für KI-Agenten (opencode)
 
-## Für opencode / KI-Agenten
+Zwei einfache HTTP-Requests. Das wars.
 
-Wenn opencode `boxdoc.at/d/<slug>?t=<token>` per `curl` aufruft, sieht es im
-HTML-Quellcode:
+```bash
+# Lesen (JSON enthält automatisch _ai_hint mit Anleitung)
+curl "https://boxdoc.at/api.php?get=<slug>&t=<token>"
 
-1. **Den vollständigen Doc-Inhalt** als `<script type="application/json">`
-2. **Eine komplette Anleitung** als HTML-Kommentar, die erklärt wie man per
-   `curl -X PUT ...` Änderungen vornimmt.
+# Ändern (komplettes JSON zurücksenden)
+curl -X PUT --data-binary @doc.json \
+     "https://boxdoc.at/api.php?put=<slug>&t=<token>"
+```
 
-Keine extra API-Dokumentation nötig — die Website ist selbst-dokumentierend.
+Keine Authentifizierung, keine Headers, kein komplexes Protokoll.
+Der Token (`?t=...`) ist das einzige, was nötig ist.
 
-## Sicherheit
+## Endpunkte
 
-- **Slug-Format:** `^[a-z0-9]{8,32}$` — kein Path-Traversal möglich
-- **Token:** 32 Zeichen Zufall (Capability-URL-Prinzip)
-- **`hash_equals`:** timing-sicherer Token-Vergleich
-- **Atomic Writes:** tmp-Datei + rename (keine Korruption bei Absturz)
-- **Größenlimit:** 10 MB pro Dokument
-- **docs/ geschützt:** `.htaccess` sperrt direkten Zugriff (nur via api.php)
-
-## Anforderungen
-
-- PHP 7.4 oder neuer
-- Schreibrechte für `docs/`
-- Optional: Apache mit `mod_rewrite` für hübsche URLs (`/d/<slug>`)
-- Alternativ: nginx, lighttpd — BoxDoc funktioniert auch ohne URL-Rewriting,
-  dann via `?doc=<slug>` URLs direkt.
+| URL | Methode | Zweck |
+|-----|---------|-------|
+| `api.php?new=1` | POST | Neues Doc → `{slug, token, url}` |
+| `api.php?get=<slug>` | GET | Doc-Inhalt als JSON |
+| `api.php?put=<slug>&t=<token>` | PUT | Doc überschreiben |
+| `api.php?list=1` | GET | Alle Docs auflisten |
+| `stream.php?slug=<slug>&t=<token>` | GET | SSE-Live-Stream (Phase 3) |

@@ -254,17 +254,8 @@ impl WebDoc {
 
     // --- Spawn-Helfer (starten Hintergrund-Tasks, pushen in die Queue) ---
 
-    /// Startet den initialen Lade-Vorgang. Bevorzugt das eingebettete JSON aus
-    /// der SSR-Seite (keine Netzwerk-Latenz), fällt sonst auf fetch zurück.
+    /// Startet den initialen Lade-Vorgang per fetch.
     pub fn spawn_initial_load(&self) {
-        // 1. Eingebettetes JSON ausprobieren (sync, sofort da).
-        if let Some(embedded) = read_embedded_content() {
-            if !embedded.trim().is_empty() && embedded != "{}" {
-                push_event(WebEvent::Loaded(embedded));
-                return;
-            }
-        }
-        // 2. Sonst async fetch.
         let url = self.api_get_url();
         wasm_bindgen_futures::spawn_local(async move {
             match fetch_text(&url).await {
@@ -435,8 +426,8 @@ async fn put_text(url: &str, body: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Liest das eingebettete JSON aus der SSR-Seite (script#boxdoc-content).
-/// Wird beim Startup verwendet, um ohne extra Fetch-Latenz das Doc zu haben.
+/// Liest das eingebettete JSON aus der Seite, falls von PHP injiziert.
+/// Ohne SSR-Seite liefert dies None — dann wird per fetch geladen.
 pub fn read_embedded_content() -> Option<String> {
     let window = web_sys::window()?;
     let document = window.document()?;
