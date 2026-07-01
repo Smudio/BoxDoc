@@ -2,14 +2,21 @@
 // =============================================================================
 // BoxDoc API — Dokumenten-Backend (framework-frei, PHP 7.4+)
 // =============================================================================
-// Endpunkte (alle via ?action= oder各自的 Query-Param):
-//   POST   ?new=1                      Neues Doc anlegen → {slug, token, url}
-//   GET    ?get=<slug>&t=<token>       Doc-Inhalt liefern (JSON)
-//   PUT    ?put=<slug>&t=<token>       Doc überschreiben (Body = JSON)
-//   POST   ?rename=<slug>&t=<token>    Doc umbenennen (Body: {"new_name":"..."})
-//   GET    ?list=1                     Liste aller Docs (slug, modified)
+// Endpunkte:
+//   POST   ?new=1                     Neues Doc anlegen → {slug, url}
+//                                        Optional: &name=<slug>   (eigener Name)
+//                                        Optional: &token=<token> (Schutz setzen)
+//   GET    ?get=<slug>                Doc-Inhalt liefern (JSON + _ai_hint)
+//   PUT    ?put=<slug>                Doc überschreiben (Body = JSON)
+//                                        Bei geschütztem Doc: &t=<token>
+//   GET    ?list=1                    Liste aller Docs (slug, modified, size)
 //
-// Storage: web/docs/<slug>.boxdoc (Inhalt) + <slug>.meta.json (Token)
+// Token-Modell:
+//   Default = kein Token. Docs sind öffentlich (lesen/schreiben wie Pastebin).
+//   Nur wenn beim Erstellen ?token=<wert> gesetzt wird, ist das Doc geschützt.
+//   Dann ist bei GET/PUT der Token nötig: &t=<token>.
+//
+// Storage: docs/<slug>.boxdoc (Inhalt) + <slug>.meta.json (optional Token)
 // =============================================================================
 
 declare(strict_types=1);
@@ -44,33 +51,26 @@ function error(string $msg, int $code = 400): void
     send_json(['error' => $msg], $code);
 }
 
+/** Validiert einen Slug: a-z0-9, 4-32 Zeichen. */
+function valid_slug(string $slug): bool
+{
+    return preg_match('/^[a-z0-9]{4,32}$/', $slug) === 1;
+}
+
 function slug_path(string $slug): string
 {
-    // Strenge Validierung: nur a-z0-9, 8-32 Zeichen. Kein Path-Traversal möglich.
-    if (!preg_match('/^[a-z0-9]{8,32}$/', $slug)) {
-        error('Invalid slug format', 400);
-    }
     return DOCS_DIR . $slug . '.boxdoc';
 }
 
 function meta_path(string $slug): string
 {
-    if (!preg_match('/^[a-z0-9]{8,32}$/', $slug)) {
-        error('Invalid slug format', 400);
-    }
     return DOCS_DIR . $slug . '.meta.json';
 }
 
 function gen_slug(): string
 {
-    // 10 Zeichen kryptografischer Zufall, kollisionsarm.
+    // 10 Zeichen Zufall — kollisionsarm.
     return bin2hex(random_bytes(5));
-}
-
-function gen_token(): string
-{
-    // 32 Zeichen Token für Capability-URL.
-    return bin2hex(random_bytes(16));
 }
 
 function load_meta(string $slug): ?array
@@ -87,29 +87,44 @@ function save_meta(string $slug, array $meta): void
         JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
 }
 
-function check_token(string $slug, ?string $token): void
+/**
+ * Prüft den Zugriff. Wenn das Doc einen Token hat, muss er übereinstimmen.
+ * Wenn das Doc KEINEN Token hat, ist der Zugriff frei (Default).
+ */
+function check_access(string $slug, ?string $token): void
 {
     $meta = load_meta($slug);
     if ($meta === null) error('Document not found', 404);
-    if (empty($meta['token'])) error('Document has no token', 403);
+    // Kein Token im Meta → öffentlich, Zugriff erlaubt.
+    if (empty($meta['token'])) return;
+    // Token gesetzt → muss übereinstimmen.
     if ($token === null || $token === '') error('Token required', 401);
     if (!hash_equals((string) $meta['token'], (string) $token)) {
         error('Invalid token', 403);
     }
 }
 
-function create_doc(string $slug, string $token, string $content = ''): void
+function create_doc(string $slug, string $content, ?string $token = null): void
 {
     if (!is_dir(DOCS_DIR)) mkdir(DOCS_DIR, 0700, true);
     // Atomic write: tmp + rename.
     $tmp = slug_path($slug) . '.tmp';
     file_put_contents($tmp, $content);
     rename($tmp, slug_path($slug));
-    save_meta($slug, [
-        'token' => $token,
-        'created' => time(),
-        'modified' => time(),
-    ]);
+    $meta = ['created' => time(), 'modified' => time()];
+    if ($token !== null && $token !== '') {
+        $meta['token'] = $token;
+    }
+    save_meta($slug, $meta);
+}
+
+function base_url(): string
+{
+    $scheme = ($_SERVER['HTTPS'] ?? 'off') !== 'off' ? 'https' : 'http';
+    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+    $dir = dirname($_SERVER['SCRIPT_NAME'] ?? '/');
+    $dir = ($dir === '/' || $dir === '\\') ? '' : $dir;
+    return $scheme . '://' . $host . $dir;
 }
 
 // -----------------------------------------------------------------------------
@@ -120,25 +135,39 @@ $method = $_SERVER['REQUEST_METHOD'];
 
 // --- Neues Doc anlegen ---
 if ($method === 'POST' && isset($_GET['new'])) {
-    $slug = gen_slug();
-    $token = gen_token();
+    // Slug: vom Nutzer wählbar (?name=...) oder automatisch generiert.
+    $slug = $_GET['name'] ?? '';
+    if ($slug === '') {
+        $slug = gen_slug();
+    } elseif (!valid_slug($slug)) {
+        error('Invalid name (4-32 chars a-z0-9)', 400);
+    } elseif (is_file(slug_path($slug))) {
+        error('Name already exists', 409);
+    }
+    // Token: optional. ?token=<wert> setzt Schutz, sonst öffentlich.
+    $token = $_GET['token'] ?? null;
+
     $content = '{"doc":{"format":"A4","orientation":"Portrait","pages":[{"elements":[]}]},"images":[]}';
-    create_doc($slug, $token, $content);
-    $scheme = ($_SERVER['HTTPS'] ?? 'off') !== 'off' ? 'https' : 'http';
-    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
-    $base = $scheme . '://' . $host . dirname($_SERVER['SCRIPT_NAME'] ?? '/');
+    create_doc($slug, $content, $token);
+
+    $base = base_url();
+    $tq = $token ? '?t=' . $token : '';
     send_json([
         'slug' => $slug,
         'token' => $token,
-        'url' => $base . '/d/' . $slug . '?t=' . $token,
-        'api_get' => $base . '/api.php?get=' . $slug . '&t=' . $token,
-        'api_put' => $base . '/api.php?put=' . $slug . '&t=' . $token,
+        'protected' => $token !== null,
+        'url' => $base . '/d/' . $slug . $tq,
+        'api_get' => $base . '/api.php?get=' . $slug . $tq,
+        'api_put' => $base . '/api.php?put=' . $slug . $tq,
     ], 201);
 }
 
 // --- Doc lesen ---
 if ($method === 'GET' && isset($_GET['get'])) {
     $slug = $_GET['get'];
+    if (!valid_slug($slug)) error('Invalid slug', 400);
+    $token = $_GET['t'] ?? null;
+    check_access($slug, $token);
     $path = slug_path($slug);
     if (!is_file($path)) error('Document not found', 404);
     header('Content-Type: application/json; charset=utf-8');
@@ -149,8 +178,9 @@ if ($method === 'GET' && isset($_GET['get'])) {
 // --- Doc überschreiben ---
 if ($method === 'PUT' && isset($_GET['put'])) {
     $slug = $_GET['put'];
+    if (!valid_slug($slug)) error('Invalid slug', 400);
     $token = $_GET['t'] ?? ($_SERVER['HTTP_X_BOXDOC_TOKEN'] ?? null);
-    check_token($slug, $token);
+    check_access($slug, $token);
     $body = file_get_contents('php://input');
     if (strlen($body) > MAX_SIZE) error('Document too large (max ' . MAX_SIZE . ' bytes)', 413);
     // JSON validieren
@@ -166,34 +196,14 @@ if ($method === 'PUT' && isset($_GET['put'])) {
     $meta = load_meta($slug) ?? [];
     $meta['modified'] = time();
     save_meta($slug, $meta);
-    // Event-Log für SSE (später Phase 3) — hänge einfach an.
+    // Event-Log für SSE (Phase 3)
     @file_put_contents(DOCS_DIR . $slug . '.events.log',
         json_encode(['ts' => time(), 'type' => 'update']) . "\n",
         FILE_APPEND);
     send_json(['ok' => true, 'slug' => $slug, 'modified' => $meta['modified']]);
 }
 
-// --- Doc umbenennen (Slug ändern) ---
-if ($method === 'POST' && isset($_GET['rename'])) {
-    $old_slug = $_GET['rename'];
-    $token = $_GET['t'] ?? null;
-    check_token($old_slug, $token);
-    $body = json_decode(file_get_contents('php://input'), true);
-    $new_name = $body['new_name'] ?? '';
-    if (!preg_match('/^[a-z0-9]{8,32}$/', $new_name)) {
-        error('Invalid new_name (8-32 chars a-z0-9)', 400);
-    }
-    if (is_file(slug_path($new_name))) error('Target name already exists', 409);
-    // Dateien verschieben
-    rename(slug_path($old_slug), slug_path($new_name));
-    rename(meta_path($old_slug), meta_path($new_name));
-    $meta = load_meta($new_name);
-    $meta['modified'] = time();
-    save_meta($new_name, $meta);
-    send_json(['ok' => true, 'slug' => $new_name]);
-}
-
-// --- Liste aller Docs (nur slug + modified, öffentlich) ---
+// --- Liste aller Docs ---
 if ($method === 'GET' && isset($_GET['list'])) {
     $docs = [];
     foreach (glob(DOCS_DIR . '*.boxdoc') as $f) {
@@ -203,6 +213,7 @@ if ($method === 'GET' && isset($_GET['list'])) {
             'slug' => $slug,
             'modified' => $meta['modified'] ?? filemtime($f),
             'size' => filesize($f),
+            'protected' => !empty($meta['token']),
         ];
     }
     send_json(['documents' => $docs]);

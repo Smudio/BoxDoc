@@ -117,6 +117,22 @@ BEISPIEL: Neues Text-Element hinzufügen (an elements anhängen)
 Hinweis: Dieses Feld (_ai_hint) wird von BoxDoc beim Laden ignoriert.
 Du kannst es beim Bearbeiten unverändert lassen oder löschen — BoxDoc wird
 es beim nächsten Speichern wieder automatisch einfügen.
+
+WEB / SERVER (falls das Doc auf boxdoc.at liegt)
+------------------------------------------------
+Wenn dieses Dokument auf einem BoxDoc-Server liegt (z. B. boxdoc.at),
+kannst du es über einfache HTTP-Requests lesen und ändern:
+
+  Lesen:    GET  /api.php?get=<slug>
+  Ändern:   PUT  /api.php?put=<slug>   (Body = dieses JSON)
+
+Der <slug> ist der Dokumentname in der URL. Standardmäßig sind Dokumente
+öffentlich (kein Token nötig). Nur wenn der Nutzer ein Token gesetzt hat,
+musst du &t=<token> an die URL hängen.
+
+Beispiel:
+  curl https://boxdoc.at/api.php?get=meindoc
+  curl -X PUT --data-binary @doc.json https://boxdoc.at/api.php?put=meindoc
 "#;
 
 #[derive(Serialize, Deserialize)]
