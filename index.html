@@ -1,10 +1,49 @@
 <!DOCTYPE html>
-<html>
+<html lang="de">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-    <title>BoxDoc</title>
+    <title>BoxDoc — KI-nativer Dokumenten-Editor</title>
+    <meta name="description" content="BoxDoc ist ein Dokumenten-Editor, dessen Dokumente einfaches Pretty-JSON sind. Jede KI kann sie ohne API oder SDK lesen und bearbeiten — per HTTP oder als Datei." />
+    <meta name="robots" content="index, follow" />
+    <link rel="canonical" href="https://boxdoc.at/" />
+
+    <!-- AI-Discoverability -->
+    <meta name="ai-content" content="BoxDoc documents are .boxdoc files (pretty-printed JSON). Read /llms.txt and /llms-full.txt for the full specification. Example: /sample.boxdoc" />
+
+    <!-- Open Graph -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="BoxDoc — KI-nativer Dokumenten-Editor" />
+    <meta property="og:description" content="Dokumente als Pretty-JSON. Jede KI kann sie lesen und bearbeiten — ohne API oder SDK." />
+    <meta property="og:url" content="https://boxdoc.at/" />
+    <meta property="og:site_name" content="BoxDoc" />
+
+    <!-- Schema.org JSON-LD -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "BoxDoc",
+      "applicationCategory": "DocumentEditor",
+      "operatingSystem": "Web, Windows, Linux, macOS",
+      "description": "KI-nativer Dokumenten-Editor. Dokumente sind Pretty-JSON (.boxdoc), die jede KI ohne API lesen und bearbeiten kann.",
+      "url": "https://boxdoc.at/",
+      "fileExtension": ".boxdoc"
+    }
+    </script>
+
     <link data-trunk rel="rust" data-bin="boxdoc" data-type="main" data-wasm-opt="z" />
+
+    <!-- Web-Backend & KI-Dateien: Trunk kopiert diese bei jedem Build automatisch nach dist/ -->
+    <link data-trunk rel="copy-file" href="web/index.php" />
+    <link data-trunk rel="copy-file" href="web/api.php" />
+    <link data-trunk rel="copy-file" href="web/stream.php" />
+    <link data-trunk rel="copy-file" href="web/robots.txt" />
+    <link data-trunk rel="copy-file" href="web/llms.txt" />
+    <link data-trunk rel="copy-file" href="web/llms-full.txt" />
+    <link data-trunk rel="copy-file" href="web/sample.boxdoc" />
+    <link data-trunk rel="copy-file" href="web/.htaccess" />
+    <link data-trunk rel="copy-file" href="web/docs/.htaccess" data-target-path="docs/" />
     <style>
       html, body {
         margin: 0;
@@ -41,5 +80,130 @@
         if (loading) loading.style.display = 'none';
       });
     </script>
+
+    <!--
+    ============================================================================
+    KI-SCHNITTSTELLE — Vollständige Spezifikation (für KI-Agenten ohne JS)
+    ============================================================================
+    Dieser <noscript>-Block ist für KI-Tools sichtbar, die kein JavaScript
+    ausführen (curl, opencode, ChatGPT-Browse, Perplexity, Web-Fetcher).
+    Echte Browser blenden ihn aus. Die kanonische Spec liegt unter /llms-full.txt.
+    ============================================================================
+    -->
+    <noscript>
+    <div style="font-family: -apple-system, system-ui, sans-serif; max-width: 860px; margin: 0 auto; padding: 2rem 1rem; line-height: 1.5; color: #222;">
+
+    <h1 style="color: #1f3a5f; border-bottom: 3px solid #4fc3c5; padding-bottom: .3rem;">BoxDoc</h1>
+
+    <p><strong>BoxDoc</strong> ist ein KI-nativer Dokumenten-Editor. Dokumente sind
+    <code>.boxdoc</code>-Dateien: Pretty-JSON, UTF-8. Das IST die komplette
+    Schnittstelle — kein separates Protokoll, keine Authentifizierung nötig.</p>
+
+    <h2 style="color: #1f3a5f; margin-top: 2rem;">Schnellstart (HTTP)</h2>
+    <pre style="background: #f4f4f4; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem;"># Neues Dokument erstellen
+curl -X POST "https://boxdoc.at/index.php?new=1&amp;name=meindokument"
+
+# Dokument lesen (JSON)
+curl "https://boxdoc.at/index.php?get=meindokument"
+
+# Dokument überschreiben — DATEI-BASIERT (empfohlen, kein Escaping nötig)
+curl -X PUT --data-binary @doc.json "https://boxdoc.at/index.php?put=meindokument"
+
+# Alle Dokumente auflisten
+curl "https://boxdoc.at/index.php?list=1"</pre>
+
+    <h2 style="color: #1f3a5f; margin-top: 2rem;">JSON-Regeln (WICHTIG)</h2>
+    <ul>
+      <li><strong>Format:</strong> Pretty-JSON oder minifiziert — beides akzeptiert. Für Inline-curl empfohlen: <strong>minifiziert (eine Zeile)</strong>.</li>
+      <li><strong>Zeilenumbrüche in Texten:</strong> Als <code>\n</code> im JSON-String schreiben, <em>nicht</em> als echte Zeilenumbrüche.</li>
+      <li><strong>Anführungszeichen in Texten:</strong> Als <code>\"</code> escapen.</li>
+      <li><strong>Backslash:</strong> Als <code>\\</code> escapen.</li>
+      <li><strong>Shell-Escaping (curl):</strong> JSON in <strong>Single Quotes</strong> <code>'{...}'</code> setzen — schützt vor der Shell. Enthält der Text selbst <code>'</code>, stattdessen Datei (<code>-d @file.json</code>) verwenden.</li>
+      <li><strong>Sicherster Weg:</strong> JSON in Datei speichern, mit <code>--data-binary @datei.json</code> senden. Dann gelten <em>nur</em> JSON-Regeln, keine Shell-Regeln.</li>
+    </ul>
+
+    <p style="background: #fff8e1; padding: 0.75rem 1rem; border-left: 4px solid #c8a24e; border-radius: 0 6px 6px 0; font-size: 0.9rem;">
+    <strong>Beispiel — Inline (minifiziert):</strong><br/>
+    <code>curl -X PUT --data-binary '{"doc":{"format":"A4","orientation":"Portrait","pages":[{"elements":[{"id":1,"kind":"Text","x":50,"y":50,"w":400,"h":40,"rotation":0,"text":"Hallo\nWelt","font_size":14,"font":"default","color":[20,20,20,255],"bold":false,"italic":false,"underline":false,"align":"Left","valign":"Top","indent":0,"crop":{"x":0,"y":0,"w":1,"h":1},"image_w":0,"image_h":0,"fill_color":[0,0,0,0],"stroke_width":0,"stroke_color":[0,0,0,0],"corner_radius":0}]}]},"images":[]}' "https://boxdoc.at/index.php?put=meindokument"</code>
+    </p>
+
+    <h2 style="color: #1f3a5f; margin-top: 2rem;">Dateiformat</h2>
+    <pre style="background: #f4f4f4; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem;">{
+  "doc": {
+    "format": "A4 | A3 | A5 | Letter | Legal",
+    "orientation": "Portrait | Landscape",
+    "pages": [
+      { "elements": [ &lt;Element&gt;, ... ] }
+    ]
+  },
+  "images": [
+    { "id": 1, "png_base64": "&lt;base64-PNG&gt;" }
+  ]
+}</pre>
+
+    <h2 style="color: #1f3a5f; margin-top: 2rem;">Element</h2>
+    <pre style="background: #f4f4f4; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem;">{
+  "id": &lt;u64&gt;,
+  "kind": "Text | Image | Rectangle | Line",
+  "x": &lt;f32 pt&gt;, "y": &lt;f32 pt&gt;,
+  "w": &lt;f32 pt&gt;, "h": &lt;f32 pt&gt;,
+  "rotation": &lt;Grad&gt;,
+
+  "text": "&lt;Inhalt&gt;",
+  "font_size": &lt;pt&gt;,
+  "font": "default|inter|roboto|lora|jetbrains|pacifico",
+  "color": [r, g, b, a],
+  "bold": false, "italic": false, "underline": false,
+  "align": "Left|Center|Right",
+  "valign": "Top|Middle|Bottom",
+  "indent": 0.0,
+
+  "crop": { "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 },
+  "image_w": 0, "image_h": 0,
+
+  "fill_color": [r, g, b, a],
+  "stroke_width": 2.0,
+  "stroke_color": [r, g, b, a],
+  "corner_radius": 0.0
+}</pre>
+
+    <h2 style="color: #1f3a5f; margin-top: 2rem;">Element-Typen</h2>
+    <ul>
+      <li><strong>Text</strong>: text, font_size, font, color, bold, italic, underline, align, valign</li>
+      <li><strong>Rectangle</strong>: fill_color, stroke_width, stroke_color, corner_radius</li>
+      <li><strong>Line</strong>: stroke_width, stroke_color (h=0, rotation für Winkel)</li>
+      <li><strong>Image</strong>: id (→ images[].id), crop, image_w, image_h</li>
+    </ul>
+
+    <h2 style="color: #1f3a5f; margin-top: 2rem;">Koordinatensystem</h2>
+    <ul>
+      <li>Maßeinheit: <strong>Punkt</strong> (1 pt = 1/72 Zoll; 1 cm ≈ 28,3 pt)</li>
+      <li>Ursprung: <strong>oben-links</strong>, y zeigt nach <strong>unten</strong></li>
+      <li>A4 Hochformat: 595 × 842 pt</li>
+      <li>IDs sind u64 und stabil. Neue Elemente: höchste ID + 1</li>
+      <li>Z-Order: Elemente weiter hinten im Array liegen oben</li>
+      <li>Bilder (images[], png_base64) unverändert lassen</li>
+    </ul>
+
+    <h2 style="color: #1f3a5f; margin-top: 2rem;">Beispiel: Neues Text-Element</h2>
+    <pre style="background: #f4f4f4; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem;">{"id": 42, "kind": "Text",
+  "x": 100, "y": 200, "w": 400, "h": 40, "rotation": 0,
+  "text": "Neuer Text", "font_size": 14, "font": "default",
+  "color": [20,20,20,255], "bold": false, "italic": false, "underline": false,
+  "align": "Left", "valign": "Top", "indent": 0,
+  "crop": {"x":0,"y":0,"w":1,"h":1}, "image_w": 0, "image_h": 0,
+  "fill_color": [80,140,220,60], "stroke_width": 0,
+  "stroke_color": [40,100,180,255], "corner_radius": 0}</pre>
+
+    <h2 style="color: #1f3a5f; margin-top: 2rem;">Weiterführend</h2>
+    <ul>
+      <li><a href="/llms.txt">/llms.txt</a> — Kurz-Spezifikation</li>
+      <li><a href="/llms-full.txt">/llms-full.txt</a> — Vollständige Spezifikation</li>
+      <li><a href="/sample.boxdoc">/sample.boxdoc</a> — Beispiel-Dokument</li>
+      <li><a href="/robots.txt">/robots.txt</a> — Crawler-Informationen</li>
+    </ul>
+
+    </div>
+    </noscript>
   </body>
 </html>

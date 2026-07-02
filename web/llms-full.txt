@@ -1,0 +1,285 @@
+# BoxDoc — Vollständige Spezifikation für KI-Agenten
+
+BoxDoc ist ein nativer Dokumenten-Editor (Rust + egui/WASM). Dokumente sind
+`.boxdoc`-Dateien: Pretty-JSON, UTF-8.
+
+**Das ist die komplette KI-Schnittstelle.** Es gibt kein zusätzliches Protokoll.
+Du (die KI) liest das Dokument als JSON und bearbeitest es direkt — entweder als
+Datei (Desktop) oder per HTTP (boxdoc.at).
+
+Wenn BoxDoc läuft und die Datei geöffnet hat, übernimmt es jede externe Änderung
+automatisch (≤ 300 ms) als Undo-Schritt. Der Nutzer sieht sie live und kann sie
+mit Strg+Z zurückrollen.
+
+---
+
+## Zwei Betriebsmodi
+
+### Modus A: Web (boxdoc.at) — HTTP-API
+
+```bash
+# Neues Dokument erstellen
+curl -X POST "https://boxdoc.at/index.php?new=1&name=lebenslauf"
+# → {"slug":"lebenslauf","url":"https://boxdoc.at/lebenslauf", ...}
+
+# Dokument lesen
+curl "https://boxdoc.at/index.php?get=lebenslauf"
+
+# Dokument überschreiben (komplettes JSON senden)
+curl -X PUT --data-binary @doc.json "https://boxdoc.at/index.php?put=lebenslauf"
+
+# Alle Dokumente auflisten
+curl "https://boxdoc.at/index.php?list=1"
+```
+
+**Token-Schutz (optional):** Default = öffentlich (lesen/schreiben wie Pastebin).
+Nur wenn beim Erstellen `?token=<wert>` gesetzt wurde, ist bei GET/PUT `?t=<token>`
+nötig.
+
+### JSON-Regeln (WICHTIG für PUT)
+
+- **Format:** Pretty-JSON oder minifiziert — beides akzeptiert. Für Inline-curl
+  empfohlen: **minifiziert (eine Zeile)**.
+- **Zeilenumbrüche in Texten:** Als `\n` im JSON-String schreiben, *nicht* als
+  echte Zeilenumbrüche.
+- **Anführungszeichen in Texten:** Als `\"` escapen.
+- **Backslash:** Als `\\` escapen.
+- **Shell-Escaping (curl):** JSON in **Single Quotes** `'{"...":"..."}'` setzen —
+  schützt vor der Shell. Enthält der Text selbst `'`, stattdessen Datei
+  (`-d @file.json`) verwenden.
+- **Sicherster Weg:** JSON in Datei speichern, mit `--data-binary @datei.json`
+  senden. Dann gelten *nur* JSON-Regeln, keine Shell-Regeln.
+
+### Beispiel — Inline (minifiziert, in Single Quotes)
+
+```bash
+curl -X PUT --data-binary '{"doc":{"format":"A4","orientation":"Portrait","pages":[{"elements":[{"id":1,"kind":"Text","x":50,"y":50,"w":400,"h":40,"rotation":0,"text":"Hallo\nWelt","font_size":14,"font":"default","color":[20,20,20,255],"bold":false,"italic":false,"underline":false,"align":"Left","valign":"Top","indent":0,"crop":{"x":0,"y":0,"w":1,"h":1},"image_w":0,"image_h":0,"fill_color":[0,0,0,0],"stroke_width":0,"stroke_color":[0,0,0,0],"corner_radius":0}]}]},"images":[]}' "https://boxdoc.at/index.php?put=lebenslauf"
+```
+
+### Modus B: Desktop (lokal) — Datei-basiert
+
+Die `.boxdoc`-Datei direkt mit Datei-Werkzeugen lesen/schreiben. Beim Speichern
+übernimmt BoxDoc die Änderung live (≤ 300 ms).
+
+---
+
+## Dateiformat
+
+```json
+{
+  "doc": {
+    "format": "A4" | "A3" | "A5" | "Letter" | "Legal",
+    "orientation": "Portrait" | "Landscape",
+    "pages": [ { "elements": [ <Element>, ... ] } ]
+  },
+  "images": [ { "id": <u64>, "png_base64": "<base64-PNG-Bytes>" } ]
+}
+```
+
+### Element
+
+Jedes Element hat zwingend einen `"kind"` und eine `"id"` (`u64`). Je nach
+`kind` sind verschiedene Felder relevant.
+
+```json
+{
+  "id": <u64>,
+  "kind": "Text" | "Image" | "Rectangle" | "Line",
+
+  "x": <f32 pt>,
+  "y": <f32 pt>,
+  "w": <f32 pt>,
+  "h": <f32 pt>,
+  "rotation": <Grad, gegen Uhrzeigersinn>,
+
+  "text": "<Inhalt>",
+  "font_size": <pt>,
+  "font": "default" | "inter" | "roboto" | "lora" | "jetbrains" | "pacifico",
+  "color": [r, g, b, a],
+  "bold": <bool>,
+  "italic": <bool>,
+  "underline": <bool>,
+  "align": "Left" | "Center" | "Right",
+  "valign": "Top" | "Middle" | "Bottom",
+  "indent": <pt>,
+
+  "crop": { "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 },
+  "image_w": <px>,
+  "image_h": <px>,
+
+  "fill_color": [r, g, b, a],
+  "stroke_width": <pt>,
+  "stroke_color": [r, g, b, a],
+  "corner_radius": <pt>
+}
+```
+
+### Feld-Bedeutungen
+
+| Feld         | Typ          | Bereich / Werte                                  |
+|--------------|--------------|--------------------------------------------------|
+| `id`         | u64          | eindeutig, stabil                                |
+| `kind`       | string       | Text, Image, Rectangle, Line                     |
+| `x`, `y`     | f32 (pt)     | Position der linken oberen Ecke (unrotiert)      |
+| `w`, `h`     | f32 (pt)     | Breite / Höhe (Line: h = 0)                     |
+| `rotation`   | f32 (Grad)   | gegen Uhrzeigersinn                              |
+| `color`      | [u8; 4]      | RGBA, 0..255; a=255 deckend                      |
+| `fill_color` | [u8; 4]      | RGBA; Alpha 0 = transparent                      |
+| `crop`       | {f32×4}      | normalisiert 0..1 (nur Image)                    |
+
+### Koordinatensystem
+
+- **Maßeinheit:** Punkt (1 pt = 1/72 Zoll; 1 Zoll = 25,4 mm).
+- **Ursprung:** oben-links, y zeigt nach **unten**.
+- **A4 Hochformat:** 595 × 842 pt.
+- **A4 Querformat:** 842 × 595 pt.
+- **Seitenrand/Typografie:** 1 cm ≈ 28,3 pt; 1 mm ≈ 2,83 pt.
+
+### Z-Order
+
+Elemente weiter hinten im `elements`-Array liegen **oben** (werden zuletzt
+gezeichnet). Das letzte Element verdeckt frühere bei Überlappung.
+
+---
+
+## Element-Typen im Detail
+
+| Kind        | Relevante Felder                                                |
+|-------------|----------------------------------------------------------------|
+| `Text`      | text, font_size, font, color, bold, italic, underline, align, valign |
+| `Rectangle` | fill_color, stroke_width, stroke_color, corner_radius          |
+| `Line`      | stroke_width, stroke_color (Linie = horizontale Box mit h=0 + rotation) |
+| `Image`     | id (verweist auf `images[].id`), crop, image_w, image_h        |
+
+**Linien zeichnen:** Eine Linie ist ein Element mit `kind: "Line"`, `h: 0`,
+`fill_color` transparent, `stroke_color` = Linienfarbe, `stroke_width` = Dicke.
+Position über `x,y` + `w` + `rotation` (Winkel gegen Uhrzeigersinn).
+
+---
+
+## Regeln für die KI
+
+1. **Lesen:** Datei/JSON parsen, Dokument verstehen.
+2. **Bearbeiten:** Felder direkt ändern mit Standard-HTTP oder Datei-Tools.
+3. **IDs sind `u64` und stabil.** Referenziere beim Aktualisieren nur
+   existierende IDs. Für neue Elemente: höchste vorhandene ID + 1.
+4. **Bilder nicht anfassen:** Lass `"images"`, `"png_base64"`, `"image_w"`,
+   `"image_h"` unverändert. Bearbeite nur Text, Layout und Styling.
+5. **Ungültiges JSON wird still ignoriert** – BoxDoc übernimmt nur sauber
+   parsebare Dokumente.
+6. **Nach jedem Speichern/PUT** übernimmt BoxDoc die Änderung automatisch.
+
+---
+
+## Typische Aufgaben
+
+### Text ändern
+```json
+{ "id": 5, "text": "Neuer Titel" }
+```
+
+### Position/Größe ändern
+```json
+{ "id": 5, "x": 120.0, "y": 80.0, "w": 300.0 }
+```
+
+### Farbe/Stil ändern
+```json
+{ "id": 5, "color": [30, 80, 160, 255], "bold": true, "font_size": 28.0 }
+```
+
+### Neues Text-Element hinzufügen
+An `elements` anhängen (nächste freie ID):
+```json
+{
+  "id": 42, "kind": "Text",
+  "x": 100.0, "y": 200.0, "w": 400.0, "h": 40.0, "rotation": 0.0,
+  "text": "Neuer Absatz", "font_size": 14.0, "font": "default",
+  "color": [20, 20, 20, 255], "bold": false, "italic": false, "underline": false,
+  "align": "Left", "valign": "Top", "indent": 0.0,
+  "crop": { "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 },
+  "image_w": 0, "image_h": 0,
+  "fill_color": [80, 140, 220, 60], "stroke_width": 2.0,
+  "stroke_color": [40, 100, 180, 255], "corner_radius": 0.0
+}
+```
+
+### Element löschen
+Aus dem `elements`-Array entfernen.
+
+### Rechteck (z. B. farbiger Balken) hinzufügen
+```json
+{
+  "id": 43, "kind": "Rectangle",
+  "x": 0.0, "y": 0.0, "w": 595.0, "h": 8.0, "rotation": 0.0,
+  "text": "", "font_size": 14.0, "font": "default",
+  "color": [20, 20, 20, 255], "bold": false, "italic": false, "underline": false,
+  "align": "Left", "valign": "Top", "indent": 0.0,
+  "crop": { "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 },
+  "image_w": 0, "image_h": 0,
+  "fill_color": [79, 195, 197, 255], "stroke_width": 0.0,
+  "stroke_color": [79, 195, 197, 255], "corner_radius": 0.0
+}
+```
+
+### Linie hinzufügen
+```json
+{
+  "id": 44, "kind": "Line",
+  "x": 100.0, "y": 300.0, "w": 400.0, "h": 0.0, "rotation": 0.0,
+  "text": "", "font_size": 14.0, "font": "default",
+  "color": [20, 20, 20, 255], "bold": false, "italic": false, "underline": false,
+  "align": "Left", "valign": "Top", "indent": 0.0,
+  "crop": { "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 },
+  "image_w": 0, "image_h": 0,
+  "fill_color": [0, 0, 0, 0], "stroke_width": 2.0,
+  "stroke_color": [40, 40, 40, 255], "corner_radius": 0.0
+}
+```
+
+### Neue Seite hinzufügen
+An `pages` ein weiteres `{ "elements": [] }` anhängen.
+
+### Seitenformat ändern
+`"format"` oder `"orientation"` im `doc`-Objekt anpassen.
+
+---
+
+## Design-Leitfaden (für schöne Ergebnisse)
+
+- **Typografische Hierarchie:** Titel 28–36pt bold, Überschrift 18–22pt bold,
+  Fließtext 10–12pt, Caption/Footer 8–9pt.
+- **Zeilenabstand:** Lass zwischen Text-Elementen ca. 1,3× die Schriftgröße.
+- **Seitenränder:** Mindestens ~50 pt (≈ 1,8 cm) zum Rand.
+- **Akzentfarben:** Eine Hauptfarbe + eine Akzentfarbe für ein ruhiges Bild.
+- **Aufzählungen:** Mit `"• "` prefixen, eine Zeile pro Punkt.
+- **Z-Order:** Dekorationen (Hintergrundbalken) **vorne** im Array (Index 0),
+  Text **hinten** (wird oben gezeichnet).
+- **Linien als Trenner:** `h: 0`, `fill_color: [0,0,0,0]`, nur `stroke_*`.
+
+---
+
+## HTTP-API-Referenz (boxdoc.at)
+
+Alle Endpunkte laufen über `index.php`:
+
+| Endpunkt                                    | Methode | Beschreibung                          |
+|---------------------------------------------|---------|---------------------------------------|
+| `/index.php?new=1&name=<slug>`              | POST    | Neues Dokument anlegen                |
+| `/index.php?new=1&name=<slug>&token=<t>`    | POST    | Geschütztes Dokument anlegen          |
+| `/index.php?get=<slug>`                     | GET     | Dokument lesen (JSON)                 |
+| `/index.php?get=<slug>&t=<token>`           | GET     | Geschütztes Dokument lesen            |
+| `/index.php?put=<slug>`                     | PUT     | Dokument überschreiben (Body = JSON)  |
+| `/index.php?put=<slug>&t=<token>`           | PUT     | Geschütztes Dokument überschreiben    |
+| `/index.php?list=1`                         | GET     | Alle Dokumente auflisten              |
+
+**Slug-Format:** `^[a-z0-9]{4,32}$` (4–32 Zeichen, Kleinbuchstaben + Ziffern).
+**Größenlimit:** 10 MB pro Request.
+**Schreibweise:** Atomic (tmp + rename), JSON wird validiert.
+
+---
+
+## Beispiel-Dokument
+
+Siehe **https://boxdoc.at/sample.boxdoc** für ein vollständiges, gültiges
+`.boxdoc`-Dokument mit allen Element-Typen.

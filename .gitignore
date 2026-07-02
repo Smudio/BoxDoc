@@ -12,7 +12,16 @@ desktop.ini
 
 # Build artifacts
 build_errors.txt
+build_log.txt
+
+# Temp/Test-Dateien
+nul
+test-doc.json
+test.boxdoc
+test.pdf
+test.txt
+test_cv.boxdoc
+testdoc.boxdoc
 
 # Trunk/Web build output (wird via `trunk build` / `build-web.ps1` erzeugt)
 /dist
-/deploy
