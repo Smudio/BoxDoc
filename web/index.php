@@ -26,15 +26,15 @@ if (preg_match('/^([a-z0-9]{4,32})$/', $path, $m)) {
 
 $ua = $_SERVER['HTTP_USER_AGENT'] ?? '';
 
-// Echten Browser erkennen. Kriterium: Mozilla + bekannte Engine.
-// Das schließt curl, wget, python-requests, opencode, bots etc. aus.
-function is_real_browser(string $ua): bool {
-    if (!str_contains($ua, 'Mozilla')) return false;
-    return str_contains($ua, 'AppleWebKit')
-        || str_contains($ua, 'Gecko')
-        || str_contains($ua, 'Trident')
-        || str_contains($ua, 'Chrome/')
-        || str_contains($ua, 'Chromium');
+// Echten Browser erkennen.
+// Zuverlässigstes Kriterium: echte Browser senden bei Navigation zwingend
+// "Sec-Fetch-Dest: document" und "Sec-Fetch-Mode: navigate". WebFetch-Tools
+// (opencode, curl, python-requests, bots) senden diese Header NICHT, selbst
+// wenn sie einen Mozilla-User-Agent vortäuschen.
+function is_real_browser(): bool {
+    $dest = $_SERVER['HTTP_SEC_FETCH_DEST'] ?? '';
+    $mode = $_SERVER['HTTP_SEC_FETCH_MODE'] ?? '';
+    return $dest === 'document' && $mode === 'navigate';
 }
 
 // --- Rohe JSON-Anfrage (curl ohne Accept: text/html) → sofort JSON ---
@@ -53,7 +53,7 @@ if ($slug !== '' && !str_contains($_SERVER['HTTP_ACCEPT'] ?? '*/*', 'text/html')
 }
 
 // --- Browser-Pfad: SPA ausliefern ---
-if (is_real_browser($ua)) {
+if (is_real_browser()) {
     $spa_path = __DIR__ . '/index.html';
     if (is_file($spa_path)) {
         $spa = file_get_contents($spa_path);
