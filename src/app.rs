@@ -195,6 +195,14 @@ pub struct EditorApp {
     /// Flag: Snapshot beim nächsten DragValue-Focus-Gain machen.
     pub prop_snapshot_pending: bool,
 
+    // --- JSON-Editor (Rohtext-Ansicht des Dokuments) ---
+    /// JSON-Editor-Fenster sichtbar?
+    pub show_json: bool,
+    /// Textpuffer des JSON-Editors.
+    json_buf: String,
+    /// Hat der JSON-Editor im letzten Frame Fokus? (Steuert Sync-Richtung.)
+    json_focused: bool,
+
     // --- File-Watch (AI-Schnittstelle) ---
     /// Lauft ein File-Watcher? Wird gedroppt → Watching stoppt.
     pub file_watcher: Option<crate::file_watch::FileWatcher>,
@@ -289,6 +297,9 @@ impl Default for EditorApp {
             theme_anim: 1.0,
             history: crate::history::History::default(),
             prop_snapshot_pending: false,
+            show_json: false,
+            json_buf: String::new(),
+            json_focused: false,
             file_watcher: None,
             file_watch_rx: None,
             watched_path: None,
@@ -952,6 +963,7 @@ impl eframe::App for EditorApp {
 
         self.show_menu(&ctx);
         self.show_properties(&ctx);
+        self.show_json_editor(&ctx);
         self.show_status(&ctx);
 
         egui::CentralPanel::default()
@@ -1120,6 +1132,9 @@ impl EditorApp {
                         self.settings.panel_side = side;
                         crate::settings_io::save(&self.settings);
                     }
+
+                    ui.separator();
+                    ui.checkbox(&mut self.show_json, "JSON-Editor");
 
                     ui.separator();
                     ui.label("Seitenausrichtung:");
@@ -2186,6 +2201,87 @@ impl EditorApp {
                 ui.label(&self.status);
             });
         });
+    }
+
+    /// Rohtext-Fenster über dem aktuellen Dokument. Das `doc`-Objekt wird als
+    /// pretty JSON angezeigt und kann direkt bearbeitet werden; gültige
+    /// Änderungen werden live (als Undo-Schritt) angewendet.
+    fn show_json_editor(&mut self, ctx: &Context) {
+        if !self.show_json {
+            return;
+        }
+        let content = |ui: &mut egui::Ui, app: &mut EditorApp| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false; 2])
+                .show(ui, |ui| {
+                    ui.heading("JSON");
+                    ui.separator();
+                    // Puffer an den aktuellen Dokumentstand anpassen, solange der
+                    // Nutzer nicht gerade tippt (sichtbar für externe/KI-Änderungen
+                    // und GUI-Aktionen).
+                    if !app.json_focused {
+                        app.json_buf = serde_json::to_string_pretty(&app.doc).unwrap_or_default();
+                    }
+                    let resp = ui.add(
+                        egui::TextEdit::multiline(&mut app.json_buf)
+                            .font(egui::TextStyle::Monospace)
+                            .code_editor()
+                            .desired_width(f32::INFINITY),
+                    );
+                    // Beim Einstieg einmalig den Undo-Snapshot sichern.
+                    if resp.gained_focus() {
+                        app.push_history();
+                    }
+                    app.json_focused = resp.has_focus();
+                    // Live anwenden, solange der Nutzer tippt und der Puffer als
+                    // gültiges Dokument parst.
+                    if app.json_focused {
+                        if let Ok(new_doc) = serde_json::from_str::<Document>(&app.json_buf) {
+                            let cur = serde_json::to_string(&app.doc).unwrap_or_default();
+                            let new = serde_json::to_string(&new_doc).unwrap_or_default();
+                            if new != cur {
+                                let known: std::collections::HashSet<u64> = new_doc
+                                    .pages
+                                    .iter()
+                                    .flat_map(|p| p.elements.iter().map(|e| e.id))
+                                    .collect();
+                                let max_id = new_doc
+                                    .pages
+                                    .iter()
+                                    .flat_map(|p| p.elements.iter().map(|e| e.id))
+                                    .max()
+                                    .unwrap_or(0);
+                                app.doc = new_doc;
+                                app.page_index =
+                                    app.page_index.min(app.doc.pages.len().saturating_sub(1));
+                                app.selection.retain(|id| known.contains(id));
+                                app.next_id = app.next_id.max(max_id + 1);
+                                app.editing = None;
+                                app.interaction = Interaction::None;
+                                app.touch();
+                            }
+                        }
+                    }
+                });
+        };
+
+        // Das JSON-Panel liegt gegenüber dem Eigenschaften-Panel.
+        match self.settings.panel_side {
+            crate::model::PanelSide::Right | crate::model::PanelSide::Bottom => {
+                egui::SidePanel::left("json_editor")
+                    .resizable(true)
+                    .default_width(240.0)
+                    .width_range(180.0..=560.0)
+                    .show(ctx, |ui| content(ui, self));
+            }
+            crate::model::PanelSide::Left => {
+                egui::SidePanel::right("json_editor")
+                    .resizable(true)
+                    .default_width(240.0)
+                    .width_range(180.0..=560.0)
+                    .show(ctx, |ui| content(ui, self));
+            }
+        }
     }
 }
 

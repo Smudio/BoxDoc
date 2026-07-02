@@ -27,7 +27,13 @@ impl PaperFormat {
     }
 
     pub fn all() -> [PaperFormat; 5] {
-        [PaperFormat::A4, PaperFormat::A3, PaperFormat::A5, PaperFormat::Letter, PaperFormat::Legal]
+        [
+            PaperFormat::A4,
+            PaperFormat::A3,
+            PaperFormat::A5,
+            PaperFormat::Letter,
+            PaperFormat::Legal,
+        ]
     }
 
     /// (Breite, Höhe) in Millimeter, Hochformat.
@@ -418,10 +424,7 @@ pub fn font_display(key: &str) -> &'static str {
 
 /// Index des Schlüssels (für ComboBox).
 pub fn font_index(key: &str) -> usize {
-    FONT_CHOICES
-        .iter()
-        .position(|f| f.key == key)
-        .unwrap_or(0)
+    FONT_CHOICES.iter().position(|f| f.key == key).unwrap_or(0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -429,6 +432,12 @@ pub enum TextAlign {
     Left,
     Center,
     Right,
+}
+
+impl Default for TextAlign {
+    fn default() -> Self {
+        TextAlign::Left
+    }
 }
 
 /// Vertikale Textausrichtung innerhalb der Element-Box.
@@ -456,7 +465,12 @@ pub struct Crop {
 
 impl Default for Crop {
     fn default() -> Self {
-        Crop { x: 0.0, y: 0.0, w: 1.0, h: 1.0 }
+        Crop {
+            x: 0.0,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0,
+        }
     }
 }
 
@@ -485,20 +499,28 @@ pub struct Element {
     pub kind: ElementKind,
 
     /// Position der linken oberen Ecke (unrotiert), in Punkten.
+    #[serde(default)]
     pub x: f32,
+    #[serde(default)]
     pub y: f32,
     /// Größe (unrotiert), in Punkten.
+    #[serde(default)]
     pub w: f32,
+    #[serde(default)]
     pub h: f32,
     /// Drehwinkel in Grad.
+    #[serde(default)]
     pub rotation: f32,
 
     // --- Text ---
+    #[serde(default)]
     pub text: String,
+    #[serde(default = "default_font_size")]
     pub font_size: f32,
     /// Schrift-Schlüssel (siehe FONT_CHOICES / font_index).
     #[serde(default = "default_font_key")]
     pub font: String,
+    #[serde(default = "default_text_color")]
     pub color: [u8; 4],
     #[serde(default)]
     pub bold: bool,
@@ -506,16 +528,21 @@ pub struct Element {
     pub italic: bool,
     #[serde(default)]
     pub underline: bool,
+    #[serde(default)]
     pub align: TextAlign,
     #[serde(default)]
     pub valign: VAlign,
     /// Einzug jeder Zeile in Punkten.
+    #[serde(default)]
     pub indent: f32,
 
     // --- Bild ---
+    #[serde(default)]
     pub crop: Crop,
     /// Originale Pixelgröße des geladenen Bilds.
+    #[serde(default)]
     pub image_w: u32,
+    #[serde(default)]
     pub image_h: u32,
 
     // --- Shape (Rechteck / Linie) ---
@@ -541,6 +568,12 @@ fn default_stroke_width() -> f32 {
 }
 fn default_stroke_color() -> [u8; 4] {
     [40, 100, 180, 255]
+}
+fn default_font_size() -> f32 {
+    14.0
+}
+fn default_text_color() -> [u8; 4] {
+    [20, 20, 20, 255]
 }
 
 impl Element {
@@ -677,7 +710,9 @@ pub struct Page {
 
 impl Default for Page {
     fn default() -> Self {
-        Page { elements: Vec::new() }
+        Page {
+            elements: Vec::new(),
+        }
     }
 }
 

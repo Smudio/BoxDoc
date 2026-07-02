@@ -103,9 +103,13 @@ transparent, `stroke_color` = Linienfarbe, `stroke_width` = Dicke. Position
    existierende IDs. Für neue Elemente: höchste vorhandene ID + 1.
 4. **Bilder nicht anfassen:** Lass `"images"`, `"png_base64"`, `"image_w"`,
    `"image_h"` unverändert. Bearbeite nur Text, Layout und Styling.
-5. **Ungültiges JSON wird still ignoriert** – BoxDoc reloadet nur sauber
+5. **Pflichtfelder:** Nur `"id"` und `"kind"` sind zwingend. Alle anderen
+   Felder sind optional und haben sinnvolle Defaults (z. B. `rotation: 0`,
+   `text: ""`, `color: [20,20,20,255]`, `align: "Left"`). Du kannst sie
+   beim Erstellen weglassen – BoxDoc füllt sie automatisch auf.
+6. **Ungültiges JSON wird still ignoriert** – BoxDoc reloadet nur sauber
    parsebare Dateien. Teilgeschriebene Dateien sind unkritisch.
-6. **Nach jedem Speichern** übernimmt BoxDoc die Änderung automatisch (≤ 300 ms)
+7. **Nach jedem Speichern** übernimmt BoxDoc die Änderung automatisch (≤ 300 ms)
    und legt sie als Undo-Schritt ab. Der Nutzer kann mit Strg+Z zurückrollen;
    BoxDoc schreibt dann den zurückgesetzten Stand in die Datei zurück.
 
