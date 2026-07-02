@@ -245,8 +245,18 @@ impl WebDoc {
 
     // --- Spawn-Helfer (starten Hintergrund-Tasks, pushen in die Queue) ---
 
-    /// Startet den initialen Lade-Vorgang per fetch.
+    /// Startet den initialen Lade-Vorgang.
+    /// Bevorzugt: eingebettetes JSON aus der HTML-Seite lesen (sofort da,
+    /// kein extra Fetch). Fallback: fetch an die API.
     pub fn spawn_initial_load(&self) {
+        // 1. Eingebettetes JSON aus <script id="boxdoc-content"> lesen
+        if let Some(embedded) = read_embedded_content() {
+            if !embedded.trim().is_empty() && embedded.trim() != "{}" {
+                push_event(WebEvent::Loaded(embedded));
+                return;
+            }
+        }
+        // 2. Fallback: per fetch laden
         let url = self.api_get_url();
         wasm_bindgen_futures::spawn_local(async move {
             match fetch_text(&url).await {
