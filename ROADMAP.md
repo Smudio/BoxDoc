@@ -1,104 +1,205 @@
 # Roadmap
 
-BoxDoc wird schrittweise weiterentwickelt. Diese Roadmap beschreibt die geplanten Features und die technische Ausrichtung.
+BoxDoc ist ein nativer, KI-freundlicher Dokumenten-Editor (Rust + egui).
+Diese Datei ist die einzige verbindliche Quelle für Status und Planung.
+
+> Letztes Update: 18. Juli 2026 · Aktuelle Version: **v0.3.0** (Cargo.toml)
 
 ---
 
-## Status
+## Status Quo (IST, v0.3.0)
 
-**Aktuell: v0.2.0** — Lokaler Dokumenten-Editor mit Objekt-Canvas, Multi-Selection, Copy/Paste, ODT/PDF-Export.
+| Bereich | Stand | Wo |
+|---|---|---|
+| Elemente | `Text`, `Image`, `Rectangle`, `Line` | `src/model.rs` |
+| Editor | Multi-Select, Copy/Paste-Ghost, Crop, Rotation, Resize | `src/canvas.rs` |
+| Undo/Redo | Snapshot-basiert, max. 200 Einträge | `src/history.rs` |
+| AI-Sync | Native `notify`-File-Watcher, Reload als Undo-Schritt | `src/file_watch.rs`, `src/app.rs:642` |
+| ODT | Import + Export (nativ) | `src/odt.rs` |
+| PDF | Export (nativ), **nur Text + Bilder, keine Shapes** | `src/printing.rs:104` |
+| WASM | Gerüst: `main.rs:46-77`, `index.html`, `Trunk.toml`, 18 `cfg`-Attribute; File-I/O via Browser-API | `src/io.rs:361` (`web_impl`) |
+| Papier | A3, A4, A5, Letter, Legal · Portrait/Landscape · Mehrere Seiten | `src/model.rs` |
 
----
-
-## Phase 1 — Fundament erweitern
-
-### Undo / Redo System
-
-Ein vollständiges Versionsprotokoll, das jede Aktion erfasst und zeitlich zurückverfolgt werden kann.
-
-- **Unbegrenzte History** — der Nutzer kann beliebig weit in die Vergangenheit zurückgehen und jede gemachte Änderung schrittweise rückgängig machen
-- **Granular auf Aktionsebene** — jede Einzelaktion ist ein History-Eintrag: Objekt verschieben, Text ändern, Bild drehen, Objekt löschen, Crop anpassen, Eigenschaften bearbeiten, Seite hinzufügen
-- **Redo** — verworfene Schritte können wiederhergestellt werden, bevor eine neue Aktion den Redo-Stack überschreibt
-- **Snapshots** — der komplette Dokumentzustand wird bei jeder Aktion als Snapshot gespeichert (einfach, zuverlässig, deterministisch)
-- **Bedienung**: Strg+Z (Rückgängig), Strg+Y / Strg+Shift+Z (Wiederherstellen)
-
-### Auto-Save
-
-- Automatisches Speichern im Hintergrund in einem temporären Verzeichnis
-- Wiederherstellung nach Absturz oder unerwartetem Schließen
+**Offen (bekannt):** 3 Sicherheitslücken (siehe `SECURITY.md`), keine Ellipse/Kreis, kein PDF-Import, kein responsives Mobile, keine Tests/CI.
 
 ---
 
-## Phase 2 — Web & Browser
+## Leitplanken für alle Phasen
 
-### PHP-Dokumenten-Backend
-
-BoxDoc soll direkt im Browser laufen — ohne Installation, ohne Plugin.
-
-- **WASM-Kompilierung** — Rust + egui kompilieren nativ nach WebAssembly
-- **Statischer Webserver** — Frontend (index.html, .wasm, .js) liegt als statische Datei auf jedem Webserver (nginx, Apache, `python -m http.server`, GitHub Pages)
-- **PHP-Dokumenten-Backend** — kleines, framework-freies `api.php` (~120 Zeilen) speichert Dokumente serverseitig in `docs/<slug>.boxdoc`. URL-basierter Zugriff via `boxdoc.at/d/<slug>?t=<token>`.
-- **Server-Side Rendering für KI** — `index.php` bettet den Dokument-Inhalt + vollständige AI-Anleitung direkt in den HTML-Quellcode ein. opencode (oder jeder andere Agent) sieht beim `curl` alles Nötige: JSON-Inhalt + Anleitung wie man per PUT ändert.
-- **Kein Framework, kein Build** — das Backend ist eine einzige `api.php` + optionale `.htaccess`. Läuft auf jedem Shared-Hosting mit PHP 7.4+.
-- **Token-Schutz** — jedes Dokument hat ein 32-Zeichen-Token (Capability URL, wie Google Docs). Schreibzugriff nur mit Token.
-
-### Responsives Layout
-
-- Anpassung an verschiedene Bildschirmgrößen (Desktop, Tablet)
-- Touch-Bedienung für mobile Geräte (grundlegend)
+1. **Eine Codebase** — Rust für Desktop, WASM für Web/Mobile, optional PHP für Server-Variante. Keine zweite Sprache für die App-Logik.
+2. **AI-first** — die `.boxdoc`-Datei bleibt die einzige AI-Schnittstelle. Jede Phase muss file-basiert funktionieren.
+3. **Simple first** — pro Phase nur das Nötigste. WebRTC, Plugin-System, Auto-Save sind bewusst **nicht** Teil der Roadmap.
+4. **Server-optional** — BoxDoc läuft lokal ohne jeden Server. Server-Variante (Phase 4) ist additiv.
+5. **Keine Tests als Blocker** — Tests sind nicht Teil der Definition-of-Done der Phasen. Sie kommen später, wenn sich das Modell stabilisiert hat.
 
 ---
 
-## Phase 3 — Echtzeit-Kollaboration
+## Phase 0 — Sicherheits-Stabilisierung · v0.3.1
 
-### Hybrid: Server-Sent Events (Daten) + WebRTC (Cursor)
+**Ziel:** Bekannte Schwachstellen schließen, Doku an Realität anpassen.
 
-Mehrere Nutzer arbeiten gleichzeitig am selben Dokument — in Echtzeit.
+- [ ] `printing.rs:49-52` — `.arg()` statt `.args([...])` (auch wenn Pfad aktuell hartcodiert)
+- [ ] `io.rs` — `is_safe_path()` mit `canonicalize` + Base-Dir-Check
+- [ ] `odt.rs:257-265` — `MAX_EXTRACT_SIZE` (100 MB) beim ZIP-Lesen
+- [ ] `SECURITY.md` — Fix-Status korrigieren (offen, nicht "fixed in 0.3.1")
+- [ ] `ARCHITECTURE.md` — falsche Behauptungen entfernen (Polling-File-Watcher existiert nicht, "All file paths validated" ist falsch, `src/ai.rs` existiert nicht)
+- [ ] `DEVELOPMENT_PLAN.md` — ersetzen durch Verweis auf diese Roadmap
+- [ ] Versionsnummern in allen Dateien auf `0.3.0`/`0.3.1-dev` konsolidieren
+- [ ] `Cargo.toml` auf `0.3.1-dev` setzen
 
-- **SSE für Dokument-Sync** — Browser öffnen eine `EventSource`-Verbindung zu `stream.php`. Jede Änderung (von anderem Tab oder von opencode per PUT) wird an alle verbundene Clients gepusht (<200 ms). Datei-basierte Event-Queue, kein Redis nötig.
-- **WebRTC für Präsenz** — für low-latency Cursor und Auswahl-Markierungen verbinden sich Browser direkt (Peer-to-Peer via DataChannel). STUN-Server kostenlos; nur für die Cursor, nicht für die Dokumentdaten.
-- **Last-Write-Wins pro Element** — jedes Objekt hat eindeutige `id`. Bei Konflikten gewinnt die zuletzt geschriebene Version pro Element (einfach, deterministisch).
-- **Präsenz** — farbige Cursor, Namen, Auswahl-Markierungen zeigen, wo andere Nutzer arbeiten.
-- **opencode-freundlich** — KI-Agenten brauchen nur HTTP (PUT/GET), kein WebSocket. Browser nutzen SSE für Live-Updates.
-
-### Session-Verwaltung
-
-- **Room-System** — ein Dokument entspricht einem Raum; Nutzer treten über die geteilte URL bei
-- **Skalierbarkeit** — für kleine Teams (2–10 Peers) optimiert; SSE für Daten, WebRTC-Mesh für Cursor
+**Agent:** `phase0-security` (siehe `AGENTS_TASKS.md`)
 
 ---
 
-## Phase 4 — Mobile & Plattform
+## Phase 1 — Shapes · v0.4.0
 
-### Mobile Apps
+**Ziel:** `Ellipse` als neue Element-Art (Kreis = Spezialfall `w == h`).
 
-- **iOS und Android** — egui/eframe unterstützt Touch-Input und mobile Rendering-Backends
-- **Native Datei-Dialoge** — Integration in die mobile Dateiauswahl
-- **Geteilte Codebase** — gleiche Rust-Logik, nur das Rendering-Backend unterscheidet sich
+- [ ] `ElementKind::Ellipse` in `src/model.rs`, Default-Werte, `default_element()`
+- [ ] Canvas-Rendering in `src/canvas.rs:870` (Match-Arm) → `Painter::add(circle/ellipse)`
+- [ ] Properties-Panel in `src/app.rs:1289` (Fill, Stroke, Radius-X/Radius-Y)
+- [ ] Resize-Logik in `src/canvas.rs` (zusätzlicher Handle oder w/h wie Rectangle)
+- [ ] Hit-Test in `point_in_element` (`src/canvas.rs`)
+- [ ] PDF-Export in `src/printing.rs:88` (printpdf circle/ellipse-Primitive)
+- [ ] ODT-Export in `src/odt.rs:176` (`<draw:ellipse>`)
+- [ ] JSON-Schema-Doku in `AGENTS.md` ergänzen
+- [ ] Toolbar-Button + Shortcut
 
-### Druckverbesserungen
+**Nicht in Phase 1:** Polygon, Arrow, Callout → später (Phase 7).
 
-- System-Druckdialog direkt (ohne PDF-Umweg)
-- Druckvorschau
-
----
-
-## Technische Leitsätze
-
-1. **Simple first** — jedes Feature wird so einfach wie möglich implementiert, ohne die Architektur zu verkomplizieren
-2. **Zuverlässig** — Datenverlust ist inakzeptabel; Auto-Save und Undo sind Fundament, nicht Afterthought
-3. **Elegant** — die UI bleibt ruhig, aufgeräumt und schnell
-4. **Portabel** — eine Codebase, drei Zielplattformen (Desktop, Web, Mobil)
-5. **Ohne Server** — BoxDoc funktioniert ohne zentrale Infrastruktur; Kollaboration ist Peer-to-Peer
+**Agent:** `phase1-shapes`
 
 ---
 
-## Versionsübersicht
+## Phase 2 — PDF-Roundtrip · v0.5.0
 
-| Version | Fokus |
-|---|---|
-| v0.3 (aktuell) | Lokaler Editor, Objekte, ODT/PDF, AI-Datei-Schnittstelle |
-| v0.4 | WASM-Portierung, PHP-Dokumenten-Backend, SSR für KI |
-| v0.5 | Echtzeit-Kollaboration (SSE + WebRTC für Cursor) |
-| v0.6 | Mobile (iOS/Android) |
-| v1.0 | Stabilisiert, poliert, bereit für breiten Einsatz |
+**Ziel:** PDF komplett **importieren** und vollständig **exportieren** können.
+
+### Import
+- [ ] `pdf-extract` oder `lopdf`/`pdfium-render` als native Dependency
+- [ ] `import_pdf_dialog()` in `src/io.rs`
+- [ ] Parser: Text-Runs mit Position + Font-Size → `Text`-Elemente; Vektorpfade → `Rectangle`/`Line`/`Ellipse`; eingebettete Bilder → `Image`
+- [ ] Multi-Page-PDF → Multi-Page-Doc
+- [ ] Schätzung für fehlende Metriken (Bold, Font-Family → `default`)
+
+### Export
+- [ ] Shapes in `printing.rs` rendern (Rect, Line, Ellipse)
+- [ ] Vollständige Font-Übersetzung (Bold, Italic, Inter/Roboto/Lora/JetBrains/Pacifico)
+- [ ] Korrekte Positionierung inkl. `align`, `valign`, `rotation`
+- [ ] Mehrseitiger Export
+- [ ] CI-Test-Setup: Sample `.boxdoc` → PDF → neu einlesen → Diff
+
+**WASM:** PDF-Import/-Export im Browser optional via JS-Library (`pdf.js`); nicht Teil von Phase 2.
+
+**Agent:** `phase2-pdf`
+
+---
+
+## Phase 3 — Mobile & Responsive WASM · v0.6.0
+
+**Ziel:** BoxDoc im Browser auf Smartphone/Tablet nutzbar.
+
+- [ ] Touch-Interaktion: Pinch-Zoom, Two-Finger-Pan, Long-Press-Selektion, Tap-Edit
+- [ ] `eframe` Touch-Events an `canvas.rs` anbinden ( aktuell nur Mouse)
+- [ ] Responsive UI: Toolbar unten als Bottom-Sheet, kollabierbare Seitenleiste, gröbere Handles
+- [ ] Viewport-Meta-Tag + `index.html` für Mobile optimiert
+- [ ] Test auf Android Chrome + iOS Safari (manuelles QA)
+- [ ] Last-Sitzung in IndexedDB persistieren (Dok + Scroll-Position)
+- [ ] `Trunk.toml`-Optimierungen (kleinere WASM, lazy-Fonts)
+
+**Kein Auto-Save:** Keine automatische Speicherung der Daten — nur die letzte Sitzung zur Wiederherstellung.
+
+**Agent:** `phase3-mobile`
+
+---
+
+## Phase 4 — Server-Variante mit PHP · v0.7.0
+
+**Ziel:** BoxDoc-Dateien am Webserver verwalten, AI über HTTP-PUT, SSR für Agenten.
+
+- [ ] `server/api.php` (~150 Zeilen): `GET/PUT/DELETE /docs/<slug>?t=<token>` — speichert in `server/docs/<slug>.boxdoc`
+- [ ] `server/index.php`: SSR — bettet Dokument-JSON + vollständige AI-Anleitung in HTML ein (für `curl` von Agenten)
+- [ ] Capability-Token (32 Zeichen) pro Dokument; Lese-URL optional public, Schreib-URL nur mit Token
+- [ ] `server/.htaccess`: Rewrite-Regeln + Caching-Header
+- [ ] `server/README.md`: Deployment auf Shared-Hosting (PHP 7.4+)
+- [ ] BoxDoc-Client: neuer "Open from URL"-Dialog (`URL + Token`), Schreiben via HTTP-PUT
+- [ ] File-Watcher-Erweiterung: optional Polling einer Remote-URL (300 ms) statt lokales FS
+- [ ] Demo-Deployment auf `boxdoc.at`
+
+**Single-User-Cloud:** Keine Multiuser-Echtzeit in Phase 4. Jeder Client lädt/speichert isoliert.
+
+**Agent:** `phase4-server`
+
+---
+
+## Phase 5 — Native Mobile Apps · v0.8.0
+
+**Ziel:** BoxDoc als native iOS/Android-App (gleiche Rust-Logik, mobile Backend).
+
+- [ ] Build-Setup via `cargo-mobile2` oder `xbuild`
+- [ ] egui Mobile-Backend testen (Touch-Input bereits unterstützt)
+- [ ] Native Datei-Auswahl, Sharing-Intent (Share-Sheet)
+- [ ] Sandbox-Speicherung (App-Documents)
+- [ ] iOS App Store + Android Play Store Vorbereitung (Icons, Metadaten)
+- [ ] Crash-Reporting optional
+
+**Agent:** `phase5-native-mobile`
+
+---
+
+## Phase 6 — Multiuser-Echtzeit (optional) · v0.9.0
+
+**Nur wenn echter Bedarf aus Nutzerfeedback.** Bewusst SIMPEL, kein WebRTC.
+
+- [ ] `server/stream.php` — SSE-Endpoint, pusht `PUT`-Events an alle Subscriber der `<slug>`
+- [ ] Browser: `EventSource` auf `/stream.php?slug=…&t=…`
+- [ ] Cursor-Präsenz: Position 10×/s über SSE mitschicken (nicht über WebRTC)
+- [ ] Last-Write-Wins pro `element.id` (id-basiert, kein OT/CRDT)
+- [ ] Präsenz-Indikator: Name + Farbe, lokal pro Session generiert
+
+**Kein WebRTC, kein OT.** Für 2–10 Peers reicht SSE völlig.
+
+**Agent:** `phase6-collab`
+
+---
+
+## Phase 7 — Weitere Shapes & Polish · v1.0+
+
+Später, nicht zeitkritisch:
+
+- [ ] `Polygon` (beliebige Punkte, geschlossen oder offen)
+- [ ] `Arrow` (Linie mit Pfeilspitze, konfigurierbar)
+- [ ] `Callout` (Rechteck + Linie + Text kombiniert)
+- [ ] Auto-Save (Crash-Recovery, lokal, optional)
+- [ ] Code-Refactoring: `app.rs` und `canvas.rs` aufteilen (siehe `AGENTS_TASKS.md`)
+- [ ] Performance: Viewport-Culling, Quad-Tree Hit-Test, Texture Lazy-Loading
+- [ ] Tests + CI (GitHub Actions: native + WASM)
+- [ ] Plugin-System für AI-Agenten
+
+---
+
+## Versionstabelle
+
+| Version | Fokus | Status |
+|---|---|---|
+| v0.3.0 | Lokaler Editor (IST) | ✅ Veröffentlicht |
+| v0.3.1 | Sicherheits-Stabilisierung | 🔵 Phase 0 |
+| v0.4.0 | Ellipse-Shape | ⬜ Phase 1 |
+| v0.5.0 | PDF-Roundtrip | ⬜ Phase 2 |
+| v0.6.0 | Mobile WASM | ⬜ Phase 3 |
+| v0.7.0 | PHP-Server | ⬜ Phase 4 |
+| v0.8.0 | Native Mobile | ⬜ Phase 5 |
+| v0.9.0 | SSE-Multiuser (optional) | ⬜ Phase 6 |
+| v1.0+ | Weitere Shapes, Polish | ⬜ Phase 7 |
+
+---
+
+## Was bewusst NICHT auf der Roadmap steht
+
+- **Auto-Save** — bewusst weggelassen; AI-Workflow + manuelles Speichern reicht.
+- **WebRTC** — zu komplex, SSE reicht für die Nutzerzahlen.
+- **Operational Transformation / CRDTs** — Last-Write-Wins pro `id` reicht.
+- **WebSocket** — SSE ist simpler und passengerechte genug.
+- **Tests als DoD** — werden erst in Phase 7 relevant.
+- **Plugin-System** — kann folgen, wenn sich das Modell stabilisiert hat.
+- **CI/CD-Pipeline** — folgt mit Phase 7; aktuell manueller Build.
