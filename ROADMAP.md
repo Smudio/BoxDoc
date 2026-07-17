@@ -3,11 +3,11 @@
 BoxDoc ist ein nativer, KI-freundlicher Dokumenten-Editor (Rust + egui).
 Diese Datei ist die einzige verbindliche Quelle für Status und Planung.
 
-> Letztes Update: 18. Juli 2026 · Aktuelle Version: **v0.3.0** (Cargo.toml)
+> Letztes Update: 18. Juli 2026 · Aktuelle Version: **v0.4.2-dev** (Cargo.toml)
 
 ---
 
-## Status Quo (IST, v0.3.0)
+## Status Quo (IST, v0.4.2-dev)
 
 | Bereich | Stand | Wo |
 |---|---|---|
@@ -15,12 +15,13 @@ Diese Datei ist die einzige verbindliche Quelle für Status und Planung.
 | Editor | Multi-Select, Copy/Paste-Ghost, Crop, Rotation, Resize | `src/canvas.rs` |
 | Undo/Redo | Snapshot-basiert, max. 200 Einträge | `src/history.rs` |
 | AI-Sync | Native `notify`-File-Watcher, Reload als Undo-Schritt | `src/file_watch.rs`, `src/app.rs:642` |
-| ODT | Import + Export (nativ) | `src/odt.rs` |
+| ODT | Import + Export (nativ) mit ZIP-Limit | `src/odt.rs` |
 | PDF | Export (nativ), **nur Text + Bilder, keine Shapes** | `src/printing.rs:104` |
+| Sicherheit | Shell-Args separiert, Pfad-Checks, ZIP-Limit (Phase 0 erledigt) | `SECURITY.md` |
 | WASM | Gerüst: `main.rs:46-77`, `index.html`, `Trunk.toml`, 18 `cfg`-Attribute; File-I/O via Browser-API | `src/io.rs:361` (`web_impl`) |
 | Papier | A3, A4, A5, Letter, Legal · Portrait/Landscape · Mehrere Seiten | `src/model.rs` |
 
-**Offen (bekannt):** 3 Sicherheitslücken (siehe `SECURITY.md`), keine Ellipse/Kreis, kein PDF-Import, kein responsives Mobile, keine Tests/CI.
+**Offen (bekannt):** keine Ellipse/Kreis, kein PDF-Import, kein responsives Mobile, keine Tests/CI.
 
 ---
 
@@ -34,18 +35,18 @@ Diese Datei ist die einzige verbindliche Quelle für Status und Planung.
 
 ---
 
-## Phase 0 — Sicherheits-Stabilisierung · v0.3.1
+## Phase 0 — Sicherheits-Stabilisierung · v0.4.2 ✅ erledigt
 
 **Ziel:** Bekannte Schwachstellen schließen, Doku an Realität anpassen.
 
-- [ ] `printing.rs:49-52` — `.arg()` statt `.args([...])` (auch wenn Pfad aktuell hartcodiert)
-- [ ] `io.rs` — `is_safe_path()` mit `canonicalize` + Base-Dir-Check
-- [ ] `odt.rs:257-265` — `MAX_EXTRACT_SIZE` (100 MB) beim ZIP-Lesen
-- [ ] `SECURITY.md` — Fix-Status korrigieren (offen, nicht "fixed in 0.3.1")
-- [ ] `ARCHITECTURE.md` — falsche Behauptungen entfernen (Polling-File-Watcher existiert nicht, "All file paths validated" ist falsch, `src/ai.rs` existiert nicht)
-- [ ] `DEVELOPMENT_PLAN.md` — ersetzen durch Verweis auf diese Roadmap
-- [ ] Versionsnummern in allen Dateien auf `0.3.0`/`0.3.1-dev` konsolidieren
-- [ ] `Cargo.toml` auf `0.3.1-dev` setzen
+- [x] `printing.rs:49-56` — `.arg()` statt `.args([...])` (SW-001)
+- [x] `io.rs` — `is_safe_path()` + `ensure_canonicalizable()` in `load_project`,
+      `save_project`, `import_odt_dialog` (SW-002)
+- [x] `odt.rs` — `MAX_EXTRACT_SIZE` (100 MB) + `MAX_ARCHIVE_TOTAL_SIZE` (400 MB)
+      beim ZIP-Lesen (SW-003)
+- [x] `SECURITY.md` — Fix-Status korrigiert (Fixed in main / v0.4.2)
+- [x] `ARCHITECTURE.md` — Security-Passagen auf IST-Stand gebracht
+- [x] `Cargo.toml` auf `0.4.2-dev` gesetzt
 
 **Agent:** `phase0-security` (siehe `AGENTS_TASKS.md`)
 
@@ -182,14 +183,14 @@ Später, nicht zeitkritisch:
 
 | Version | Fokus | Status |
 |---|---|---|
-| v0.3.0 | Lokaler Editor (IST) | ✅ Veröffentlicht |
-| v0.3.1 | Sicherheits-Stabilisierung | 🔵 Phase 0 |
-| v0.4.0 | Ellipse-Shape | ⬜ Phase 1 |
-| v0.5.0 | PDF-Roundtrip | ⬜ Phase 2 |
-| v0.6.0 | Mobile WASM | ⬜ Phase 3 |
-| v0.7.0 | PHP-Server | ⬜ Phase 4 |
-| v0.8.0 | Native Mobile | ⬜ Phase 5 |
-| v0.9.0 | SSE-Multiuser (optional) | ⬜ Phase 6 |
+| v0.4.1 | Vor-Phase-0-Stand | ⚠️ 3 Security-Fixes fehlen |
+| v0.4.2 | Sicherheits-Stabilisierung | ✅ Phase 0 erledigt |
+| v0.5.0 | Ellipse-Shape | ⬜ Phase 1 |
+| v0.6.0 | PDF-Roundtrip | ⬜ Phase 2 |
+| v0.7.0 | Mobile WASM | ⬜ Phase 3 |
+| v0.8.0 | PHP-Server | ⬜ Phase 4 |
+| v0.9.0 | Native Mobile | ⬜ Phase 5 |
+| v1.0.0 | SSE-Multiuser (optional) | ⬜ Phase 6 |
 | v1.0+ | Weitere Shapes, Polish | ⬜ Phase 7 |
 
 ---

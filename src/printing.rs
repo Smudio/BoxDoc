@@ -48,7 +48,10 @@ pub fn print_dialog(app: &mut crate::app::EditorApp) {
         Ok(()) => {
             #[cfg(target_os = "windows")]
             let _ = std::process::Command::new("cmd")
-                .args(["/C", "start", "", &path.display().to_string()])
+                .arg("/C")
+                .arg("start")
+                .arg("")
+                .arg(path.display().to_string())
                 .spawn();
             #[cfg(target_os = "linux")]
             let _ = std::process::Command::new("xdg-open").arg(&path).spawn();

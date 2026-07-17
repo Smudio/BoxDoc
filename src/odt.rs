@@ -17,6 +17,13 @@ type E = Box<dyn std::error::Error>;
 
 const MIMETYPE: &str = "application/vnd.oasis.opendocument.text";
 
+/// Maximale Größe einer einzelnen entpackten Datei (100 MB) — Schutz vor
+/// ZIP-Bomben. Wird beim Lesen jedes Archiveintrags geprüft.
+const MAX_EXTRACT_SIZE: u64 = 100 * 1024 * 1024;
+/// Maximale Summe aller unkomprimierten Dateien im Archiv (400 MB). Verhindert
+/// ZIP-Bomben mit vielen kleinen Dateien unterhalb des Einzel-Limits.
+const MAX_ARCHIVE_TOTAL_SIZE: u64 = 4 * MAX_EXTRACT_SIZE;
+
 const NS: &str = concat!(
     " xmlns:office=\"urn:oasis:names:tc:opendocument:xmlns:office:1.0\"",
     " xmlns:text=\"urn:oasis:names:tc:opendocument:xmlns:text:1.0\"",
@@ -193,6 +200,24 @@ pub fn import(path: &std::path::Path) -> Result<(Document, ImageStore, u64), E> 
     let file = File::open(path)?;
     let mut archive = ZipArchive::new(file)?;
 
+    // SW-003: Summen-Check über alle Einträge. Blockiert ZIP-Bomben mit vielen
+    // kleinen Dateien, die einzeln unter `MAX_EXTRACT_SIZE` liegen.
+    let total_uncompressed: u64 = (0..archive.len())
+        .map(|i| {
+            archive
+                .by_index(i)
+                .map(|f| f.size())
+                .unwrap_or(0)
+        })
+        .sum();
+    if total_uncompressed > MAX_ARCHIVE_TOTAL_SIZE {
+        return Err(format!(
+            "ODT-Archiv zu groß: entpackt {} Bytes (Limit: {} Bytes)",
+            total_uncompressed, MAX_ARCHIVE_TOTAL_SIZE
+        )
+        .into());
+    }
+
     let content = String::from_utf8(read_entry(&mut archive, "content.xml")?)?;
 
     let mut images = ImageStore::default();
@@ -258,9 +283,36 @@ fn read_entry<R: Read + std::io::Seek>(
     archive: &mut ZipArchive<R>,
     name: &str,
 ) -> Result<Vec<u8>, E> {
-    let mut buf = Vec::new();
     let mut f = archive.by_name(name)?;
-    f.read_to_end(&mut buf)?;
+    // SW-003: Einzel-Limit pro Archiveintrag (Schutz vor ZIP-Bomben).
+    if f.size() > MAX_EXTRACT_SIZE {
+        return Err(format!(
+            "Archiveintrag '{}' zu groß: {} Bytes (Limit: {} Bytes)",
+            name,
+            f.size(),
+            MAX_EXTRACT_SIZE
+        )
+        .into());
+    }
+    let mut buf = Vec::with_capacity((f.size() as usize).min(MAX_EXTRACT_SIZE as usize));
+    let mut total: u64 = 0;
+    loop {
+        let n = {
+            let mut chunk = (&mut f).take(8 * 1024);
+            chunk.read_to_end(&mut buf)?
+        };
+        if n == 0 {
+            break;
+        }
+        total += n as u64;
+        if total > MAX_EXTRACT_SIZE {
+            return Err(format!(
+                "Archiveintrag '{}' überschreitet Maximalgröße von {} Bytes beim Entpacken",
+                name, MAX_EXTRACT_SIZE
+            )
+            .into());
+        }
+    }
     Ok(buf)
 }
 

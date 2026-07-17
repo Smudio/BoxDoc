@@ -1,0 +1,85 @@
+Objekt-Canvas
+
+
+
+# JSON struktur bsp welche für llm training genutzt werden
+JSON
+[
+  {
+    "text": "Rechnung",
+    "bbox": [45, 30, 180, 70]
+  },
+  {
+    "text": "Datum:",
+    "bbox": [50, 120, 120, 150]
+  },
+  {
+    "text": "12.04.2025",
+    "bbox": [130, 120, 250, 150]
+  }
+]
+
+JSON
+{
+  "x":45,
+  "y":30,
+  "width":135,
+  "height":40
+}
+
+
+JSON
+{
+  "left":45,
+  "top":30,
+  "right":180,
+  "bottom":70
+}
+
+# andere syntax für llm training
+
+[BOX 45 30 180 70]
+Rechnung
+
+[BOX 52 120 120 150]
+Datum
+
+[BOX 130 120 250 150]
+12.04.2025
+
+
+
+Token        Bounding Box
+
+Rechnung     [40,20,180,60]
+Datum        [50,120,120,150]
+12.04.2025   [130,120,240,150]
+
+
+
+
+
+# DocLLM
+JSON
+{
+  "text":"Total",
+  "bbox":[480,690,560,720],
+  "page":2,
+  "font_size":14,
+  "reading_order":53
+}
+
+
+
+# OCR tools
+Tesseract
+PaddleOCR
+EasyOCR
+Mistral OCR (intern vermutlich ebenfalls)
+LayoutLM-Datensätze
+DocVQA
+PubLayNet
+FUNSD
+COCO
+Pascal VOC
+

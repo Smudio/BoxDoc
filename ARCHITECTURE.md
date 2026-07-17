@@ -136,6 +136,17 @@ Plattform-spezifische Implementierungen:
 - `mod native` (`io.rs:149`) — `std::fs`, `rfd`-Dialoge.
 - `mod web_impl` (`io.rs:361`) — Browser File-Input, Blob-Download.
 
+#### Pfad-Validierung (Security)
+
+- `is_safe_path(path, base)` (`io.rs`) — Defensiv-Check für Automatisierung
+  (zukünftige Server-Variante). Prüft via `canonicalize` + `starts_with`.
+  Aktuell nicht gegen `current_dir` erzwungen, da `rfd::FileDialog`-Pfade
+  überall liegen dürfen.
+- `ensure_canonicalizable(path)` (`io.rs`) — Defensiv-Check, der in
+  `load_project`, `save_project` und `import_odt_dialog` aufgerufen wird.
+  Blockiert kaputte und symlink-basierte Pfade, ohne legitime File-Dialog-Pfade
+  einzuschränken. Siehe `SECURITY.md` SW-002.
+
 ### 5. History (`src/history.rs`)
 
 ```rust
@@ -177,13 +188,17 @@ gesnapshottet (nur IDs), um Speicher zu sparen.
 - **Nativ:** `printpdf` 0.7.
 - **Status:** Text + Bilder; **Rechtecke und Linien werden aktuell
   ignoriert** (`printing.rs:104-105`, leerer Match-Arm).
+- **Shell-Aufruf (Windows):** `cmd /C start <pdf>` mit separaten `.arg()`-
+  Aufrufen (SW-001 gefixt, siehe `SECURITY.md`).
 - **WASM:** Status-Text "nicht unterstützt".
 - Vollständiger Shape-Export + PDF-Import folgen in Phase 2.
 
 ### 8. ODT (`src/odt.rs`)
 
 - Import + Export nativ via `zip`-Crate.
-- Kein ZIP-Bomb-Limit (siehe `SECURITY.md` SW-003).
+- **ZIP-Bomb-Limit aktiv** (SW-003 gefixt, siehe `SECURITY.md`):
+  - `MAX_EXTRACT_SIZE = 100 MB` pro Archiveintrag, geprüft in `read_entry`.
+  - `MAX_ARCHIVE_TOTAL_SIZE = 400 MB` über alle Einträge, geprüft in `import`.
 - WASM: nicht unterstützt.
 
 ---
@@ -272,7 +287,8 @@ Dependencies und nicht nötig — IndexedDB wird in Phase 3 über
 | Memory/Dokument | 1–10 MB | anhängig von Bildern |
 | History | max. 200 Snapshots | konfigurierbar in `history.rs:11` |
 | Load/Save | < 1 s | typische Dokumente |
-| Max-File-Size | unlimitiert | siehe `SECURITY.md` SW-003 |
+| Max-File-Size | unlimitiert | für `.boxdoc` |
+| Max-Extract-Size (ODT) | 100 MB pro Eintrag, 400 MB Gesamt | siehe `SECURITY.md` SW-003 |
 
 Optimierungen (Viewport-Culling, Quad-Tree, Lazy-Loading) folgen in Phase 7f/g.
 

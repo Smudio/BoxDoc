@@ -181,6 +181,51 @@ mod native {
 
     type IoResult<T> = std::io::Result<T>;
 
+    /// Überprüft, ob `path` innerhalb von `base` liegt (Path-Traversal-Schutz).
+    ///
+    /// Hinweis: Diese Funktion wird aktuell nicht gegen `current_dir` als `base`
+    /// erzwungen, da BoxDoc Dateien aus `rfd::FileDialog` lädt — die Nutzer
+    /// dürfen beliebige Pfade wählen. Sie steht als Defensiv-Check für
+    /// Automatisierungszwecke (z. B. künftige Server-Variante) bereit.
+    /// Die regulären `load_project`/`save_project`-Pfade prüfen lediglich, ob
+    /// der Pfad canonicalisierbar ist (blockiert kaputte / symlink-basierte
+    /// Pfade), brechen aber legitime Nutzungs-Wege nicht.
+    #[allow(dead_code)]
+    fn is_safe_path(path: &std::path::Path, base: &std::path::Path) -> bool {
+        let ok_base = match base.canonicalize() {
+            Ok(b) => b,
+            Err(_) => return false,
+        };
+        match path.canonicalize() {
+            Ok(p) => p.starts_with(&ok_base),
+            Err(_) => false,
+        }
+    }
+
+    /// Defensiv-Check: stellt sicher, dass der Pfad canonicalisierbar ist.
+    /// Blockiert kaputte Pfade und das Auflösen problematischer Symlinks,
+    /// ohne legitime File-Dialog-Pfade einzuschränken (siehe `is_safe_path`-
+    /// Kommentar). Bei noch nicht existierenden Pfaden (z. B. erstes Speichern)
+    /// wird das Elternverzeichnis geprüft.
+    fn ensure_canonicalizable(path: &std::path::Path) -> std::io::Result<()> {
+        let ok = if path.exists() {
+            path.canonicalize().is_ok()
+        } else {
+            path.parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| p.canonicalize().is_ok())
+                .unwrap_or(false)
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "path cannot be canonicalized",
+            ))
+        }
+    }
+
     pub fn open_project_dialog(app: &mut EditorApp) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("BoxDoc-Projekt", &["boxdoc"])
@@ -304,6 +349,10 @@ mod native {
         else {
             return;
         };
+        if let Err(e) = ensure_canonicalizable(&path) {
+            app.set_status(format!("Fehler beim ODT-Lesen: {e}"));
+            return;
+        }
         match crate::odt::import(&path) {
             Ok((doc, images, next_id)) => {
                 app.doc = doc;
@@ -347,6 +396,7 @@ mod native {
     }
 
     pub fn save_project(path: &std::path::Path, app: &EditorApp) -> std::io::Result<()> {
+        ensure_canonicalizable(path)?;
         let fonts: Vec<ProjectFont> = app
             .fonts
             .map
@@ -374,6 +424,7 @@ mod native {
     pub fn load_project(
         path: &std::path::Path,
     ) -> std::io::Result<(Document, ImageStore, FontStore, u64)> {
+        ensure_canonicalizable(path)?;
         let json = std::fs::read_to_string(path)?;
         let project: Project = serde_json::from_str(&json)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
