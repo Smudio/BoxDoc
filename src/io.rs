@@ -7,12 +7,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::app::EditorApp;
 use crate::model::Document;
-use crate::store::ImageStore;
+use crate::store::{FontStore, ImageStore};
 
 #[derive(Serialize, Deserialize)]
 pub struct ProjectImage {
     pub id: u64,
     pub png_base64: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ProjectFont {
+    pub name: String,
+    pub ttf_base64: String,
 }
 
 /// Vollständige AI-Anleitung, die in jede .boxdoc-Datei eingebettet wird,
@@ -38,8 +44,14 @@ DATEIFORMAT
     "orientation": "Portrait" | "Landscape",
     "pages": [ { "elements": [ <Element>, ... ] } ]
   },
+  "fonts": [ { "name": "<key>", "ttf_base64": "<base64-TTF-Bytes>" } ],
   "images": [ { "id": <u64>, "png_base64": "<base64-PNG-Bytes>" } ]
 }
+
+Reihenfolge in der Datei: doc → _ai_hint → fonts → images.
+Die Felder `fonts[]` und `images[]` enthalten nur große base64-Blöcke und
+stehen daher am Ende — du kannst sie ignorieren, wenn du nur Layout/Text
+änderst. Beim Speichern schreibt BoxDoc sie unverändert zurück.
 
 ELEMENT (je nach "kind" sind verschiedene Felder relevant)
 ---------------------------------------------------------
@@ -53,7 +65,7 @@ ELEMENT (je nach "kind" sind verschiedene Felder relevant)
   "rotation": <Grad>,                // gegen Uhrzeigersinn
   "text": "<Inhalt>",                // kann \n enthalten
   "font_size": <pt>,
-  "font": "default"|"inter"|"roboto"|"lora"|"jetbrains"|"pacifico",
+  "font": "default"|"inter"|"roboto"|"lora"|"jetbrains"|"pacifico"|<custom-font-name>,
   "color": [r, g, b, a],             // 0..255; a=255 deckend
   "bold": <bool>, "italic": <bool>, "underline": <bool>,
   "align": "Left"|"Center"|"Right", "valign": "Top"|"Middle"|"Bottom",
@@ -88,6 +100,7 @@ REGELN FÜR DIE KI
 3. IDs sind u64 und stabil. Beim Aktualisieren nur existierende IDs verwenden.
    Für neue Elemente: höchste vorhandene ID + 1.
 4. Bilder (images, png_base64, image_w, image_h) UNVERÄNDERT lassen.
+   Custom-Fonts (fonts[], ttf_base64) ebenfalls UNVERÄNDERT lassen.
 5. Nach jedem Speichern übernimmt BoxDoc die Änderung automatisch (≤ 300 ms).
 6. Der Nutzer kann mit Strg+Z zurückrollen; BoxDoc schreibt den alten Stand zurück.
 7. Ungültiges JSON wird still ignoriert — teilschreibende Dateien sind unkritisch.
@@ -122,21 +135,32 @@ es beim nächsten Speichern wieder automatisch einfügen.
 #[derive(Serialize, Deserialize)]
 pub struct Project {
     pub doc: Document,
-    pub images: Vec<ProjectImage>,
     /// Selbst-Dokumentation für KI-Agenten. Wird beim Speichern automatisch
     /// eingefügt und beim Laden ignoriert.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub _ai_hint: Option<String>,
+    /// Eingebettete Custom-Fonts (base64-TTF). Bleiben nach _ai_hint, damit
+    /// eine KI nicht durch base64-Blöcke scrollen muss, um das Layout zu
+    /// verstehen.
+    #[serde(default)]
+    pub fonts: Vec<ProjectFont>,
+    #[serde(default)]
+    pub images: Vec<ProjectImage>,
 }
 
 impl Project {
     /// Erzeugt ein Project mit eingebettetem AI-Hint (für den regulären
     /// Speichern-Fluss).
-    pub fn for_save(doc: Document, images: Vec<ProjectImage>) -> Self {
+    pub fn for_save(
+        doc: Document,
+        fonts: Vec<ProjectFont>,
+        images: Vec<ProjectImage>,
+    ) -> Self {
         Project {
             doc,
-            images,
             _ai_hint: Some(AI_HINT.to_string()),
+            fonts,
+            images,
         }
     }
 }
@@ -151,7 +175,9 @@ mod native {
 
     use base64::Engine;
 
-    use super::{Document, EditorApp, ImageStore, Project, ProjectImage};
+    use super::{
+        Document, EditorApp, FontStore, ImageStore, Project, ProjectFont, ProjectImage,
+    };
 
     type IoResult<T> = std::io::Result<T>;
 
@@ -164,9 +190,11 @@ mod native {
             return;
         };
         match load_project(&path) {
-            Ok((doc, images, next_id)) => {
+            Ok((doc, images, fonts, next_id)) => {
                 app.doc = doc;
                 app.images = images;
+                app.fonts = fonts;
+                app.fonts_dirty = true;
                 app.page_index = 0;
                 app.next_id = next_id;
                 app.clear_selection();
@@ -319,6 +347,15 @@ mod native {
     }
 
     pub fn save_project(path: &std::path::Path, app: &EditorApp) -> std::io::Result<()> {
+        let fonts: Vec<ProjectFont> = app
+            .fonts
+            .map
+            .iter()
+            .map(|(name, e)| ProjectFont {
+                name: name.clone(),
+                ttf_base64: base64::engine::general_purpose::STANDARD.encode(&e.ttf),
+            })
+            .collect();
         let images: Vec<ProjectImage> = app
             .images
             .map
@@ -328,17 +365,20 @@ mod native {
                 png_base64: base64::engine::general_purpose::STANDARD.encode(&e.png),
             })
             .collect();
-        let project = Project::for_save(app.doc.clone(), images);
+        let project = Project::for_save(app.doc.clone(), fonts, images);
         let json = serde_json::to_string_pretty(&project)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         std::fs::write(path, json)
     }
 
-    pub fn load_project(path: &std::path::Path) -> std::io::Result<(Document, ImageStore, u64)> {
+    pub fn load_project(
+        path: &std::path::Path,
+    ) -> std::io::Result<(Document, ImageStore, FontStore, u64)> {
         let json = std::fs::read_to_string(path)?;
         let project: Project = serde_json::from_str(&json)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         let mut images = ImageStore::default();
+        let mut fonts = FontStore::default();
         let mut max_id = 0u64;
         for img in project.images {
             let png = base64::engine::general_purpose::STANDARD
@@ -349,18 +389,24 @@ mod native {
                 .unwrap_or((0, 0));
             images.insert(img.id, png, dim);
         }
+        for pf in project.fonts {
+            let ttf = base64::engine::general_purpose::STANDARD
+                .decode(&pf.ttf_base64)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            fonts.insert(pf.name, ttf);
+        }
         for page in &project.doc.pages {
             for el in &page.elements {
                 max_id = max_id.max(el.id);
             }
         }
-        Ok((project.doc, images, max_id + 1))
+        Ok((project.doc, images, fonts, max_id + 1))
     }
 }
 
 #[cfg(target_arch = "wasm32")]
 mod web_impl {
-    use super::{EditorApp, Project, ProjectImage};
+    use super::{EditorApp, Project, ProjectFont, ProjectImage};
     use base64::Engine;
 
     pub fn open_project_dialog(app: &mut EditorApp) {
@@ -369,6 +415,15 @@ mod web_impl {
     }
 
     pub fn save_project_dialog(app: &mut EditorApp, _save_as: bool) {
+        let fonts: Vec<ProjectFont> = app
+            .fonts
+            .map
+            .iter()
+            .map(|(name, e)| ProjectFont {
+                name: name.clone(),
+                ttf_base64: base64::engine::general_purpose::STANDARD.encode(&e.ttf),
+            })
+            .collect();
         let images: Vec<ProjectImage> = app
             .images
             .map
@@ -378,7 +433,7 @@ mod web_impl {
                 png_base64: base64::engine::general_purpose::STANDARD.encode(&e.png),
             })
             .collect();
-        let project = Project::for_save(app.doc.clone(), images);
+        let project = Project::for_save(app.doc.clone(), fonts, images);
         match serde_json::to_string_pretty(&project) {
             Ok(json) => {
                 download_file(&json, "dokument.boxdoc", "application/json");

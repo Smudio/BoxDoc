@@ -22,9 +22,14 @@ mit Strg+Z zurückrollen.
     "orientation": "Portrait" | "Landscape",
     "pages": [ { "elements": [ <Element>, ... ] } ]
   },
+  "fonts": [ { "name": "<key>", "ttf_base64": "<base64-TTF-Bytes>" } ],
   "images": [ { "id": <u64>, "png_base64": "<base64-PNG-Bytes>" } ]
 }
 ```
+
+Reihenfolge in der Datei: `doc` → `_ai_hint` → `fonts` → `images`.
+`fonts[]` und `images[]` enthalten nur base64-Blöcke und stehen am Ende —
+du kannst sie ignorieren, wenn du nur Layout/Text änderst.
 
 ### Element
 
@@ -44,7 +49,7 @@ Jedes Element hat zwingend einen `"kind"` und eine `"id"` (`u64`). Je nach
 
   "text": "<Inhalt>",            // Text, kann \n enthalten
   "font_size": <pt>,
-  "font": "default" | "inter" | "roboto" | "lora" | "jetbrains" | "pacifico",
+  "font": "default" | "inter" | "roboto" | "lora" | "jetbrains" | "pacifico" | <custom-font-name>,
   "color": [r, g, b, a],         // 0..255; a=255 deckend
   "bold": <bool>,
   "italic": <bool>,
@@ -101,8 +106,10 @@ transparent, `stroke_color` = Linienfarbe, `stroke_width` = Dicke. Position
    Format …) mit deinen normalen Edit-Tools.
 3. **IDs sind `u64` und stabil.** Referenziere beim Aktualisieren nur
    existierende IDs. Für neue Elemente: höchste vorhandene ID + 1.
-4. **Bilder nicht anfassen:** Lass `"images"`, `"png_base64"`, `"image_w"`,
-   `"image_h"` unverändert. Bearbeite nur Text, Layout und Styling.
+4. **Bilder und Custom-Fonts nicht anfassen:** Lass `"images"`, `"png_base64"`,
+   `"image_w"`, `"image_h"`, `"fonts"` und `"ttf_base64"` unverändert.
+   Bearbeite nur Text, Layout und Styling. Ein Text-Element kann auf einen
+   Custom-Font verweisen, der unter `"fonts[].name"` definiert ist.
 5. **Ungültiges JSON wird still ignoriert** – BoxDoc reloadet nur sauber
    parsebare Dateien. Teilgeschriebene Dateien sind unkritisch.
 6. **Nach jedem Speichern** übernimmt BoxDoc die Änderung automatisch (≤ 300 ms)

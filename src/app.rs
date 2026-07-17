@@ -10,7 +10,7 @@ use crate::model::{
     page_size_pt, Document, Element, ElementKind, Orientation, PageAlign, PaperFormat, ScrollMode,
     Settings, TextAlign, Units,
 };
-use crate::store::ImageStore;
+use crate::store::{FontStore, ImageStore};
 
 /// Ankerpunkt der Bounding-Box für die Positionsanzeige.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,6 +163,11 @@ pub struct EditorApp {
     pub interaction: Interaction,
     pub view: View,
     pub images: ImageStore,
+    /// Eingebettete Custom-Fonts (analog zu `images`).
+    pub fonts: FontStore,
+    /// Flag: beim nächsten `update` die Fonts bei egui registrieren.
+    /// Wird vom Lade-Code gesetzt, da dort kein `&egui::Context` verfügbar ist.
+    pub fonts_dirty: bool,
     pub crop_mode: bool,
     pub file_path: Option<PathBuf>,
     pub modified: bool,
@@ -254,6 +259,8 @@ impl Default for EditorApp {
             interaction: Interaction::None,
             view: View::default(),
             images: ImageStore::default(),
+            fonts: FontStore::default(),
+            fonts_dirty: false,
             crop_mode: false,
             file_path: None,
             modified: false,
@@ -294,6 +301,8 @@ impl EditorApp {
         self.edit_focus = false;
         self.interaction = Interaction::None;
         self.images = ImageStore::default();
+        self.fonts = FontStore::default();
+        self.fonts_dirty = true;
         self.crop_mode = false;
         self.file_path = None;
         self.modified = false;
@@ -443,6 +452,31 @@ impl EditorApp {
         self.status = format!("Bild hinzugefügt ({}×{}).", dims.0, dims.1);
     }
 
+    /// Custom-Font aus Bytes hinzufügen. `name` = eindeutiger Schlüssel, der
+    /// im Element als `font` gespeichert wird. Reservierte Namen ("default")
+    /// und Bundled-Keys werden abgewiesen, ebenso Duplikate.
+    pub fn add_font_from_bytes(&mut self, name: String, bytes: Vec<u8>) {
+        if name.is_empty() || name == "default" {
+            self.set_status(format!(
+                "Font-Name '{}' ist reserviert oder leer.",
+                name
+            ));
+            return;
+        }
+        if crate::model::FONT_CHOICES.iter().any(|f| f.key == name.as_str()) {
+            self.set_status(format!("Font-Name '{}' ist bereits gebündelt.", name));
+            return;
+        }
+        if self.fonts.contains(&name) {
+            self.set_status(format!("Font '{}' existiert bereits.", name));
+            return;
+        }
+        self.fonts.insert(name.clone(), bytes);
+        self.fonts_dirty = true;
+        self.modified = true;
+        self.set_status(format!("Font '{}' geladen.", name));
+    }
+
     pub fn delete_selected(&mut self) {
         if self.selection.is_empty() {
             return;
@@ -488,6 +522,7 @@ impl EditorApp {
             Ok(project) => {
                 use base64::Engine;
                 let mut images = crate::store::ImageStore::default();
+                let mut fonts = crate::store::FontStore::default();
                 let mut max_id = 0u64;
                 for img in project.images {
                     let png = base64::engine::general_purpose::STANDARD
@@ -498,6 +533,12 @@ impl EditorApp {
                         .unwrap_or((0, 0));
                     images.insert(img.id, png, dim);
                 }
+                for pf in project.fonts {
+                    let ttf = base64::engine::general_purpose::STANDARD
+                        .decode(&pf.ttf_base64)
+                        .unwrap_or_default();
+                    fonts.insert(pf.name, ttf);
+                }
                 for page in &project.doc.pages {
                     for el in &page.elements {
                         max_id = max_id.max(el.id);
@@ -505,6 +546,8 @@ impl EditorApp {
                 }
                 self.doc = project.doc;
                 self.images = images;
+                self.fonts = fonts;
+                self.fonts_dirty = true;
                 self.page_index = 0;
                 self.next_id = max_id + 1;
                 self.clear_selection();
@@ -580,9 +623,11 @@ impl EditorApp {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open_path(&mut self, path: std::path::PathBuf) {
         match crate::io::load_project(&path) {
-            Ok((doc, images, next_id)) => {
+            Ok((doc, images, fonts, next_id)) => {
                 self.doc = doc;
                 self.images = images;
+                self.fonts = fonts;
+                self.fonts_dirty = true;
                 self.page_index = 0;
                 self.next_id = next_id;
                 self.clear_selection();
@@ -657,6 +702,7 @@ impl EditorApp {
         };
         use base64::Engine;
         let mut images = crate::store::ImageStore::default();
+        let mut fonts = crate::store::FontStore::default();
         let mut max_id = 0u64;
         for img in project.images {
             let png = base64::engine::general_purpose::STANDARD
@@ -667,6 +713,12 @@ impl EditorApp {
                 .unwrap_or((0, 0));
             images.insert(img.id, png, dim);
         }
+        for pf in project.fonts {
+            let ttf = base64::engine::general_purpose::STANDARD
+                .decode(&pf.ttf_base64)
+                .unwrap_or_default();
+            fonts.insert(pf.name, ttf);
+        }
         for page in &project.doc.pages {
             for el in &page.elements {
                 max_id = max_id.max(el.id);
@@ -676,6 +728,8 @@ impl EditorApp {
         self.push_history();
         self.doc = project.doc;
         self.images = images;
+        self.fonts = fonts;
+        self.fonts_dirty = true;
         self.next_id = max_id + 1;
         self.modified = false;
         self.last_disk_write = self.disk_mtime();
@@ -754,6 +808,13 @@ impl EditorApp {
 impl eframe::App for EditorApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
+        // Custom-Fonts registrieren, falls nach einem Ladevorgang ausstehend.
+        // Hier (statt im Loader), weil der Lade-Code keinen &egui::Context hat.
+        if self.fonts_dirty {
+            self.fonts_dirty = false;
+            crate::fonts::install_with_custom(&ctx, &self.fonts);
+        }
 
         // File-Watch: Watcher an file_path anpassen und ankommende Ereignisse
         // abpumpen (AI-Schnittstelle).
@@ -919,6 +980,25 @@ impl EditorApp {
                     if ui.button("Bild…").clicked() {
                         crate::io::open_image_dialog(self);
                         ui.close_menu();
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        if ui.button("Schrift laden…").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("Schrift", &["ttf", "otf"])
+                                .set_title("Schriftdatei auswählen")
+                                .pick_file()
+                            {
+                                let name = path
+                                    .file_stem()
+                                    .map(|s| s.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| String::from("custom"));
+                                if let Ok(bytes) = std::fs::read(&path) {
+                                    self.add_font_from_bytes(name, bytes);
+                                }
+                            }
+                            ui.close_menu();
+                        }
                     }
                     ui.separator();
                     if ui.button("Rechteck").clicked() {
@@ -1120,6 +1200,10 @@ impl EditorApp {
             return;
         };
 
+        // Custom-Font-Namen vor dem Borrow von `el` einsammeln (sonst
+        // Borrow-Konflikt mit &mut self.doc...).
+        let custom_names = self.fonts.names();
+
         // --- Position: Ursprung abhängig von align/valign ---
         let unit = self.settings.units;
         let suffix = unit.label();
@@ -1194,6 +1278,15 @@ impl EditorApp {
                             .family(crate::fonts::family_for(def.key));
                         if ui.selectable_label(selected, text).clicked() {
                             chosen = Some(def.key.to_string());
+                        }
+                    }
+                    // Custom-Fonts (in der .boxdoc-Datei eingebettet).
+                    for name in &custom_names {
+                        let selected = el.font == name.as_str();
+                        let text = egui::RichText::new(name)
+                            .family(crate::fonts::family_for(name));
+                        if ui.selectable_label(selected, text).clicked() {
+                            chosen = Some(name.clone());
                         }
                     }
                     if let Some(k) = chosen {
@@ -1838,6 +1931,7 @@ impl EditorApp {
 
         // --- Schriftart ---
         let font_uniform = data.iter().all(|d| d.font == data[0].font);
+        let custom_names = self.fonts.names();
         ui.horizontal(|ui| {
             ui.label("Schrift:");
             if font_uniform {
@@ -1848,6 +1942,15 @@ impl EditorApp {
                         egui::RichText::new(def.display).family(crate::fonts::family_for(def.key));
                     if ui.selectable_label(selected, text).clicked() {
                         chosen = Some(def.key.to_string());
+                    }
+                }
+                // Custom-Fonts (in der .boxdoc-Datei eingebettet).
+                for name in &custom_names {
+                    let selected = data[0].font == name.as_str();
+                    let text =
+                        egui::RichText::new(name).family(crate::fonts::family_for(name));
+                    if ui.selectable_label(selected, text).clicked() {
+                        chosen = Some(name.clone());
                     }
                 }
                 if let Some(k) = chosen {

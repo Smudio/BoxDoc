@@ -38,3 +38,35 @@ impl ImageStore {
         entry.texture.clone()
     }
 }
+
+// ===========================================================================
+// Custom-Fonts (in der .boxdoc-Datei eingebettet, analog zu Bildern)
+// ===========================================================================
+
+/// Ein eingebetteter Custom-Font (TTF/OTF-Bytes + eindeutiger Schlüssel).
+pub struct FontEntry {
+    pub name: String,
+    pub ttf: Vec<u8>,
+}
+
+#[derive(Default)]
+pub struct FontStore {
+    pub map: HashMap<String, FontEntry>,
+}
+
+impl FontStore {
+    pub fn insert(&mut self, name: String, ttf: Vec<u8>) {
+        self.map.insert(name.clone(), FontEntry { name, ttf });
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.map.contains_key(name)
+    }
+
+    /// Sortierte Liste der Font-Namen (für UI und deterministische Speicherung).
+    pub fn names(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.map.keys().cloned().collect();
+        v.sort();
+        v
+    }
+}
