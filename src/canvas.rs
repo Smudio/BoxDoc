@@ -366,48 +366,62 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
     if let (Some(a), Some(pointer)) = (active, pointer) {
         match a {
             Active::Drag(starts, sp) => {
-                let dp = to_page(pointer) - to_page(sp);
+                // Klick vs. Drag unterscheiden: erst ab deutlicher Cursor-
+                // Bewegung (egui-Schwelle, ~6 px) wird verschoben. So wird
+                // ein reiner Auswähl-Klick nicht als winziger Drag interpretiert
+                // (Maus-Sensor-Jitter, Trackpad-Drift) und das Objekt bleibt
+                // exakt an seiner Position.
+                let dragging = ui
+                    .input(|i| i.pointer.is_decidedly_dragging())
+                    || (pointer.distance(sp) >= 6.0);
+                let dp = if dragging {
+                    to_page(pointer) - to_page(sp)
+                } else {
+                    Vec2::ZERO
+                };
                 for (id, sx, sy) in &starts {
                     if let Some(el) = element_mut(app, page_idx, *id) {
                         el.x = sx + dp.x;
                         el.y = sy + dp.y;
                     }
                 }
-                // --- Center-Snapping (vertikale Mittellinie der Seite) ---
-                let snap_px = 8.0;
-                let (pw_pt_snap, _) = page_size_pt(app.doc.format, app.doc.orientation);
-                let page_cx = pw_pt_snap / 2.0;
-                let mut snap_offset_x: Option<f32> = None;
-                for (id, _, _) in &starts {
-                    let Some(el) = app.doc.pages[page_idx]
-                        .elements
-                        .iter()
-                        .find(|e| e.id == *id)
-                    else {
-                        continue;
-                    };
-                    let el_cx = el.x + el.w / 2.0;
-                    let dist = (el_cx - page_cx).abs() / app.view.zoom;
-                    if dist < snap_px {
-                        snap_offset_x = Some(page_cx - el.w / 2.0 - el.x);
-                        break;
-                    }
-                }
-                if let Some(off) = snap_offset_x {
-                    let ids: Vec<u64> = starts.iter().map(|(id, _, _)| *id).collect();
-                    if let Some(page) = app.doc.pages.get_mut(page_idx) {
-                        for el in page.elements.iter_mut() {
-                            if ids.contains(&el.id) {
-                                el.x += off;
-                            }
+                if dragging {
+                    // --- Center-Snapping (vertikale Mittellinie der Seite) ---
+                    let snap_px = 8.0;
+                    let (pw_pt_snap, _) = page_size_pt(app.doc.format, app.doc.orientation);
+                    let page_cx = pw_pt_snap / 2.0;
+                    let mut snap_offset_x: Option<f32> = None;
+                    for (id, _, _) in &starts {
+                        let Some(el) = app.doc.pages[page_idx]
+                            .elements
+                            .iter()
+                            .find(|e| e.id == *id)
+                        else {
+                            continue;
+                        };
+                        let el_cx = el.x + el.w / 2.0;
+                        let dist = (el_cx - page_cx).abs() / app.view.zoom;
+                        if dist < snap_px {
+                            snap_offset_x = Some(page_cx - el.w / 2.0 - el.x);
+                            break;
                         }
                     }
-                    // Snap-Visual im Canvas-Status speichern.
-                    app.snap_center = true;
-                } else {
-                    app.snap_center = false;
+                    if let Some(off) = snap_offset_x {
+                        let ids: Vec<u64> = starts.iter().map(|(id, _, _)| *id).collect();
+                        if let Some(page) = app.doc.pages.get_mut(page_idx) {
+                            for el in page.elements.iter_mut() {
+                                if ids.contains(&el.id) {
+                                    el.x += off;
+                                }
+                            }
+                        }
+                        // Snap-Visual im Canvas-Status speichern.
+                        app.snap_center = true;
+                    } else {
+                        app.snap_center = false;
+                    }
+                    app.touch();
                 }
-                app.touch();
             }
             Active::Resize(id, anchor, rotation, start_aspect) => {
                 if let Some(el) = element_mut(app, page_idx, id) {
