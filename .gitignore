@@ -15,3 +15,7 @@ build_errors.txt
 
 # Trunk/Web build output (wird via `trunk build` erzeugt)
 /dist
+
+# Referenz-Version einer älteren/ahead BoxDoc-Variante (nur lokales Vergleichsmaterial)
+/boxdocahead
+/boxdocahead.rar

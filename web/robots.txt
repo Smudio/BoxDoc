@@ -1,0 +1,8 @@
+User-agent: *
+Allow: /
+
+# BoxDoc — KI-nativer Dokumenten-Editor
+# Vollständige Format-Spec:  /llms-full.txt
+# Kurz-Spec:                  /llms.txt
+# Beispiel-Dokument:          /sample.boxdoc
+# HTTP-API:                   /index.php?list=1

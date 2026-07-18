@@ -1,0 +1,17 @@
+﻿# =============================================================================
+# BoxDoc — docs/-Verzeichnis: gespeicherte Dokumente
+# =============================================================================
+# Sperrt den direkten Zugriff auf gespeicherte Dokumente. Zugriff nur
+# über api.php / index.php möglich (Slug-Validierung, Token-Check).
+# =============================================================================
+
+<IfModule mod_authz_core.c>
+    # Apache 2.4+
+    Require all denied
+</IfModule>
+
+<IfModule !mod_authz_core.c>
+    # Apache 2.2 (Fallback)
+    Order deny,allow
+    Deny from all
+</IfModule>

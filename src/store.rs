@@ -4,13 +4,14 @@ use std::collections::HashMap;
 
 use egui::{ColorImage, Context, TextureHandle};
 
+#[derive(Clone)]
 pub struct ImageEntry {
     pub png: Vec<u8>,
     pub dim: (u32, u32),
     pub texture: Option<TextureHandle>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ImageStore {
     pub map: HashMap<u64, ImageEntry>,
 }
@@ -44,12 +45,13 @@ impl ImageStore {
 // ===========================================================================
 
 /// Ein eingebetteter Custom-Font (TTF/OTF-Bytes + eindeutiger Schlüssel).
+#[derive(Clone)]
 pub struct FontEntry {
     pub name: String,
     pub ttf: Vec<u8>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct FontStore {
     pub map: HashMap<String, FontEntry>,
 }

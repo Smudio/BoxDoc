@@ -1,0 +1,47 @@
+# =============================================================================
+# BoxDoc — Apache-Konfiguration (Root)
+# =============================================================================
+# Sorgt für saubere URLs und CORS. Funktioniert auch ohne .htaccess (dann
+# allerdings nur via boxdoc.at/?doc=<slug>).
+# =============================================================================
+
+# CORS für api.php / stream.php
+<IfModule mod_headers.c>
+    Header set Access-Control-Allow-Origin "*"
+    Header set Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
+    Header set Access-Control-Allow-Headers "Content-Type, X-BoxDoc-Token"
+</IfModule>
+
+# Kompression — besonders wichtig für die große .wasm-Datei (5 MB → ~1,5 MB).
+# Apache komprimiert application/wasm standardmäßig NICHT, deshalb explizit.
+<IfModule mod_deflate.c>
+    AddOutputFilterByType DEFLATE application/wasm application/javascript application/json text/html text/css text/plain
+</IfModule>
+<IfModule mod_brotli.c>
+    AddOutputFilterByType BROTLI_COMPRESS application/wasm application/javascript application/json text/html text/css text/plain
+</IfModule>
+
+# Hübsche URLs: boxdoc.at/<slug> → index.php
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # OPTIONS-Preflight direkt durchlassen
+    RewriteCond %{REQUEST_METHOD} OPTIONS
+    RewriteRule ^ - [L]
+
+    # Existierende Dateien/Verzeichnisse nicht anfassen
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+    # Nur reine Slugs (a-z0-9, 4-32 Zeichen) an index.php leiten
+    RewriteRule ^([a-z0-9]{4,32})/?$ index.php [L,QSA]
+</IfModule>
+
+# .boxdoc als JSON ausliefern
+<IfModule mod_mime.c>
+    AddType application/json .boxdoc
+</IfModule>
+
+# index.php vor index.html bevorzugen (Front-Controller)
+<IfModule mod_dir.c>
+    DirectoryIndex index.php index.html
+</IfModule>

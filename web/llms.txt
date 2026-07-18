@@ -1,0 +1,113 @@
+# BoxDoc
+
+> BoxDoc ist ein KI-nativer Dokumenten-Editor. Dokumente sind `.boxdoc`-Dateien:
+> Pretty-JSON, UTF-8. Das IST die komplette Schnittstelle — kein separates
+> Protokoll, keine Authentifizierung nötig. Eine KI liest das JSON, ändert
+> Felder und schreibt es zurück (per HTTP PUT oder direkt als Datei).
+
+## Was ist BoxDoc?
+
+BoxDoc ist ein Dokumenten-Editor (Rust + WebAssembly), dessen Dokumente einfaches
+Pretty-JSON sind. Das bedeutet: **Jede KI kann BoxDoc-Dokumente lesen und
+bearbeiten, ohne SDK, API-Keys oder spezielle Tools** — nur Standard-HTTP oder
+Standard-Dateioperationen.
+
+## Schnellstart (HTTP — boxdoc.at)
+
+```bash
+# 1. Neues Dokument erstellen
+curl -X POST "https://boxdoc.at/index.php?new=1&name=meindokument"
+# → {"slug":"meindokument","url":"https://boxdoc.at/meindokument", ...}
+
+# 2. Dokument lesen (JSON)
+curl "https://boxdoc.at/index.php?get=meindokument"
+
+# 3. Dokument ändern (komplettes JSON per PUT)
+curl -X PUT --data-binary @doc.json "https://boxdoc.at/index.php?put=meindokument"
+
+# 4. Alle Dokumente auflisten
+curl "https://boxdoc.at/index.php?list=1"
+```
+
+Token-Schutz ist optional (Default = öffentlich). Nur wenn beim Erstellen
+`?token=<wert>` gesetzt wurde, ist bei GET/PUT `?t=<token>` nötig.
+
+## JSON-Regeln (WICHTIG)
+
+- **Format:** Pretty-JSON oder minifiziert — beides akzeptiert. Für Inline-curl
+  empfohlen: **minifiziert (eine Zeile)**.
+- **Zeilenumbrüche in Texten:** Als `\n` im JSON-String schreiben, *nicht* als
+  echte Zeilenumbrüche.
+- **Anführungszeichen in Texten:** Als `\"` escapen.
+- **Backslash:** Als `\\` escapen.
+- **Shell-Escaping (curl):** JSON in **Single Quotes** `'{"...":"..."}'` setzen —
+  schützt vor der Shell. Enthält der Text selbst `'`, stattdessen Datei
+  (`-d @file.json`) verwenden.
+- **Sicherster Weg:** JSON in Datei speichern, mit `--data-binary @datei.json`
+  senden. Dann gelten *nur* JSON-Regeln, keine Shell-Regeln.
+
+### Beispiel — Inline (minifiziert, in Single Quotes)
+
+```bash
+curl -X PUT --data-binary '{"doc":{"format":"A4","orientation":"Portrait","pages":[{"elements":[{"id":1,"kind":"Text","x":50,"y":50,"w":400,"h":40,"rotation":0,"text":"Hallo\nWelt","font_size":14,"font":"default","color":[20,20,20,255],"bold":false,"italic":false,"underline":false,"align":"Left","valign":"Top","indent":0,"crop":{"x":0,"y":0,"w":1,"h":1},"image_w":0,"image_h":0,"fill_color":[0,0,0,0],"stroke_width":0,"stroke_color":[0,0,0,0],"corner_radius":0}]}]},"images":[]}' "https://boxdoc.at/index.php?put=meindokument"
+```
+
+## Dateiformat (Kurzversion)
+
+```json
+{
+  "doc": {
+    "format": "A4 | A3 | A5 | Letter | Legal",
+    "orientation": "Portrait | Landscape",
+    "pages": [ { "elements": [ <Element>, ... ] } ]
+  },
+  "images": [ { "id": 1, "png_base64": "..." } ]
+}
+```
+
+### Element
+
+```json
+{
+  "id": 1,
+  "kind": "Text | Image | Rectangle | Line",
+  "x": 0.0, "y": 0.0, "w": 100.0, "h": 50.0, "rotation": 0.0,
+  "text": "Inhalt",
+  "font_size": 14.0,
+  "font": "default | inter | roboto | lora | jetbrains | pacifico",
+  "color": [20, 20, 20, 255],
+  "bold": false, "italic": false, "underline": false,
+  "align": "Left | Center | Right",
+  "valign": "Top | Middle | Bottom",
+  "indent": 0.0,
+  "crop": { "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 },
+  "image_w": 0, "image_h": 0,
+  "fill_color": [80, 140, 220, 60],
+  "stroke_width": 2.0,
+  "stroke_color": [40, 100, 180, 255],
+  "corner_radius": 0.0
+}
+```
+
+### Koordinatensystem
+
+- Maßeinheit: **Punkt** (1 pt = 1/72 Zoll; 1 cm ≈ 28,3 pt).
+- Ursprung: **oben-links**, y zeigt nach **unten**.
+- A4 Hochformat: 595 × 842 pt.
+
+### Wichtigste Regeln
+
+1. IDs sind `u64` und stabil. Neue Elemente: höchste vorhandene ID + 1.
+2. `kind` bestimmt, welche Felder relevant sind.
+3. Bilder (`images[]`, `png_base64`) unverändert lassen.
+4. Z-Order: Elemente weiter hinten im Array liegen oben (werden zuletzt gezeichnet).
+
+## Vollständige Spezifikation
+
+**https://boxdoc.at/llms-full.txt** — alle Element-Typen, Felder, Beispiele,
+Design-Leitfaden und HTTP-API-Details.
+
+## Beispiel-Dokument
+
+**https://boxdoc.at/sample.boxdoc** — ein vollständiges, gültiges `.boxdoc`-Dokument
+mit allen Element-Typen (Text, Rectangle, Line).

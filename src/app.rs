@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use egui::{Align, Color32, Context, Frame, Layout, Sense, Stroke, Vec2};
+use serde::Deserialize;
 
 use crate::canvas::show_canvas;
 use crate::geometry::{local_corners, local_to_world};
@@ -150,6 +151,29 @@ enum DistributeOp {
     Vertical,
 }
 
+/// Ein Eintrag im Datei-Browser.
+#[derive(Clone)]
+struct FileEntry {
+    name: String,
+    modified: f64,
+    size: u64,
+    protected: bool,
+}
+
+#[derive(Deserialize)]
+struct ListResponse {
+    documents: Vec<ListDoc>,
+}
+
+#[derive(Deserialize)]
+struct ListDoc {
+    slug: String,
+    modified: f64,
+    size: u64,
+    #[serde(default)]
+    protected: bool,
+}
+
 pub struct EditorApp {
     pub doc: Document,
     pub page_index: usize,
@@ -195,10 +219,31 @@ pub struct EditorApp {
     pub theme_target: crate::model::Theme,
     /// Theme-Fade: Fortschritt 0..1.
     pub theme_anim: f32,
+    /// Einmalig true: beim ersten ui()-Frame das gespeicherte Theme auf dem
+    /// Live-Context re-applizen. `themes::apply()` in main.rs läuft während
+    /// der Creation-Phase und das Style-Setting überlebt den Frame-Wechsel
+    /// nicht zuverlässig — daher hier nochmal explizit anwenden.
+    pub theme_init_pending: bool,
     /// Undo/Redo-History.
     pub history: crate::history::History,
     /// Flag: Snapshot beim nächsten DragValue-Focus-Gain machen.
     pub prop_snapshot_pending: bool,
+
+    // --- JSON-Editor (Rohtext-Ansicht des Dokuments) ---
+    /// JSON-Editor-Fenster sichtbar?
+    pub show_json: bool,
+    /// Textpuffer des JSON-Editors.
+    json_buf: String,
+    /// Hat der JSON-Editor im letzten Frame Fokus? (Steuert Sync-Richtung.)
+    json_focused: bool,
+
+    // --- Datei-Browser ---
+    /// Datei-Browser-Fenster sichtbar?
+    pub show_files: bool,
+    /// Aktuell geladene Datei-Liste (Web: Server-Docs; Native: lokale Dateien).
+    files_entries: Vec<FileEntry>,
+    /// Zeitstempel der letzten Aktualisierung (egui-time).
+    files_last_refresh: f64,
 
     // --- File-Watch (AI-Schnittstelle) ---
     /// Lauft ein File-Watcher? Wird gedroppt → Watching stoppt.
@@ -215,6 +260,22 @@ pub struct EditorApp {
     pub pending_external_change: bool,
     /// Konflikt-Dialog anzeigen.
     pub show_conflict_dialog: bool,
+
+    // --- Web-Sync (WASM-only, AI-Schnittstelle für den Browser) ---
+    #[cfg(target_arch = "wasm32")]
+    pub web_doc: Option<crate::web_sync::WebDoc>,
+    /// Zeitstempel des letzten Polls (Sekunden, egui-time).
+    #[cfg(target_arch = "wasm32")]
+    pub web_last_poll: f64,
+    /// Zeitstempel der letzten eigenen Änderung (für Auto-Save-Debounce).
+    #[cfg(target_arch = "wasm32")]
+    pub web_last_modified: f64,
+    /// True, wenn gerade ein PUT läuft.
+    #[cfg(target_arch = "wasm32")]
+    pub web_save_in_flight: bool,
+    /// Status-Text für die Web-Sync-Anzeige.
+    #[cfg(target_arch = "wasm32")]
+    pub web_status: String,
 }
 
 impl EditorApp {
@@ -278,14 +339,32 @@ impl Default for EditorApp {
             theme_from: theme,
             theme_target: theme,
             theme_anim: 1.0,
+            theme_init_pending: true,
             history: crate::history::History::default(),
             prop_snapshot_pending: false,
+            show_json: false,
+            json_buf: String::new(),
+            json_focused: false,
+            show_files: false,
+            files_entries: Vec::new(),
+            files_last_refresh: 0.0,
             file_watcher: None,
             file_watch_rx: None,
             watched_path: None,
             last_disk_write: None,
             pending_external_change: false,
             show_conflict_dialog: false,
+
+            #[cfg(target_arch = "wasm32")]
+            web_doc: crate::web_sync::WebDoc::from_url(),
+            #[cfg(target_arch = "wasm32")]
+            web_last_poll: 0.0,
+            #[cfg(target_arch = "wasm32")]
+            web_last_modified: 0.0,
+            #[cfg(target_arch = "wasm32")]
+            web_save_in_flight: false,
+            #[cfg(target_arch = "wasm32")]
+            web_status: String::new(),
         }
         .with_init_history()
     }
@@ -825,6 +904,120 @@ impl EditorApp {
         self.write_back_to_disk();
         self.set_status("Eigene Änderungen beibehalten.");
     }
+
+    // ===================================================================
+    // Web-Sync (WASM-only): Backend-Anbindung für die Browser-Version
+    // ===================================================================
+
+    #[cfg(target_arch = "wasm32")]
+    fn tick_web_sync(&mut self, ctx: &egui::Context) {
+        use crate::web_sync::{next_event, WebEvent};
+
+        let now = ctx.input(|i| i.time);
+        let needs_initial_load = match &self.web_doc {
+            Some(w) => w.last_content_hash == 0,
+            None => false,
+        };
+
+        // 1) Initiales Laden (einmalig pro WebDoc).
+        if needs_initial_load {
+            if let Some(w) = &self.web_doc {
+                w.spawn_initial_load();
+                self.web_status = "Lade Dokument…".to_string();
+            }
+        }
+
+        // 2) Events abpumpen (sync, vom Hintergrund-Task gepusht).
+        while let Some(ev) = next_event() {
+            match ev {
+                WebEvent::Loaded(json) => self.apply_web_doc(&json),
+                WebEvent::Saved => {
+                    self.web_save_in_flight = false;
+                    self.modified = false;
+                    self.web_status = "Gespeichert.".to_string();
+                }
+                WebEvent::Error(msg) => {
+                    self.web_save_in_flight = false;
+                    self.web_status = msg;
+                }
+            }
+        }
+
+        // 3) Auto-Save: 2 s nach der letzten eigenen Änderung, falls modified.
+        if self.modified && !self.web_save_in_flight && self.web_last_modified > 0.0 {
+            if now - self.web_last_modified > 2.0 {
+                if let Some(w) = &self.web_doc {
+                    self.web_save_in_flight = true;
+                    self.web_status = "Speichern…".to_string();
+                    w.spawn_save(self.doc.clone(), self.images.clone(), self.fonts.clone());
+                }
+            }
+        }
+
+        // 4) Polling: alle 2 s nach externen Änderungen suchen.
+        if !needs_initial_load && (now - self.web_last_poll) > 2.0 {
+            self.web_last_poll = now;
+            if let Some(w) = &self.web_doc {
+                // Bei ungespeicherten eigenen Änderungen nicht reloaden, nur pollen.
+                // Spawn_poll pusht nur bei Hash-Unterschied ein Event.
+                w.spawn_poll();
+            }
+        }
+
+        // 5) Wenn modified sich ändert: Auto-Save-Timer neu starten.
+        if self.modified {
+            self.web_last_modified = now;
+        }
+    }
+
+    /// Wendet ein vom Backend geladenes JSON als neuen Dokumentstand an.
+    /// Dient als Undo-Schritt, damit externe Änderungen zurückrollbar sind.
+    #[cfg(target_arch = "wasm32")]
+    fn apply_web_doc(&mut self, json: &str) {
+        let project: crate::io::Project = match serde_json::from_str(json) {
+            Ok(p) => p,
+            Err(e) => {
+                self.web_status = format!("Ungültiges JSON: {}", e);
+                return;
+            }
+        };
+
+        let (doc, images, fonts, next_id) = crate::web_sync::decode_project(project);
+
+        // Hash aktualisieren, damit der nächste Poll unsere eigene Loaded-Aktion
+        // nicht sofort als externe Änderung erkennt.
+        let hash = crate::web_sync::hash_of(json);
+        let initial_load = match &self.web_doc {
+            Some(w) => w.last_content_hash == 0,
+            None => false,
+        };
+
+        // History nur beim Folge-Reload, nicht beim initialen Load (sonst
+        // landet der Start-Zustand als Undo-Schritt).
+        if !initial_load {
+            self.push_history();
+        }
+
+        self.doc = doc;
+        self.images = images;
+        self.fonts = fonts;
+        self.fonts_dirty = true;
+        self.next_id = next_id;
+        self.modified = false;
+        self.editing = None;
+        self.crop_mode = false;
+        self.interaction = Interaction::None;
+        self.web_status = if initial_load {
+            "Geladen.".to_string()
+        } else {
+            "Extern aktualisiert.".to_string()
+        };
+
+        if let Some(w) = &mut self.web_doc {
+            w.last_content_hash = hash;
+            w.last_known_modified = js_sys::Date::now() / 1000.0;
+        }
+    }
 }
 
 impl eframe::App for EditorApp {
@@ -842,6 +1035,10 @@ impl eframe::App for EditorApp {
         // abpumpen (AI-Schnittstelle).
         self.reconcile_watcher();
         self.poll_file_watcher();
+
+        // Web-Sync (WASM): Polling, Auto-Save, Event-Verarbeitung.
+        #[cfg(target_arch = "wasm32")]
+        self.tick_web_sync(&ctx);
 
         // Konflikt-Dialog (externe Änderung bei ungespeicherten eigenen Änderungen).
         if self.show_conflict_dialog {
@@ -867,6 +1064,15 @@ impl eframe::App for EditorApp {
                 });
         }
 
+        // Theme beim allerersten Frame einmalig auf dem Live-Context fixieren.
+        // In main.rs wird themes::apply() schon während der Creation-Phase
+        // gerufen, aber eframe 0.34 übernimmt das nicht zuverlässig in den
+        // ersten Render-Frame (-> saved Theme wirkt wie nicht angewendet).
+        if self.theme_init_pending {
+            self.theme_init_pending = false;
+            crate::themes::apply(&ctx, self.theme_target);
+        }
+
         // Theme-Fade animieren.
         if self.theme_anim < 1.0 {
             let dt = ctx.input(|i| i.unstable_dt).min(0.1);
@@ -875,7 +1081,9 @@ impl eframe::App for EditorApp {
         }
 
         self.show_menu(&ctx);
+        self.show_files_panel(&ctx);
         self.show_properties(&ctx);
+        self.show_json_editor(&ctx);
         self.show_status(&ctx);
 
         egui::CentralPanel::default()
@@ -1070,6 +1278,10 @@ impl EditorApp {
                         self.settings.panel_side = side;
                         crate::settings_io::save(&self.settings);
                     }
+
+                    ui.separator();
+                    ui.checkbox(&mut self.show_files, "Datei-Browser");
+                    ui.checkbox(&mut self.show_json, "JSON-Editor");
 
                     ui.separator();
                     ui.label("Seitenausrichtung:");
@@ -2163,6 +2375,281 @@ impl EditorApp {
                 ui.label(&self.status);
             });
         });
+    }
+
+    /// Rohtext-Fenster über dem aktuellen Dokument. Das `doc`-Objekt wird als
+    /// pretty JSON angezeigt und kann direkt bearbeitet werden; gültige
+    /// Änderungen werden live (als Undo-Schritt) angewendet.
+    fn show_json_editor(&mut self, ctx: &Context) {
+        if !self.show_json {
+            return;
+        }
+        let content = |ui: &mut egui::Ui, app: &mut EditorApp| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false; 2])
+                .show(ui, |ui| {
+                    ui.heading("JSON");
+                    ui.separator();
+                    // Puffer an den aktuellen Dokumentstand anpassen, solange der
+                    // Nutzer nicht gerade tippt (sichtbar für externe/KI-Änderungen
+                    // und GUI-Aktionen).
+                    if !app.json_focused {
+                        app.json_buf = serde_json::to_string_pretty(&app.doc).unwrap_or_default();
+                    }
+                    let resp = ui.add(
+                        egui::TextEdit::multiline(&mut app.json_buf)
+                            .font(egui::TextStyle::Monospace)
+                            .code_editor()
+                            .desired_width(f32::INFINITY),
+                    );
+                    // Beim Einstieg einmalig den Undo-Snapshot sichern.
+                    if resp.gained_focus() {
+                        app.push_history();
+                    }
+                    app.json_focused = resp.has_focus();
+                    // Live anwenden, solange der Nutzer tippt und der Puffer als
+                    // gültiges Dokument parst.
+                    if app.json_focused {
+                        if let Ok(new_doc) = serde_json::from_str::<Document>(&app.json_buf) {
+                            let cur = serde_json::to_string(&app.doc).unwrap_or_default();
+                            let new = serde_json::to_string(&new_doc).unwrap_or_default();
+                            if new != cur {
+                                let known: std::collections::HashSet<u64> = new_doc
+                                    .pages
+                                    .iter()
+                                    .flat_map(|p| p.elements.iter().map(|e| e.id))
+                                    .collect();
+                                let max_id = new_doc
+                                    .pages
+                                    .iter()
+                                    .flat_map(|p| p.elements.iter().map(|e| e.id))
+                                    .max()
+                                    .unwrap_or(0);
+                                app.doc = new_doc;
+                                app.page_index =
+                                    app.page_index.min(app.doc.pages.len().saturating_sub(1));
+                                app.selection.retain(|id| known.contains(id));
+                                app.next_id = app.next_id.max(max_id + 1);
+                                app.editing = None;
+                                app.interaction = Interaction::None;
+                                app.touch();
+                            }
+                        }
+                    }
+                });
+        };
+
+        // Das JSON-Panel liegt gegenüber dem Eigenschaften-Panel.
+        match self.settings.panel_side {
+            crate::model::PanelSide::Right | crate::model::PanelSide::Bottom => {
+                egui::SidePanel::left("json_editor")
+                    .resizable(true)
+                    .default_width(240.0)
+                    .width_range(180.0..=560.0)
+                    .show(ctx, |ui| content(ui, self));
+            }
+            crate::model::PanelSide::Left => {
+                egui::SidePanel::right("json_editor")
+                    .resizable(true)
+                    .default_width(240.0)
+                    .width_range(180.0..=560.0)
+                    .show(ctx, |ui| content(ui, self));
+            }
+        }
+    }
+
+    /// Datei-Browser: listet Webserver-Dokumente (Web) bzw. lokale
+    /// .boxdoc-Dateien (Native) auf. Klick öffnet das Dokument.
+    fn show_files_panel(&mut self, ctx: &Context) {
+        if !self.show_files {
+            return;
+        }
+
+        // --- Refresh auslösen (alle 5 s) ---
+        let now = ctx.input(|i| i.time);
+        let stale = now - self.files_last_refresh > 5.0;
+        if stale {
+            self.files_last_refresh = now;
+            #[cfg(target_arch = "wasm32")]
+            {
+                let base = self
+                    .web_doc
+                    .as_ref()
+                    .map(|w| w.base.clone())
+                    .unwrap_or_else(crate::web_sync::detect_base);
+                crate::web_sync::spawn_file_list(&base);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                self.refresh_local_files();
+            }
+        }
+
+        // --- Ergebnis abholen (Web) ---
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(json) = crate::web_sync::take_file_list() {
+                if let Ok(resp) = serde_json::from_str::<ListResponse>(&json) {
+                    self.files_entries = resp
+                        .documents
+                        .into_iter()
+                        .map(|d| FileEntry {
+                            name: d.slug,
+                            modified: d.modified,
+                            size: d.size,
+                            protected: d.protected,
+                        })
+                        .collect();
+                }
+            }
+        }
+
+        // --- Panel zeichnen (immer links, kleines schmales Panel) ---
+        let current_slug = self.current_doc_name();
+
+        egui::SidePanel::left("files_panel")
+            .resizable(true)
+            .default_width(200.0)
+            .width_range(150.0..=400.0)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| {
+                        ui.heading("Dokumente");
+                        ui.separator();
+
+                        if self.files_entries.is_empty() {
+                            ui.label(egui::RichText::new("Keine Dokumente gefunden.").weak());
+                        }
+
+                        for entry in self.files_entries.clone() {
+                            let is_current = entry.name == current_slug;
+                            let name_text = if entry.protected {
+                                format!("{} \u{1f512}", entry.name)
+                            } else {
+                                entry.name.clone()
+                            };
+                            let rich = if is_current {
+                                egui::RichText::new(&name_text).strong()
+                            } else {
+                                egui::RichText::new(&name_text)
+                            };
+                            let btn = egui::Button::new(rich)
+                                .wrap_mode(egui::TextWrapMode::Truncate)
+                                .min_size(egui::vec2(ui.available_width(), 0.0))
+                                .fill(if is_current {
+                                    ui.style().visuals.selection.bg_fill
+                                } else {
+                                    egui::Color32::TRANSPARENT
+                                });
+                            if ui.add(btn).clicked() {
+                                self.open_file_entry(&entry.name);
+                            }
+                            ui.label(
+                                egui::RichText::new(format!("{}", human_size(entry.size)))
+                                    .small()
+                                    .weak(),
+                            );
+                        }
+                    });
+            });
+    }
+
+    /// Name/Schlüssel des aktuell geöffneten Dokuments.
+    fn current_doc_name(&self) -> String {
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(w) = &self.web_doc {
+                return w.slug.clone();
+            }
+        }
+        self.file_path
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    /// Öffnet einen Eintrag aus dem Datei-Browser.
+    fn open_file_entry(&mut self, name: &str) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::web_sync::navigate_to(name);
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let dir = self
+                .file_path
+                .as_ref()
+                .and_then(|p| p.parent())
+                .map(|p| p.to_path_buf())
+                .or_else(|| std::env::current_dir().ok());
+            if let Some(dir) = dir {
+                let path = dir.join(format!("{}.boxdoc", name));
+                self.open_path(path);
+            }
+        }
+    }
+
+    /// Listet lokale .boxdoc-Dateien im Verzeichnis der aktuellen Datei auf.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn refresh_local_files(&mut self) {
+        let dir = self
+            .file_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .or_else(|| std::env::current_dir().ok());
+        let Some(dir) = dir else {
+            return;
+        };
+        let mut entries = Vec::new();
+        if let Ok(read) = std::fs::read_dir(&dir) {
+            for entry in read.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("boxdoc") {
+                    let name = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let meta = entry.metadata();
+                    let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                    let modified = meta
+                        .as_ref()
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs_f64())
+                        .unwrap_or(0.0);
+                    entries.push(FileEntry {
+                        name,
+                        modified,
+                        size,
+                        protected: false,
+                    });
+                }
+            }
+        }
+        entries.sort_by(|a, b| {
+            b.modified
+                .partial_cmp(&a.modified)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        self.files_entries = entries;
+    }
+}
+
+/// Formatiert eine Byte-Größe menschenlesbar (KB / MB).
+fn human_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
     }
 }
 

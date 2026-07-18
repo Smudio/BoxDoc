@@ -17,6 +17,8 @@ mod printing;
 mod settings_io;
 mod store;
 mod themes;
+#[cfg(target_arch = "wasm32")]
+mod web_sync;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
