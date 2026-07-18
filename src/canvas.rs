@@ -929,6 +929,59 @@ fn draw_element(
             );
             painter.line_segment([start, end], stroke);
         }
+        ElementKind::Ellipse => {
+            // Ellipse (Kreis als Spezialfall w == h) als gefülltes PathShape
+            // mit Linienzug-Näherung (64 Segmente). Rotation über den
+            // Mittelpunkt wird direkt in die Punkte eingerechnet.
+            let center = to_screen(Pos2::new(el.x + el.w / 2.0, el.y + el.h / 2.0));
+            let rx = (el.w * zoom).max(1.0) / 2.0;
+            let ry = (el.h * zoom).max(1.0) / 2.0;
+
+            let fill = Color32::from_rgba_unmultiplied(
+                el.fill_color[0],
+                el.fill_color[1],
+                el.fill_color[2],
+                el.fill_color[3],
+            );
+            let stroke = Stroke::new(
+                el.stroke_width * zoom,
+                Color32::from_rgba_unmultiplied(
+                    el.stroke_color[0],
+                    el.stroke_color[1],
+                    el.stroke_color[2],
+                    el.stroke_color[3],
+                ),
+            );
+
+            let segments = 64;
+            let mut points: Vec<Pos2> = Vec::with_capacity(segments);
+            for i in 0..segments {
+                let t = i as f32 * std::f32::consts::TAU / segments as f32;
+                let local = Vec2::new(rx * t.cos(), ry * t.sin());
+                points.push(local_to_world(center, el.rotation, local));
+            }
+
+            if fill.a() > 0 {
+                let mut mesh = Mesh::default();
+                for p in &points {
+                    mesh.vertices.push(Vertex {
+                        pos: *p,
+                        uv: [0.0, 0.0].into(),
+                        color: fill,
+                    });
+                }
+                for i in 1..(points.len() as u32 - 1) {
+                    mesh.indices.extend_from_slice(&[0, i, i + 1]);
+                }
+                mesh.indices.extend_from_slice(&[0, points.len() as u32 - 1, 1]);
+                painter.add(Shape::mesh(mesh));
+            }
+            if stroke.width > 0.0 {
+                let mut line = points.clone();
+                line.push(points[0]);
+                painter.add(Shape::line(line, stroke));
+            }
+        }
     }
 }
 
@@ -1020,8 +1073,8 @@ fn draw_selection(
             painter.circle_filled(*p, 5.0, Color32::WHITE);
             painter.circle_stroke(*p, 5.0, Stroke::new(1.5, handle_color));
         }
-        // Kanten-Griffe (Mitten) nur für Rechtecke.
-        if el.kind == ElementKind::Rectangle {
+        // Kanten-Griffe (Mitten) nur für Rechtecke und Ellipsen.
+        if el.kind == ElementKind::Rectangle || el.kind == ElementKind::Ellipse {
             for p in edge_mid_positions(el, &to_screen, zoom) {
                 painter.rect_filled(
                     Rect::from_center_size(p, Vec2::splat(8.0)),
@@ -1086,6 +1139,16 @@ fn point_in_element(
 
     let center = to_screen(Pos2::new(el.x + el.w / 2.0, el.y + el.h / 2.0));
     let local = world_to_local(center, el.rotation, pointer_screen);
+
+    // Ellipse: (dx/rx)^2 + (dy/ry)^2 <= 1
+    if el.kind == ElementKind::Ellipse {
+        let rx = (el.w * zoom).max(1.0) / 2.0 + 4.0;
+        let ry = (el.h * zoom).max(1.0) / 2.0 + 4.0;
+        let dx = local.x / rx;
+        let dy = local.y / ry;
+        return dx * dx + dy * dy <= 1.0;
+    }
+
     local.x.abs() <= el.w * zoom / 2.0 && local.y.abs() <= el.h * zoom / 2.0
 }
 

@@ -57,7 +57,7 @@ ELEMENT (je nach "kind" sind verschiedene Felder relevant)
 ---------------------------------------------------------
 {
   "id": <u64>,                       // stabil, niemals ändern beim Update
-  "kind": "Text" | "Image" | "Rectangle" | "Line",
+  "kind": "Text" | "Image" | "Rectangle" | "Line" | "Ellipse",
   "x": <f32 pt>,                     // linke obere Ecke (unrotiert)
   "y": <f32 pt>,
   "w": <f32 pt>,                     // Breite
@@ -83,6 +83,7 @@ ELEMENT-TYPEN
 Text       : text, font_size, font, color, bold, italic, underline, align, valign
 Rectangle  : fill_color, stroke_width, stroke_color, corner_radius
 Line       : stroke_width, stroke_color (Linie = Box mit h=0 + rotation)
+Ellipse    : fill_color, stroke_width, stroke_color (Kreis = w==h; corner_radius ignoriert)
 Image      : id (verweist auf images[].id), crop, image_w, image_h
 
 KOOORDINATENSYSTEM

@@ -39,7 +39,7 @@ Jedes Element hat zwingend einen `"kind"` und eine `"id"` (`u64`). Je nach
 ```json
 {
   "id": <u64>,
-  "kind": "Text" | "Image" | "Rectangle" | "Line",
+  "kind": "Text" | "Image" | "Rectangle" | "Line" | "Ellipse",
 
   "x": <f32 pt>,     // linke obere Ecke (unrotiert)
   "y": <f32 pt>,
@@ -91,6 +91,7 @@ gezeichnet). Das letzte Element verdeckt frühere bei Überlappung.
 | `Text`      | text, font_size, font, color, bold, italic, underline, align, valign |
 | `Rectangle` | fill_color, stroke_width, stroke_color, corner_radius          |
 | `Line`      | stroke_width, stroke_color (Linie = horizontale Box mit h=0 + rotation) |
+| `Ellipse`   | fill_color, stroke_width, stroke_color (Kreis = Spezialfall mit w == h; `corner_radius` wird ignoriert) |
 | `Image`     | id (verweist auf `images[].id`), crop, image_w, image_h        |
 
 **Linien zeichnen:** Eine Linie ist ein `Rectangle` mit `h: 0`, `fill_color`
@@ -181,6 +182,22 @@ Aus dem `elements`-Array entfernen.
   "image_w": 0, "image_h": 0,
   "fill_color": [0, 0, 0, 0], "stroke_width": 2.0,
   "stroke_color": [40, 40, 40, 255], "corner_radius": 0.0
+}
+```
+
+### Ellipse (oder Kreis) hinzufügen
+Kreis = Spezialfall mit `w == h`. `corner_radius` wird bei Ellipse ignoriert.
+```json
+{
+  "id": 45, "kind": "Ellipse",
+  "x": 200.0, "y": 150.0, "w": 200.0, "h": 120.0, "rotation": 0.0,
+  "text": "", "font_size": 14.0, "font": "default",
+  "color": [20, 20, 20, 255], "bold": false, "italic": false, "underline": false,
+  "align": "Left", "valign": "Top", "indent": 0.0,
+  "crop": { "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 },
+  "image_w": 0, "image_h": 0,
+  "fill_color": [79, 195, 197, 120], "stroke_width": 2.0,
+  "stroke_color": [40, 100, 180, 255], "corner_radius": 0.0
 }
 ```
 

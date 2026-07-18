@@ -476,6 +476,7 @@ pub enum ElementKind {
     Image,
     Rectangle,
     Line,
+    Ellipse,
 }
 
 /// Ein einzelnes Objekt auf der Seite: Text oder Bild.
@@ -665,6 +666,35 @@ impl Element {
             fill_color: [0, 0, 0, 0],
             stroke_width: 2.0,
             stroke_color: [40, 40, 40, 255],
+            corner_radius: 0.0,
+        }
+    }
+
+    pub fn new_ellipse(id: u64, x: f32, y: f32) -> Self {
+        Element {
+            id,
+            kind: ElementKind::Ellipse,
+            x,
+            y,
+            w: 160.0,
+            h: 100.0,
+            rotation: 0.0,
+            text: String::new(),
+            font_size: 14.0,
+            font: default_font_key(),
+            color: [20, 20, 20, 255],
+            bold: false,
+            italic: false,
+            underline: false,
+            align: TextAlign::Left,
+            valign: VAlign::default(),
+            indent: 0.0,
+            crop: Crop::default(),
+            image_w: 0,
+            image_h: 0,
+            fill_color: default_fill_color(),
+            stroke_width: default_stroke_width(),
+            stroke_color: default_stroke_color(),
             corner_radius: 0.0,
         }
     }

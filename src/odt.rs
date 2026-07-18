@@ -180,6 +180,11 @@ fn frame_xml(el: &Element, image_files: &[(u64, String, &'static str)]) -> Strin
                 "<draw:image xlink:href=\"{href}\" xlink:type=\"simple\" xlink:actuate=\"onLoad\"/>"
             )
         }
+        ElementKind::Ellipse => {
+            // Eigenständiges draw:ellipse-Element innerhalb des Rahmens
+            // (Breite/Höhe aus dem Frame, draw:ellipse ohne eigene Geometrie).
+            String::from("<draw:ellipse/>")
+        }
         ElementKind::Rectangle | ElementKind::Line => String::new(),
     };
 

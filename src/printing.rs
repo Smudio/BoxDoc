@@ -9,8 +9,9 @@ use std::io::BufWriter;
 
 use image::{ImageBuffer, RgbaImage};
 use printpdf::{
+    path::{PaintMode, WindingOrder},
     BuiltinFont, Color, ColorBits, ColorSpace, Image, ImageTransform, ImageXObject, IndirectFontRef,
-    Mm, PdfDocument, PdfDocumentReference, PdfLayerReference, Px, Rgb,
+    Mm, PdfDocument, PdfDocumentReference, PdfLayerReference, Point, Polygon, Px, Rgb,
 };
 
 use crate::model::{page_size_pt, Document, Element, ElementKind};
@@ -105,7 +106,9 @@ pub fn export_pdf(
                     draw_text(&layer, el, ph_mm, &font);
                 }
                 ElementKind::Image => draw_image(&layer, el, ph_mm, images),
-                ElementKind::Rectangle | ElementKind::Line => {}
+                ElementKind::Rectangle => {}
+                ElementKind::Line => {}
+                ElementKind::Ellipse => draw_ellipse(&layer, el, ph_mm),
             }
         }
     }
@@ -231,6 +234,93 @@ fn draw_image(
             dpi: Some(300.0),
         },
     );
+}
+
+/// Zeichnet eine Ellipse (Kreis als Spezialfall w == h) als geschlossenen
+/// Bezier-Pfad. printpdf 0.7 hat keine native Ellipse, daher wird die Kurve
+/// über 4 kubische Bezier-Segmente mit dem Kappa-Wert 0,5523 approximiert.
+/// PDF-Koordinatensystem: y zeigt nach OBEN, daher wird das Zentrum anhand der
+/// Seitenhöhe `page_h_mm` gespiegelt. Rotation (Grad, gegen Uhrzeigersinn im
+/// BoxDoc-System) wird durch Rotation der Stützpunkte um das Zentrum aufgeprägt.
+fn draw_ellipse(layer: &PdfLayerReference, el: &Element, page_h_mm: f32) {
+    let cx_mm = pt_to_mm(el.x + el.w / 2.0);
+    let cy_mm = page_h_mm - pt_to_mm(el.y + el.h / 2.0);
+    let rx_mm = pt_to_mm(el.w).max(0.01) / 2.0;
+    let ry_mm = pt_to_mm(el.h).max(0.01) / 2.0;
+
+    // 4 Ankerpunkte (rechts, unten, links, oben) und je 2 Kontrollpunkte pro
+    // Segment. Kappa-Wert für beste Annäherung an einen Kreis.
+    let kappa = 0.5522847498;
+    let anchors = [(rx_mm, 0.0), (0.0, ry_mm), (-rx_mm, 0.0), (0.0, -ry_mm)];
+    let ctrl_offsets = [
+        (rx_mm, ry_mm * kappa),
+        (-rx_mm * kappa, ry_mm),
+        (-rx_mm * kappa, ry_mm),
+        (-rx_mm, -ry_mm * kappa),
+        (-rx_mm, -ry_mm * kappa),
+        (rx_mm * kappa, -ry_mm),
+        (rx_mm * kappa, -ry_mm),
+        (rx_mm, ry_mm * kappa),
+    ];
+
+    // Rotation (BoxDoc: Grad gegen Uhrzeigersinn, y nach unten).
+    let rad = el.rotation.to_radians();
+    let (rs, rc) = (rad.sin(), rad.cos());
+    let rotate = |(x, y): (f32, f32)| -> (f32, f32) {
+        (rc * x - rs * y, rs * x + rc * y)
+    };
+
+    let mut pts_local: Vec<(f32, f32, bool)> = Vec::with_capacity(13);
+    let a0 = rotate(anchors[0]);
+    pts_local.push((a0.0, a0.1, false));
+    for seg in 0..4 {
+        let c1 = rotate(ctrl_offsets[seg * 2]);
+        let c2 = rotate(ctrl_offsets[seg * 2 + 1]);
+        let an = rotate(anchors[(seg + 1) % 4]);
+        pts_local.push((c1.0, c1.1, true));
+        pts_local.push((c2.0, c2.1, true));
+        pts_local.push((an.0, an.1, false));
+    }
+
+    // In PDF-Koordinaten umwandeln (y-Achse spiegeln).
+    let points: Vec<(Point, bool)> = pts_local
+        .iter()
+        .map(|(x, y, is_ctrl)| (Point::new(Mm(cx_mm + x), Mm(cy_mm - y)), *is_ctrl))
+        .collect();
+
+    if el.fill_color[3] > 0 {
+        let f = el.fill_color;
+        layer.set_fill_color(Color::Rgb(Rgb::new(
+            f[0] as f32 / 255.0,
+            f[1] as f32 / 255.0,
+            f[2] as f32 / 255.0,
+            None,
+        )));
+    }
+    if el.stroke_color[3] > 0 && el.stroke_width > 0.0 {
+        let s = el.stroke_color;
+        layer.set_outline_color(Color::Rgb(Rgb::new(
+            s[0] as f32 / 255.0,
+            s[1] as f32 / 255.0,
+            s[2] as f32 / 255.0,
+            None,
+        )));
+        layer.set_outline_thickness(el.stroke_width);
+    }
+
+    let mode = match (el.fill_color[3] > 0, el.stroke_color[3] > 0 && el.stroke_width > 0.0) {
+        (true, true) => PaintMode::FillStroke,
+        (true, false) => PaintMode::Fill,
+        (false, true) => PaintMode::Stroke,
+        (false, false) => return,
+    };
+
+    let poly = Polygon {
+        rings: vec![points],
+        mode,
+        winding_order: WindingOrder::NonZero,
+    };
+    layer.add_polygon(poly);
 }
 
 /// Rotiert ein RGBA-Bild um einen beliebigen Winkel (Bilinear-approximiert).
