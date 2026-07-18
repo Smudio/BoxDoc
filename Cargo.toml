@@ -5,6 +5,34 @@ edition = "2021"
 description = "Ein simples, leistungsstarkes und zuverlässiges Dokumenten-Programm"
 license = "MIT OR Apache-2.0"
 
+[lib]
+name = "boxdoc"
+path = "src/lib.rs"
+
+[[bin]]
+name = "boxdoc"
+path = "src/main.rs"
+
+[[bin]]
+name = "gen_test_pdfs"
+path = "src/bin/gen_test_pdfs.rs"
+required-features = ["pdf-tools"]
+
+[[bin]]
+name = "test_pdf_import"
+path = "src/bin/test_pdf_import.rs"
+required-features = ["pdf-tools"]
+
+[[bin]]
+name = "test_pdf_roundtrip"
+path = "src/bin/test_pdf_roundtrip.rs"
+required-features = ["pdf-tools"]
+
+[[bin]]
+name = "test_pdf_export"
+path = "src/bin/test_pdf_export.rs"
+required-features = ["pdf-tools"]
+
 [dependencies]
 eframe = { version = "0.34", default-features = false, features = ["glow"] }
 egui = "0.34"
@@ -22,6 +50,16 @@ printpdf = "0.7"
 notify = "6"
 notify-debouncer-mini = "0.4"
 crossbeam-channel = "0.5"
+# PDF-Import: high-level Pdfium-Binding. `pdfium-bundled` lädt die native
+# pdfium-Bibliothek automatisch beim Build (gecacht im Target-Verzeichnis),
+# sodass keine separate DLL-Auslieferung nötig ist.
+pdfium-render = "0.9"
+pdfium-bundled = "0.1"
+
+[features]
+default = []
+# Aktiviert die Build-Tools (z. B. gen_test_pdfs) zum Erzeugen von Test-PDFs.
+pdf-tools = []
 
 # Web-only Dependencies
 [target.'cfg(target_arch = "wasm32")'.dependencies]

@@ -372,6 +372,42 @@ mod native {
         }
     }
 
+    pub fn import_pdf_dialog(app: &mut EditorApp) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("PDF", &["pdf"])
+            .set_title("PDF öffnen")
+            .pick_file()
+        else {
+            return;
+        };
+        if let Err(e) = ensure_canonicalizable(&path) {
+            app.set_status(format!("Fehler beim PDF-Lesen: {e}"));
+            return;
+        }
+        // Der erste Aufruf kann dauern, weil pdfium-bundled die native
+        // Bibliothek herunterlädt. Status vorher setzen, damit der Nutzer
+        // Feedback bekommt.
+        app.set_status("PDF wird importiert (erster Aufruf kann etwas dauern)…");
+        match crate::pdf_import::import_pdf(&path) {
+            Ok((doc, images, next_id)) => {
+                app.doc = doc;
+                app.images = images;
+                app.fonts = Default::default();
+                app.fonts_dirty = true;
+                app.page_index = 0;
+                app.next_id = next_id;
+                app.clear_selection();
+                app.editing = None;
+                app.crop_mode = false;
+                app.interaction = crate::app::Interaction::None;
+                app.file_path = Some(path);
+                app.modified = false;
+                app.set_status("PDF geöffnet.");
+            }
+            Err(e) => app.set_status(format!("Fehler beim PDF-Lesen: {e}")),
+        }
+    }
+
     pub fn export_pdf(app: &mut EditorApp, path: PathBuf) {
         match crate::printing::export_pdf(&path, &app.doc, &app.images) {
             Ok(()) => app.set_status(format!("PDF exportiert: {}", path.display())),
@@ -511,6 +547,10 @@ mod web_impl {
 
     pub fn import_odt_dialog(app: &mut EditorApp) {
         app.set_status("ODT-Import wird auf Web noch nicht unterstützt.");
+    }
+
+    pub fn import_pdf_dialog(app: &mut EditorApp) {
+        app.set_status("PDF-Import wird auf Web noch nicht unterstützt.");
     }
 
     pub fn export_pdf(app: &mut EditorApp, _path: std::path::PathBuf) {

@@ -11,6 +11,8 @@ mod model;
 #[cfg(not(target_arch = "wasm32"))]
 mod odt;
 #[cfg(not(target_arch = "wasm32"))]
+mod pdf_import;
+#[cfg(not(target_arch = "wasm32"))]
 mod printing;
 mod settings_io;
 mod store;

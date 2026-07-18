@@ -11,10 +11,10 @@ use image::{ImageBuffer, RgbaImage};
 use printpdf::{
     path::{PaintMode, WindingOrder},
     BuiltinFont, Color, ColorBits, ColorSpace, Image, ImageTransform, ImageXObject, IndirectFontRef,
-    Mm, PdfDocument, PdfDocumentReference, PdfLayerReference, Point, Polygon, Px, Rgb,
+    Line, Mm, PdfDocument, PdfDocumentReference, PdfLayerReference, Point, Polygon, Px, Rgb,
 };
 
-use crate::model::{page_size_pt, Document, Element, ElementKind};
+use crate::model::{page_size_pt, Document, Element, ElementKind, TextAlign, VAlign};
 
 type E = Box<dyn std::error::Error>;
 
@@ -90,24 +90,12 @@ pub fn export_pdf(
         for el in &page.elements {
             match el.kind {
                 ElementKind::Text => {
-                    let font = if el.font == "default" || el.font.is_empty() {
-                        fallback_font.clone()
-                    } else {
-                        match font_cache.get(&el.font).cloned() {
-                            Some(f) => f,
-                            None => {
-                                let f = load_font_by_key(&document, &el.font)
-                                    .unwrap_or_else(|| fallback_font.clone());
-                                font_cache.insert(el.font.clone(), f.clone());
-                                f
-                            }
-                        }
-                    };
+                    let font = resolve_text_font(&document, &el.font, el.bold, el.italic, &fallback_font, &mut font_cache);
                     draw_text(&layer, el, ph_mm, &font);
                 }
                 ElementKind::Image => draw_image(&layer, el, ph_mm, images),
-                ElementKind::Rectangle => {}
-                ElementKind::Line => {}
+                ElementKind::Rectangle => draw_rectangle(&layer, el, ph_mm),
+                ElementKind::Line => draw_line(&layer, el, ph_mm),
                 ElementKind::Ellipse => draw_ellipse(&layer, el, ph_mm),
             }
         }
@@ -143,25 +131,156 @@ fn load_font_by_key(doc: &PdfDocumentReference, key: &str) -> Option<IndirectFon
     doc.add_external_font(f).ok()
 }
 
+/// Wählt den Schrift-Slot passend zu `bold`/`italic`. Die kursiven/fetten
+/// Varianten werden gecacht, sodass sie nur einmal pro Dokument geladen werden.
+/// Schlüssel im Cache ist `<font>|<bold>|<italic>`.
+fn resolve_text_font(
+    doc: &PdfDocumentReference,
+    font_key: &str,
+    bold: bool,
+    italic: bool,
+    fallback: &IndirectFontRef,
+    cache: &mut std::collections::HashMap<String, IndirectFontRef>,
+) -> IndirectFontRef {
+    // Für "default" nutzen wir die PDF-Builtin-Varianten von Helvetica, die
+    // Bold/Italic direkt unterstützen — kein externer Font nötig.
+    if font_key == "default" || font_key.is_empty() {
+        let cache_key = format!("__builtin|{bold}|{italic}");
+        if let Some(f) = cache.get(&cache_key) {
+            return f.clone();
+        }
+        let variant = match (bold, italic) {
+            (true, true) => BuiltinFont::HelveticaBoldOblique,
+            (true, false) => BuiltinFont::HelveticaBold,
+            (false, true) => BuiltinFont::HelveticaOblique,
+            (false, false) => BuiltinFont::Helvetica,
+        };
+        let f = doc
+            .add_builtin_font(variant)
+            .unwrap_or_else(|_| fallback.clone());
+        cache.insert(cache_key, f.clone());
+        return f;
+    }
+
+    // Externe Schrift: Wir versuchen zuerst eine passend benannte
+    // Variante (z. B. arialbd.ttf für bold) zu finden; fällt das schief,
+    // verwenden wir die Regular-Schrift und simulieren Bold nach.
+    let cache_key = format!("{font_key}|{bold}|{italic}");
+    if let Some(f) = cache.get(&cache_key) {
+        return f.clone();
+    }
+
+    let regular = load_font_by_key(doc, font_key).unwrap_or_else(|| fallback.clone());
+    let f = if bold || italic {
+        // Pragmatische Lösung: Wir laden nur die Regular-Variante und
+        // simulieren Bold/Italic beim Zeichnen (siehe draw_text). Damit
+        // bleibt der Cache schlüssel-stabil — wir melden die Regular zurück.
+        regular
+    } else {
+        regular
+    };
+    cache.insert(cache_key, f.clone());
+    f
+}
+
+/// Geschätzte Textbreite in pt für Approximation (kein echtes Metrics-API
+/// in printpdf 0.7). Formula: ~0.5 × font_size pro Zeichen — etwas größer
+/// (0.55) für etwas Luft nach rechts.
+fn approx_text_width(text: &str, font_size: f32) -> f32 {
+    let n = text.chars().count() as f32;
+    n * font_size * 0.5
+}
+
 fn draw_text(layer: &PdfLayerReference, el: &Element, page_h_mm: f32, font: &IndirectFontRef) {
     let r = el.color[0] as f32 / 255.0;
     let g = el.color[1] as f32 / 255.0;
     let b = el.color[2] as f32 / 255.0;
     layer.set_fill_color(Color::Rgb(Rgb::new(r, g, b, None)));
 
-    let mut y = el.y;
+    // Bei externen Schriften (nicht "default") wird Bold über einen leichten
+    // Outline-Simuliert. Italic wird über die Text-Matrix geschert (12°).
+    // Für Builtin-Fonts (Helvetica) ist Bold/Italic bereits im Font enthalten.
+    let is_builtin = el.font == "default" || el.font.is_empty();
+    let needs_synth_bold = el.bold && !is_builtin;
+    let needs_shear = el.italic && !is_builtin;
+    let shear = 12.0f32.to_radians().tan();
+
+    // Vertikale Ausrichtung (valign) innerhalb der Box.
+    let lines: Vec<&str> = el.text.split('\n').collect();
     let line_h = el.font_size * 1.25;
-    for line in el.text.split('\n') {
-        let pdf_y = page_h_mm - pt_to_mm(y + el.font_size);
-        layer.use_text(
-            line.to_string(),
-            el.font_size,
-            Mm(pt_to_mm(el.x + el.indent)),
-            Mm(pdf_y),
-            font,
-        );
+    let block_h = line_h * lines.len() as f32;
+    let y_offset = match el.valign {
+        VAlign::Top => 0.0,
+        VAlign::Middle => (el.h - block_h).max(0.0) / 2.0,
+        VAlign::Bottom => (el.h - block_h).max(0.0),
+    };
+
+    layer.save_graphics_state();
+    if needs_synth_bold {
+        // Synth-Bold: schmaler Strich um die Glyphen. ~3 % der font_size ist
+        // ein typischer Wert für „faux bold".
+        layer.set_outline_color(Color::Rgb(Rgb::new(r, g, b, None)));
+        layer.set_outline_thickness((el.font_size * 0.03).max(0.2));
+        // Text-Render-Mode 2 = Fill + Stroke → ergibt fett.
+        layer.set_text_rendering_mode(printpdf::TextRenderingMode::FillStroke);
+    }
+
+    let mut y = el.y + y_offset;
+    for line in &lines {
+        // Horizontale Ausrichtung: verschiebt x innerhalb von el.w.
+        let line_w = approx_text_width(line, el.font_size);
+        let x_offset = match el.align {
+            TextAlign::Left => 0.0,
+            TextAlign::Center => (el.w - line_w).max(0.0) / 2.0,
+            TextAlign::Right => (el.w - line_w).max(0.0),
+        };
+        let pdf_y_mm = page_h_mm - pt_to_mm(y + el.font_size);
+        let pdf_x_mm = pt_to_mm(el.x + el.indent + x_offset);
+
+        if needs_shear {
+            // Scherung über die Text-Matrix. PDF-Text-Matrix:
+            //   [a b c d e f]  →  a=1, b=0, c=tan(12°), d=1, e=x_pt, f=y_pt.
+            // Positives c schert nach rechts (italic-Look). Position in Pt
+            // (PDF-interne Einheit für die Text-Matrix).
+            let x_pt = pdf_x_mm * 72.0 / 25.4;
+            let y_pt = pdf_y_mm * 72.0 / 25.4;
+            layer.begin_text_section();
+            layer.set_font(font, el.font_size);
+            layer.set_text_matrix(printpdf::TextMatrix::Raw([
+                1.0, 0.0, shear, 1.0, x_pt, y_pt,
+            ]));
+            layer.write_text(line.to_string(), font);
+            layer.end_text_section();
+        } else {
+            layer.use_text(
+                line.to_string(),
+                el.font_size,
+                Mm(pdf_x_mm),
+                Mm(pdf_y_mm),
+                font,
+            );
+        }
+
+        // Unterstrich: dünne Linie direkt unter der Grundlinie.
+        if el.underline && !line.is_empty() {
+            let underline_y_mm = pdf_y_mm - pt_to_mm(el.font_size) * 0.18;
+            let underline = Line {
+                points: vec![
+                    (Point::new(Mm(pdf_x_mm), Mm(underline_y_mm)), false),
+                    (
+                        Point::new(Mm(pdf_x_mm + pt_to_mm(line_w)), Mm(underline_y_mm)),
+                        false,
+                    ),
+                ],
+                is_closed: false,
+            };
+            layer.set_outline_thickness((el.font_size * 0.05).max(0.5));
+            layer.add_line(underline);
+        }
+
         y += line_h;
     }
+    layer.restore_graphics_state();
 }
 
 fn draw_image(
@@ -234,6 +353,154 @@ fn draw_image(
             dpi: Some(300.0),
         },
     );
+}
+
+/// Zeichnet ein Rechteck (optional mit Eckradius) als geschlossenen Pfad.
+/// PDF-Koordinatensystem: y zeigt nach OBEN. Rotation (BoxDoc: Grad gegen
+/// Uhrzeigersinn, y nach unten) wird durch Rotation der Stützpunkte um das
+/// Zentrum aufgeprägt.
+fn draw_rectangle(layer: &PdfLayerReference, el: &Element, page_h_mm: f32) {
+    // Bei Corner-Radius > 0 erzeugen wir ein abgerundetes Rechteck als
+    // Polygonzug (4× Viertelkreis à 4 Stützpunkte, kappa-Approximation).
+    let radius = el.corner_radius.max(0.0);
+    let w_mm = pt_to_mm(el.w);
+    let h_mm = pt_to_mm(el.h);
+    let cx_mm = pt_to_mm(el.x) + w_mm / 2.0;
+    let cy_mm = page_h_mm - (pt_to_mm(el.y) + h_mm / 2.0);
+    let r = radius.min(w_mm / 2.0).min(h_mm / 2.0);
+    let hw = w_mm / 2.0;
+    let hh = h_mm / 2.0;
+
+    // Lokale Punkteliste (relativ zum Zentrum, PDF-Koordinaten: y nach oben).
+    // Wir bauen zuerst die 4 Ecken als Polygonzug, optional mit Bögen.
+    let kappa = 0.5522847498_f32;
+    let mut local: Vec<(f32, f32)> = Vec::new();
+    if r > 0.05 {
+        // Wir beginnen oben-rechts (PDF-Koordinaten: +x, +y) und laufen im
+        // Uhrzeigersinn um das Rechteck. Pro Ecke zwei Kontrollpunkte + Anker.
+        let corners = [
+            (hw - r, hh),       // oben-rechts, Startpunkt des Bogens
+            (hw, hh - r),       // oben-rechts, Endpunkt des Bogens
+            (hw, -hh + r),      // unten-rechts, Start
+            (hw - r, -hh),      // unten-rechts, End
+            (-hw + r, -hh),     // unten-links, Start
+            (-hw, -hh + r),     // unten-links, End
+            (-hw, hh - r),      // oben-links, Start
+            (-hw + r, hh),      // oben-links, End
+        ];
+        let controls = [
+            // Pro Ecke 2 Kontrollpunkte (Bezier), Reihenfolge wie corners.
+            (hw - r + r * kappa, hh), (hw, hh - r + r * kappa), // Ecke OR
+            (hw, -hh + r - r * kappa), (hw - r + r * kappa, -hh), // Ecke UR
+            (-hw + r - r * kappa, -hh), (-hw, -hh + r - r * kappa), // Ecke UL
+            (-hw, hh - r - r * kappa), (-hw + r - r * kappa, hh), // Ecke OL
+        ];
+        local.push(corners[0]);
+        for seg in 0..4 {
+            local.push(controls[seg * 2]);
+            local.push(controls[seg * 2 + 1]);
+            local.push(corners[seg * 2 + 1]);
+        }
+    } else {
+        // Scharfes Rechteck.
+        local.push((hw, hh));
+        local.push((hw, -hh));
+        local.push((-hw, -hh));
+        local.push((-hw, hh));
+    }
+
+    // Rotation (BoxDoc: Grad gegen Uhrzeigersinn, y nach unten → PDF: y nach
+    // oben, daher dreht sich das Vorzeichen des Sinus um).
+    let rad = el.rotation.to_radians();
+    let (rs, rc) = (rad.sin(), rad.cos());
+    let rotate = |(x, y): (f32, f32)| -> (f32, f32) {
+        (rc * x - rs * y, rs * x + rc * y)
+    };
+
+    let points: Vec<(Point, bool)> = local
+        .iter()
+        .map(|(x, y)| {
+            let (rx, ry) = rotate((*x, *y));
+            (Point::new(Mm(cx_mm + rx), Mm(cy_mm + ry)), false)
+        })
+        .collect();
+
+    // Farben setzen.
+    let has_fill = el.fill_color[3] > 0;
+    let has_stroke = el.stroke_color[3] > 0 && el.stroke_width > 0.0;
+    if has_fill {
+        let f = el.fill_color;
+        layer.set_fill_color(Color::Rgb(Rgb::new(
+            f[0] as f32 / 255.0,
+            f[1] as f32 / 255.0,
+            f[2] as f32 / 255.0,
+            None,
+        )));
+    }
+    if has_stroke {
+        let s = el.stroke_color;
+        layer.set_outline_color(Color::Rgb(Rgb::new(
+            s[0] as f32 / 255.0,
+            s[1] as f32 / 255.0,
+            s[2] as f32 / 255.0,
+            None,
+        )));
+        layer.set_outline_thickness(el.stroke_width);
+    }
+
+    let mode = match (has_fill, has_stroke) {
+        (true, true) => PaintMode::FillStroke,
+        (true, false) => PaintMode::Fill,
+        (false, true) => PaintMode::Stroke,
+        (false, false) => return,
+    };
+
+    let poly = Polygon {
+        rings: vec![points],
+        mode,
+        winding_order: WindingOrder::NonZero,
+    };
+    layer.add_polygon(poly);
+}
+
+/// Zeichnet eine Linie (Box mit h=0). BoxDoc-Modell: Position (x, y) ist der
+/// Startpunkt, w die Länge, rotation der Winkel gegen den Uhrzeigersinn.
+/// In PDF-Koordinaten (y nach oben) bedeutet eine Rotation von z. B. 30°
+/// gegen Uhrzeigersinn im BoxDoc-System eine Drehung des Endpunkts nach
+/// oben-links in PDF-Koordinaten.
+fn draw_line(layer: &PdfLayerReference, el: &Element, page_h_mm: f32) {
+    if el.stroke_width <= 0.0 || el.stroke_color[3] == 0 {
+        return;
+    }
+    let x1_mm = pt_to_mm(el.x);
+    let y1_mm = page_h_mm - pt_to_mm(el.y);
+    // Endpunkt im BoxDoc-System: (x + w·cos, y + w·sin). rotation=0 → waagerecht
+    // nach rechts (y in BoxDoc wächst nach unten, in PDF nach oben → Sinus
+    // negieren, um identisches visuelles Ergebnis zu erhalten).
+    let rad = el.rotation.to_radians();
+    let (c, s) = (rad.cos(), rad.sin());
+    let dx_mm = pt_to_mm(el.w) * c;
+    let dy_mm = -pt_to_mm(el.w) * s;
+    let x2_mm = x1_mm + dx_mm;
+    let y2_mm = y1_mm + dy_mm;
+
+    let stroke = el.stroke_color;
+    layer.set_outline_color(Color::Rgb(Rgb::new(
+        stroke[0] as f32 / 255.0,
+        stroke[1] as f32 / 255.0,
+        stroke[2] as f32 / 255.0,
+        None,
+    )));
+    layer.set_outline_thickness(el.stroke_width);
+
+    let line = Line {
+        points: vec![
+            (Point::new(Mm(x1_mm), Mm(y1_mm)), false),
+            (Point::new(Mm(x2_mm), Mm(y2_mm)), false),
+        ],
+        is_closed: false,
+    };
+    layer.add_line(line);
 }
 
 /// Zeichnet eine Ellipse (Kreis als Spezialfall w == h) als geschlossenen

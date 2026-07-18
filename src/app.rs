@@ -955,6 +955,9 @@ impl EditorApp {
                         if ui.button("PDF exportieren…").clicked() {
                             crate::printing::export_pdf_dialog(self);
                         }
+                        if ui.button("PDF öffnen…").clicked() {
+                            crate::io::import_pdf_dialog(self);
+                        }
                         if ui.button("Drucken…").clicked() {
                             crate::printing::print_dialog(self);
                         }
