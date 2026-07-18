@@ -8,6 +8,25 @@
     <meta name="robots" content="index, follow" />
     <link rel="canonical" href="https://boxdoc.at/" />
 
+    <!-- Theme-Vorab-Laden: liest das gespeicherte Theme aus localStorage,
+         bevor der Canvas rendert, damit beim Öffnen sofort die richtige
+         Hintergrundfarbe sichtbar ist (kein Flash des falschen Themes). -->
+    <script>
+      (function () {
+        try {
+          var s = localStorage.getItem('boxdoc_settings');
+          var theme = s ? (JSON.parse(s).theme || 'Light') : 'Light';
+          var bg = '#f0f0ee', fg = '#555555';
+          if (theme === 'DarkClassic') { bg = '#262626'; fg = '#aaaaaa'; }
+          else if (theme === 'DarkCalm') { bg = '#2a282e'; fg = '#aaaaaa'; }
+          var root = document.documentElement;
+          root.style.background = bg;
+          root.style.setProperty('--boxdoc-bg', bg);
+          root.style.setProperty('--boxdoc-fg', fg);
+        } catch (e) {}
+      })();
+    </script>
+
     <!-- AI-Discoverability -->
     <meta name="ai-content" content="BoxDoc documents are .boxdoc files (pretty-printed JSON). Read /llms.txt and /llms-full.txt for the full specification. Example: /sample.boxdoc" />
 
@@ -51,7 +70,7 @@
         overflow: hidden;
         width: 100%;
         height: 100%;
-        background: #2a282e;
+        background: var(--boxdoc-bg, #2a282e);
         overscroll-behavior: none;
       }
       #the_canvas_id {
@@ -65,7 +84,7 @@
         top: 50%;
         left: 50%;
         transform: translate(-50%, -50%);
-        color: #aaa;
+        color: var(--boxdoc-fg, #aaa);
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
         font-size: 16px;
       }

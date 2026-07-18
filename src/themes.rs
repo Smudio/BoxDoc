@@ -36,7 +36,18 @@ fn set_style(ctx: &Context, visuals: &Visuals) {
     let mut style = Style::default();
     style.visuals = visuals.clone();
     style.spacing.item_spacing = egui::vec2(8.0, 6.0);
-    ctx.set_style(style);
+    // egui 0.34 verwaltet zwei Style-Slots (dark_style / light_style); der
+    // jeweils aktive wird aus theme_preference (Default: System) und dem
+    // Browser-System-Theme abgeleitet. Da BoxDoc sein eigenes Theme-Konzept
+    // hat und `set_style` nur den aktuell aktiven Slot überschreibt, würde
+    // das gespeicherte Theme beim Start verloren gehen, sobald der Browser
+    // ein anderes System-Theme meldet als BoxDoc gespeichert hat (z. B.
+    // Light-Theme gespeichert, aber Browser im Dark-Mode → egui wählt den
+    // dark_style-Slot, in den BoxDoc nie geschrieben hat). Indem wir beide
+    // Slots auf dieselben BoxDoc-Visuals setzen, ist das gespeicherte Theme
+    // unabhängig vom gerade aktiven egui-Theme sofort sichtbar.
+    ctx.set_style_of(egui::Theme::Dark, style.clone());
+    ctx.set_style_of(egui::Theme::Light, style);
 }
 
 /// Liefert die vollständigen Visuals für ein Thema.
