@@ -78,26 +78,46 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
     // --- Scroll / Pan (ohne Zoom) ---
     if zoom_delta == 1.0 && scroll != Vec2::ZERO {
         // --- Continuous-Scroll: Seitenwechsel am Ende ---
-        if app.settings.scroll_mode == ScrollMode::Continuous && scroll.y.abs() > 0.1 {
-            let zoom = app.view.zoom;
-            let page_h_screen = ph_pt * zoom;
-            let page_top = app.view.pan.y;
-            let page_bottom = page_top + page_h_screen;
-            if scroll.y > 0.0 && page_bottom + scroll.y < 24.0 {
-                if app.page_index + 1 < app.doc.pages.len() {
+        //
+        // `scroll.y` ist positiv, wenn der Inhalt nach unten wandert (der
+        // Nutzer also nach oben scrollt) — die Vorzeichen hier müssen dazu
+        // passen, sonst schluckt der Zweig die Scroll-Eingabe und die Ansicht
+        // klemmt in eine Richtung fest.
+        if app.settings.scroll_mode == ScrollMode::Continuous {
+            app.view.pan.x += scroll.x;
+            let page_h_screen = ph_pt * app.view.zoom;
+            // Grenzen: oben steht der Seitenanfang bei 24 px, unten hört es
+            // auf, wenn das Seitenende am unteren Rand angekommen ist. Passt
+            // die Seite ganz auf den Bildschirm, fallen beide Grenzen zusammen.
+            let min_pan_y = (rect.height() - 24.0 - page_h_screen).min(24.0);
+            let target = app.view.pan.y + scroll.y;
+            let now = ui.input(|i| i.time);
+            // Eine Mausrad-Raste liefert ihr Delta über mehrere Frames verteilt.
+            // Ohne diese Sperre würde ein einziges Rasten mehrere Seiten weit
+            // springen, sobald die Seite komplett auf den Bildschirm passt.
+            let may_flip = now - app.view.last_page_flip > 0.25;
+            if target < min_pan_y {
+                // Nach unten über das Seitenende hinaus.
+                if may_flip && app.page_index + 1 < app.doc.pages.len() {
                     app.page_index += 1;
                     app.view.pan.y = 24.0;
+                    app.view.last_page_flip = now;
                     app.clear_selection();
+                } else {
+                    app.view.pan.y = min_pan_y;
                 }
-            } else if scroll.y < 0.0 && page_top + scroll.y > 24.0 {
-                if app.page_index > 0 {
+            } else if target > 24.0 {
+                // Nach oben über den Seitenanfang hinaus.
+                if may_flip && app.page_index > 0 {
                     app.page_index -= 1;
-                    let new_page_h = ph_pt * zoom;
-                    app.view.pan.y = -new_page_h + 24.0;
+                    app.view.pan.y = min_pan_y;
+                    app.view.last_page_flip = now;
                     app.clear_selection();
+                } else {
+                    app.view.pan.y = 24.0;
                 }
             } else {
-                app.view.pan += scroll;
+                app.view.pan.y = target;
             }
         } else {
             app.view.pan += scroll;
@@ -128,6 +148,15 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
         Color32::from_black_alpha(35),
     );
     painter.rect_filled(page_rect_screen, 2.0, Color32::WHITE);
+
+    // --- Reflow: Auto-Höhe der Textboxen ---
+    // Textboxen wachsen mit ihrem Inhalt. Das ist abgeleiteter Zustand, kein
+    // Nutzer-Edit — deshalb weder `touch()` noch History.
+    //
+    // Bewusst mit scale = 1.0 und VOR dem Zeichnen: Früher passierte das
+    // mitten im Zeichnen mit dem Zoomfaktor, wodurch die gespeicherte Höhe
+    // vom Zoomstand abhing.
+    reflow_text_heights(app, ctx);
 
     // --- Elemente zeichnen ---
     let selection: Vec<u64> = app.selection.clone();
@@ -172,36 +201,56 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                 || (primary_pressed && !r.contains(pointer.unwrap_or(Pos2::ZERO)));
             if commit {
                 let (id, text) = app.editing.take().unwrap();
-                if let Some(el) = app
+                // Erst prüfen, ob sich überhaupt etwas geändert hat, dann den
+                // Snapshot des ALTEN Standes nehmen — sonst wäre der getippte
+                // Text nicht mit Strg+Z rückgängig zu machen.
+                let changed = app
                     .doc
                     .pages
-                    .get_mut(page_idx)
-                    .and_then(|p| p.elements.iter_mut().find(|e| e.id == id))
-                {
-                    el.text = text;
-                    app.touch();
+                    .get(page_idx)
+                    .and_then(|p| p.elements.iter().find(|e| e.id == id))
+                    .map(|el| el.text != text)
+                    .unwrap_or(false);
+                if changed {
+                    app.push_history();
+                    if let Some(el) = app
+                        .doc
+                        .pages
+                        .get_mut(page_idx)
+                        .and_then(|p| p.elements.iter_mut().find(|e| e.id == id))
+                    {
+                        el.text = text;
+                        app.touch();
+                    }
                 }
             }
         }
     }
 
-    // --- Center-Snap-Linie (vertikale Mittellinie der Seite) ---
-    if app.snap_center {
-        let cx = to_screen(Pos2::new(pw_pt / 2.0, 0.0)).x;
-        let top = to_screen(Pos2::new(pw_pt / 2.0, 0.0));
-        let bot = to_screen(Pos2::new(pw_pt / 2.0, ph_pt));
-        painter.line_segment(
-            [top, bot],
-            Stroke::new(1.5, Color32::from_rgb(80, 200, 120)),
-        );
-        let marker_color = Color32::from_rgb(80, 200, 120);
-        painter.circle_filled(Pos2::new(cx, top.y), 4.0, marker_color);
+    // --- Snap-Führungslinien (Außenkanten + Mittelpunkt zur Seite) ---
+    if app.snap_lines.vertical.is_some() || app.snap_lines.horizontal.is_some() {
+        let color = Color32::from_rgb(80, 200, 120);
+        let stroke = Stroke::new(1.5_f32, color);
+        if let Some(vx) = app.snap_lines.vertical {
+            let top = to_screen(Pos2::new(vx, 0.0));
+            let bot = to_screen(Pos2::new(vx, ph_pt));
+            painter.line_segment([top, bot], stroke);
+            painter.circle_filled(top, 4.0, color);
+            painter.circle_filled(bot, 4.0, color);
+        }
+        if let Some(hy) = app.snap_lines.horizontal {
+            let left = to_screen(Pos2::new(0.0, hy));
+            let right = to_screen(Pos2::new(pw_pt, hy));
+            painter.line_segment([left, right], stroke);
+            painter.circle_filled(left, 4.0, color);
+            painter.circle_filled(right, 4.0, color);
+        }
     }
 
     // --- Paste: Ghost + Preview Rendering ---
     if app.pasting && !app.clipboard.is_empty() {
         let ghost_fill = Color32::from_rgba_unmultiplied(100, 160, 230, 20);
-        let ghost_stroke = Stroke::new(1.0, Color32::from_rgba_unmultiplied(100, 160, 230, 70));
+        let ghost_stroke = Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(100, 160, 230, 70));
 
         // Ghost an Originalpositionen.
         for (i, el) in app.clipboard.iter().enumerate() {
@@ -236,12 +285,12 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
             let (p_fill, p_stroke) = if snapped {
                 (
                     Color32::from_rgba_unmultiplied(80, 200, 120, 50),
-                    Stroke::new(1.5, Color32::from_rgb(80, 200, 120)),
+                    Stroke::new(1.5_f32, Color32::from_rgb(80, 200, 120)),
                 )
             } else {
                 (
                     Color32::from_rgba_unmultiplied(40, 120, 220, 40),
-                    Stroke::new(1.5, Color32::from_rgb(40, 120, 220)),
+                    Stroke::new(1.5_f32, Color32::from_rgb(40, 120, 220)),
                 )
             };
 
@@ -329,7 +378,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
             | Interaction::Crop { .. }
             | Interaction::LineEndpoint { .. } => {
                 app.interaction = Interaction::None;
-                app.snap_center = false;
+                app.snap_lines = crate::app::SnapLines::default();
             }
             _ => {}
         }
@@ -386,11 +435,25 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                     }
                 }
                 if dragging {
-                    // --- Center-Snapping (vertikale Mittellinie der Seite) ---
+                    // --- Snapping: Außenkanten + Mittelpunkt zur Seite und
+                    // zu allen anderen Objekten. Pro Achse (X/Y) wird der
+                    // jeweils nächste Andockpunkt gesucht und angezogen:
+                    //   • linke/obere Außenkante, Zentrum, rechte/untere Außenkante
+                    //     des gezogenen Objekts →
+                    //   • Seitenränder, Seitenmitte oder Außenkante/Mittelpunkt
+                    //     eines anderen Objekts.
                     let snap_px = 8.0;
-                    let (pw_pt_snap, _) = page_size_pt(app.doc.format, app.doc.orientation);
-                    let page_cx = pw_pt_snap / 2.0;
-                    let mut snap_offset_x: Option<f32> = None;
+                    let (pw_pt_snap, ph_pt_snap) =
+                        page_size_pt(app.doc.format, app.doc.orientation);
+                    let ids: Vec<u64> = starts.iter().map(|(id, _, _)| *id).collect();
+                    let (x_targets, y_targets) = collect_snap_targets(
+                        &app.doc.pages[page_idx].elements,
+                        &ids,
+                        pw_pt_snap,
+                        ph_pt_snap,
+                    );
+                    let mut best_x: Option<(f32, f32, f32)> = None; // (dist, offset, line)
+                    let mut best_y: Option<(f32, f32, f32)> = None;
                     for (id, _, _) in &starts {
                         let Some(el) = app.doc.pages[page_idx]
                             .elements
@@ -399,15 +462,32 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                         else {
                             continue;
                         };
-                        let el_cx = el.x + el.w / 2.0;
-                        let dist = (el_cx - page_cx).abs() / app.view.zoom;
-                        if dist < snap_px {
-                            snap_offset_x = Some(page_cx - el.w / 2.0 - el.x);
-                            break;
+                        // X-Quellen: linke Außenkante, Zentrum, rechte Außenkante.
+                        for obj_val in [el.x, el.x + el.w / 2.0, el.x + el.w] {
+                            if let Some(target) =
+                                pick_snap(obj_val, &x_targets, snap_px, app.view.zoom)
+                            {
+                                let dist = (obj_val - target).abs() / app.view.zoom;
+                                if best_x.map_or(true, |(d, _, _)| dist < d) {
+                                    best_x = Some((dist, target - obj_val, target));
+                                }
+                            }
+                        }
+                        // Y-Quellen.
+                        for obj_val in [el.y, el.y + el.h / 2.0, el.y + el.h] {
+                            if let Some(target) =
+                                pick_snap(obj_val, &y_targets, snap_px, app.view.zoom)
+                            {
+                                let dist = (obj_val - target).abs() / app.view.zoom;
+                                if best_y.map_or(true, |(d, _, _)| dist < d) {
+                                    best_y = Some((dist, target - obj_val, target));
+                                }
+                            }
                         }
                     }
-                    if let Some(off) = snap_offset_x {
-                        let ids: Vec<u64> = starts.iter().map(|(id, _, _)| *id).collect();
+                    let mut snap_v = None;
+                    let mut snap_h = None;
+                    if let Some((_, off, line)) = best_x {
                         if let Some(page) = app.doc.pages.get_mut(page_idx) {
                             for el in page.elements.iter_mut() {
                                 if ids.contains(&el.id) {
@@ -415,26 +495,75 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                                 }
                             }
                         }
-                        // Snap-Visual im Canvas-Status speichern.
-                        app.snap_center = true;
-                    } else {
-                        app.snap_center = false;
+                        snap_v = Some(line);
                     }
+                    if let Some((_, off, line)) = best_y {
+                        if let Some(page) = app.doc.pages.get_mut(page_idx) {
+                            for el in page.elements.iter_mut() {
+                                if ids.contains(&el.id) {
+                                    el.y += off;
+                                }
+                            }
+                        }
+                        snap_h = Some(line);
+                    }
+                    // Snap-Visual im Canvas-Status speichern.
+                    app.snap_lines.vertical = snap_v;
+                    app.snap_lines.horizontal = snap_h;
                     app.touch();
                 }
             }
             Active::Resize(id, anchor, rotation, start_aspect) => {
+                // Snap-Parameter vor der Element-Borrow holen.
+                let (pw_pt_snap, ph_pt_snap) =
+                    page_size_pt(app.doc.format, app.doc.orientation);
+                let zoom_snap = app.view.zoom;
+                let (x_targets, y_targets) = collect_snap_targets(
+                    &app.doc.pages[page_idx].elements,
+                    &[id],
+                    pw_pt_snap,
+                    ph_pt_snap,
+                );
+                let mut snap_v = None;
+                let mut snap_h = None;
                 if let Some(el) = element_mut(app, page_idx, id) {
                     let shift = ui.input(|i| i.modifiers.shift);
                     resize_to_pointer(el, anchor, rotation, to_page(pointer), shift, start_aspect);
+                    (snap_v, snap_h) =
+                        snap_resize_edges(el, anchor, &x_targets, &y_targets, 8.0, zoom_snap);
                     app.touch();
                 }
+                app.snap_lines.vertical = snap_v;
+                app.snap_lines.horizontal = snap_h;
             }
             Active::ResizeEdge(id, edge, rotation, anchor) => {
+                let (pw_pt_snap, ph_pt_snap) =
+                    page_size_pt(app.doc.format, app.doc.orientation);
+                let zoom_snap = app.view.zoom;
+                let (x_targets, y_targets) = collect_snap_targets(
+                    &app.doc.pages[page_idx].elements,
+                    &[id],
+                    pw_pt_snap,
+                    ph_pt_snap,
+                );
+                let mut snap_v = None;
+                let mut snap_h = None;
                 if let Some(el) = element_mut(app, page_idx, id) {
+                    // Wer die Ober- oder Unterkante einer Textbox zieht, legt
+                    // die Höhe bewusst selbst fest — ab jetzt gilt `valign`
+                    // statt Auto-Höhe.
+                    if el.kind == ElementKind::Text
+                        && matches!(edge, CropEdge::Top | CropEdge::Bottom)
+                    {
+                        el.auto_height = false;
+                    }
                     resize_edge_to_pointer(el, edge, anchor, rotation, to_page(pointer));
+                    (snap_v, snap_h) =
+                        snap_resize_edges(el, anchor, &x_targets, &y_targets, 8.0, zoom_snap);
                     app.touch();
                 }
+                app.snap_lines.vertical = snap_v;
+                app.snap_lines.horizontal = snap_h;
             }
             Active::Rotate(id) => {
                 if let Some(el) = element_mut(app, page_idx, id) {
@@ -459,7 +588,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                     r,
                     0.0,
                     egui::Color32::TRANSPARENT,
-                    Stroke::new(1.0, Color32::from_rgb(40, 120, 220)),
+                    Stroke::new(1.0_f32, Color32::from_rgb(40, 120, 220)),
                     egui::StrokeKind::Inside,
                 ));
             }
@@ -537,9 +666,9 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                 } else {
                     Color32::from_rgb(40, 120, 220)
                 };
-                painter.line_segment([sp, ep], Stroke::new(2.0, color));
+                painter.line_segment([sp, ep], Stroke::new(2.0_f32, color));
                 painter.circle_filled(sp, 5.0, color);
-                painter.circle_stroke(ep, 5.0, Stroke::new(1.5, color));
+                painter.circle_stroke(ep, 5.0, Stroke::new(1.5_f32, color));
                 if shift {
                     painter.text(
                         ep + Vec2::new(10.0, -6.0),
@@ -551,7 +680,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                 }
             }
         } else if let Some(pt) = pointer {
-            painter.circle_stroke(pt, 5.0, Stroke::new(1.5, Color32::from_rgb(40, 120, 220)));
+            painter.circle_stroke(pt, 5.0, Stroke::new(1.5_f32, Color32::from_rgb(40, 120, 220)));
         }
         // Klick-Handling.
         if primary_pressed && pointer_in_canvas && !click_on_ui {
@@ -590,7 +719,16 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
     {
         if let Some(pointer) = pointer {
             let additive = ui.input(|i| i.modifiers.shift || i.modifiers.ctrl);
-            start_interaction(app, page_idx, pointer, to_screen, to_page, zoom, additive);
+            start_interaction(
+                app,
+                page_idx,
+                pointer,
+                to_screen,
+                to_page,
+                zoom,
+                additive,
+                ctx,
+            );
         }
     }
 
@@ -598,11 +736,20 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
     if !app.pasting && double_clicked && !editing_active && pointer_in_canvas && !click_on_ui {
         if let Some(pointer) = pointer {
             // Wenn ein bestehendes Text-Objekt getroffen wird → bearbeiten.
+            // Nur Klicks auf den tatsächlichen Text-Glyphen zählen (starker
+            // Treffer), damit ein Doppelklick in eine leere Ecke der Text-Box
+            // ein neues Textfeld erzeugt statt ein fernliegendes zu öffnen.
             let mut hit_text = None;
             for el in app.doc.pages[page_idx].elements.iter().rev() {
-                if el.kind == ElementKind::Text && point_in_element(el, pointer, &to_screen, zoom) {
-                    hit_text = Some(el.id);
-                    break;
+                if el.kind != ElementKind::Text {
+                    continue;
+                }
+                match element_hit_strength(el, pointer, &to_screen, zoom, ctx) {
+                    Some(s) if s > 0 => {
+                        hit_text = Some(el.id);
+                        break;
+                    }
+                    _ => {}
                 }
             }
             if let Some(id) = hit_text {
@@ -626,13 +773,19 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
     // --- Tastatur: Copy/Paste ---
     // Auf Native: egui wandelt Ctrl+C/V in Event::Copy/Event::Paste um.
     // Auf Web: oft nur als Event::Key sichtbar. Wir prüfen BEIDE Wege.
+    //
+    // `typing` deckt JEDES fokussierte Texteingabefeld ab — nicht nur die
+    // Canvas-Bearbeitung (`app.editing`). Ohne diese Prüfung würde Strg+C im
+    // Eigenschaften-Panel Objekte statt Text kopieren und Strg+V im
+    // JSON-Editor gar nicht ankommen, weil das Event hier weggefiltert wird.
+    let typing = ctx.wants_keyboard_input();
     let mut do_copy = false;
     let mut do_paste = false;
     ctx.input_mut(|i| {
         i.events.retain(|e| {
             match e {
                 egui::Event::Copy => {
-                    if app.editing.is_none() {
+                    if !typing {
                         do_copy = true;
                         false
                     } else {
@@ -640,7 +793,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                     }
                 }
                 egui::Event::Paste(_) => {
-                    if app.editing.is_none() {
+                    if !typing {
                         do_paste = true;
                         false
                     } else {
@@ -653,7 +806,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                     modifiers,
                     ..
                 } => {
-                    if app.editing.is_none() {
+                    if !typing {
                         match *key {
                             egui::Key::C if modifiers.ctrl => {
                                 do_copy = true;
@@ -718,8 +871,10 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
         }
     }
 
+    // Globale Tasten wirken nur, wenn KEIN Textfeld den Fokus hat. Sonst würde
+    // z. B. Entf im JSON-Editor das ausgewählte Objekt löschen.
     ctx.input(|i| {
-        if i.key_pressed(egui::Key::Delete) && app.editing.is_none() && !app.pasting {
+        if i.key_pressed(egui::Key::Delete) && !typing && !app.pasting {
             app.delete_selected();
         }
         if i.key_pressed(egui::Key::Escape) {
@@ -737,7 +892,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
             }
         }
         // L = Linien-Zeichenmodus starten/abbrechen.
-        if i.key_pressed(egui::Key::L) && app.editing.is_none() && !app.pasting {
+        if i.key_pressed(egui::Key::L) && !typing && !app.pasting {
             if app.line_drawing.is_some() {
                 app.line_drawing = None;
                 app.status = String::from("Linien-Modus beendet.");
@@ -748,7 +903,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
         }
 
         // Pfeiltasten: Auswahl verschieben (1 pt pro Druck, 10 pt mit Shift).
-        if app.editing.is_none() && !app.selection.is_empty() {
+        if !typing && !app.selection.is_empty() {
             let step = if i.modifiers.shift { 10.0 } else { 1.0 };
             let mut dx = 0.0;
             let mut dy = 0.0;
@@ -765,6 +920,16 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                 dy = step;
             }
             if dx != 0.0 || dy != 0.0 {
+                // Undo-Snapshot, aber zusammengefasst: eine zusammenhängende
+                // Serie von Pfeiltasten-Drücken ist EIN Undo-Schritt. Sonst
+                // müsste man 40x Strg+Z drücken, um ein Verschieben um 40 pt
+                // rückgängig zu machen.
+                const NUDGE_COALESCE_S: f64 = 0.6;
+                if i.time - app.last_nudge_time > NUDGE_COALESCE_S {
+                    app.push_history();
+                }
+                app.last_nudge_time = i.time;
+
                 let ids = app.selection.clone();
                 if let Some(page) = app.doc.pages.get_mut(app.page_index) {
                     for el in page.elements.iter_mut() {
@@ -807,54 +972,49 @@ fn draw_element(
 ) {
     match el.kind {
         ElementKind::Text => {
-            let mut font = FontId::new(el.font_size * zoom, crate::fonts::family_for(&el.font));
-            // Bold/Italic über egui's eingebaute italics/strong wenn Default-Font.
-            if el.font == "default" || el.font.is_empty() {
-                if el.bold && el.italic {
-                    font = FontId::new(el.font_size * zoom, FontFamily::Name("Bold Italic".into()));
-                } else if el.bold {
-                    font = FontId::new(el.font_size * zoom, FontFamily::Name("Bold".into()));
-                } else if el.italic {
-                    font = FontId::new(el.font_size * zoom, FontFamily::Name("Italics".into()));
-                }
-            }
             let color =
                 Color32::from_rgba_unmultiplied(el.color[0], el.color[1], el.color[2], el.color[3]);
-            let galley = painter.layout(el.text.clone(), font, color, (el.w * zoom).max(1.0));
-            el.h = (galley.size().y / zoom).max(el.font_size * 1.2);
-            let mut pos = to_screen(Pos2::new(el.x, el.y)) + Vec2::new(el.indent * zoom, 0.0);
-            match el.align {
-                crate::model::TextAlign::Left => {}
-                crate::model::TextAlign::Center => pos.x += (el.w * zoom - galley.size().x) / 2.0,
-                crate::model::TextAlign::Right => pos.x += el.w * zoom - galley.size().x,
-            }
-            match el.valign {
-                crate::model::VAlign::Top => {}
-                crate::model::VAlign::Middle => {
-                    pos.y += (el.h * zoom - galley.size().y) / 2.0;
+            let font = crate::text_layout::font_id_for(el, zoom);
+
+            // Layout kommt aus dem gemeinsamen Modul — exakt dasselbe, das der
+            // PDF-Export benutzt. Dadurch ist WYSIWYG keine Absichtserklärung,
+            // sondern eine Eigenschaft der Architektur.
+            let layout = ctx.fonts_mut(|f| crate::text_layout::layout(f, el, zoom));
+
+            let origin = to_screen(Pos2::new(el.x, el.y));
+            for laid in &layout.lines {
+                if laid.text.is_empty() {
+                    continue;
                 }
-                crate::model::VAlign::Bottom => {
-                    pos.y += el.h * zoom - galley.size().y;
+                // Jede Zeile einzeln setzen: Position und Umbruch stehen bereits
+                // fest, egui muss nur noch die Glyphen malen.
+                let galley =
+                    painter.layout_no_wrap(laid.text.clone(), font.clone(), color);
+                // `painter.galley` erwartet die linke OBERE Ecke, das Layout
+                // liefert die Grundlinie — Differenz ist der Ascent.
+                let ascent = galley
+                    .rows
+                    .first()
+                    .and_then(|r| r.row.glyphs.first().map(|g| g.font_ascent))
+                    .unwrap_or(el.font_size * zoom * 0.8);
+                let pos = origin
+                    + Vec2::new(laid.x * zoom, laid.baseline_y * zoom - ascent);
+
+                if el.underline {
+                    let underline_y = origin.y + laid.baseline_y * zoom + 2.0;
+                    painter.line_segment(
+                        [
+                            Pos2::new(origin.x + laid.x * zoom, underline_y),
+                            Pos2::new(origin.x + (laid.x + laid.width) * zoom, underline_y),
+                        ],
+                        Stroke::new((el.font_size * zoom * 0.05).max(1.0), color),
+                    );
                 }
-            }
-            painter.galley(pos, galley, color);
-            // Unterstrich.
-            if el.underline {
-                let galley_h = (el.font_size * zoom * 1.2).max(1.0);
-                let underline_y = pos.y + galley_h - 2.0;
-                painter.line_segment(
-                    [
-                        Pos2::new(pos.x, underline_y),
-                        Pos2::new(pos.x + el.w * zoom, underline_y),
-                    ],
-                    Stroke::new(1.0, color),
-                );
+                painter.galley(pos, galley, color);
             }
         }
         ElementKind::Image => {
             if let Some(tex) = images.texture(el.id, ctx) {
-                let center = to_screen(Pos2::new(el.x + el.w / 2.0, el.y + el.h / 2.0));
-                let cl = local_corners(el.w * zoom, el.h * zoom);
                 let uv = [
                     [el.crop.x, el.crop.y],
                     [el.crop.x + el.crop.w, el.crop.y],
@@ -863,10 +1023,9 @@ fn draw_element(
                 ];
                 let mut mesh = Mesh::default();
                 mesh.texture_id = tex.id();
-                for (i, lc) in cl.iter().enumerate() {
-                    let pos = local_to_world(center, el.rotation, *lc);
+                for (i, corner) in crate::geometry::quad_corners(el).iter().enumerate() {
                     mesh.vertices.push(Vertex {
-                        pos,
+                        pos: to_screen(*corner),
                         uv: uv[i].into(),
                         color: Color32::WHITE,
                     });
@@ -882,120 +1041,88 @@ fn draw_element(
             }
         }
         ElementKind::Rectangle => {
-            let center = to_screen(Pos2::new(el.x + el.w / 2.0, el.y + el.h / 2.0));
-            let cl = local_corners(el.w * zoom, el.h * zoom);
-            let pts: Vec<Pos2> = cl
-                .iter()
-                .map(|lc| local_to_world(center, el.rotation, *lc))
-                .collect();
-
-            let fill = Color32::from_rgba_unmultiplied(
-                el.fill_color[0],
-                el.fill_color[1],
-                el.fill_color[2],
-                el.fill_color[3],
-            );
-            let stroke = Stroke::new(
-                el.stroke_width * zoom,
-                Color32::from_rgba_unmultiplied(
-                    el.stroke_color[0],
-                    el.stroke_color[1],
-                    el.stroke_color[2],
-                    el.stroke_color[3],
-                ),
-            );
-            let radius = el.corner_radius * zoom;
-
-            if fill.a() > 0 {
-                let mut mesh = Mesh::default();
-                for (i, p) in pts.iter().enumerate() {
-                    mesh.vertices.push(Vertex {
-                        pos: *p,
-                        uv: [0.0, 0.0].into(),
-                        color: fill,
-                    });
-                    if i >= 2 {
-                        mesh.indices
-                            .extend_from_slice(&[0, (i - 1) as u32, i as u32]);
-                    }
-                }
-                painter.add(Shape::mesh(mesh));
-            }
-            if stroke.width > 0.0 {
-                let mut line = pts.clone();
-                line.push(pts[0]);
-                painter.add(Shape::line(line, stroke));
-            }
-            let _ = radius;
-        }
-        ElementKind::Line => {
-            let center = to_screen(Pos2::new(el.x + el.w / 2.0, el.y + el.h / 2.0));
-            let start = local_to_world(center, el.rotation, Vec2::new(-el.w * zoom / 2.0, 0.0));
-            let end = local_to_world(center, el.rotation, Vec2::new(el.w * zoom / 2.0, 0.0));
-            let stroke = Stroke::new(
-                el.stroke_width * zoom,
-                Color32::from_rgba_unmultiplied(
-                    el.stroke_color[0],
-                    el.stroke_color[1],
-                    el.stroke_color[2],
-                    el.stroke_color[3],
-                ),
-            );
-            painter.line_segment([start, end], stroke);
+            let pts = screen_pts(&crate::geometry::rect_outline(el), to_screen);
+            fill_and_stroke(painter, el, zoom, pts);
         }
         ElementKind::Ellipse => {
-            // Ellipse (Kreis als Spezialfall w == h) als gefülltes PathShape
-            // mit Linienzug-Näherung (64 Segmente). Rotation über den
-            // Mittelpunkt wird direkt in die Punkte eingerechnet.
-            let center = to_screen(Pos2::new(el.x + el.w / 2.0, el.y + el.h / 2.0));
-            let rx = (el.w * zoom).max(1.0) / 2.0;
-            let ry = (el.h * zoom).max(1.0) / 2.0;
-
-            let fill = Color32::from_rgba_unmultiplied(
-                el.fill_color[0],
-                el.fill_color[1],
-                el.fill_color[2],
-                el.fill_color[3],
-            );
-            let stroke = Stroke::new(
-                el.stroke_width * zoom,
-                Color32::from_rgba_unmultiplied(
-                    el.stroke_color[0],
-                    el.stroke_color[1],
-                    el.stroke_color[2],
-                    el.stroke_color[3],
-                ),
-            );
-
-            let segments = 64;
-            let mut points: Vec<Pos2> = Vec::with_capacity(segments);
-            for i in 0..segments {
-                let t = i as f32 * std::f32::consts::TAU / segments as f32;
-                let local = Vec2::new(rx * t.cos(), ry * t.sin());
-                points.push(local_to_world(center, el.rotation, local));
-            }
-
-            if fill.a() > 0 {
-                let mut mesh = Mesh::default();
-                for p in &points {
-                    mesh.vertices.push(Vertex {
-                        pos: *p,
-                        uv: [0.0, 0.0].into(),
-                        color: fill,
-                    });
+            let pts = screen_pts(&crate::geometry::ellipse_outline(el), to_screen);
+            fill_and_stroke(painter, el, zoom, pts);
+        }
+        ElementKind::Line => {
+            let (a, b) = crate::geometry::line_endpoints(el);
+            let stroke = Stroke::new(el.stroke_width * zoom, stroke_color(el));
+            painter.line_segment([to_screen(a), to_screen(b)], stroke);
+        }
+        ElementKind::Path => {
+            let pts = screen_pts(&crate::geometry::path_outline(el), to_screen);
+            if el.path_closed {
+                fill_and_stroke(painter, el, zoom, pts);
+            } else if pts.len() >= 2 {
+                // Offener Zug: keine Fläche, und die Kontur darf nicht vom
+                // Endpunkt zum Startpunkt zurücklaufen.
+                let stroke = Stroke::new(el.stroke_width * zoom, stroke_color(el));
+                if stroke.width > 0.0 && stroke.color.a() > 0 {
+                    painter.add(Shape::line(pts, stroke));
                 }
-                for i in 1..(points.len() as u32 - 1) {
-                    mesh.indices.extend_from_slice(&[0, i, i + 1]);
-                }
-                mesh.indices.extend_from_slice(&[0, points.len() as u32 - 1, 1]);
-                painter.add(Shape::mesh(mesh));
-            }
-            if stroke.width > 0.0 {
-                let mut line = points.clone();
-                line.push(points[0]);
-                painter.add(Shape::line(line, stroke));
             }
         }
+    }
+}
+
+/// Bildet Seitenkoordinaten auf Bildschirmkoordinaten ab.
+fn screen_pts(pts: &[Pos2], to_screen: &impl Fn(Pos2) -> Pos2) -> Vec<Pos2> {
+    pts.iter().map(|p| to_screen(*p)).collect()
+}
+
+fn fill_color(el: &Element) -> Color32 {
+    Color32::from_rgba_unmultiplied(
+        el.fill_color[0],
+        el.fill_color[1],
+        el.fill_color[2],
+        el.fill_color[3],
+    )
+}
+
+fn stroke_color(el: &Element) -> Color32 {
+    Color32::from_rgba_unmultiplied(
+        el.stroke_color[0],
+        el.stroke_color[1],
+        el.stroke_color[2],
+        el.stroke_color[3],
+    )
+}
+
+/// Füllt und umrandet einen geschlossenen Umriss.
+///
+/// Die Füllung wird trianguliert (`geometry::triangulate`), damit auch
+/// konkave Umrisse stimmen — importierte Pfade sind es regelmäßig.
+fn fill_and_stroke(painter: &egui::Painter, el: &Element, zoom: f32, pts: Vec<Pos2>) {
+    if pts.len() < 3 {
+        return;
+    }
+    let fill = fill_color(el);
+    if fill.a() > 0 {
+        let mut mesh = Mesh::default();
+        for p in &pts {
+            mesh.vertices.push(Vertex {
+                pos: *p,
+                uv: [0.0, 0.0].into(),
+                color: fill,
+            });
+        }
+        // Triangulieren statt Dreiecksfächer: Der Fächer füllt jede konkave
+        // Einbuchtung mit zu — bei Rechteck und Ellipse fiel das nie auf, bei
+        // importierten Pfaden sofort.
+        for [a, b, c] in crate::geometry::triangulate(&pts) {
+            mesh.indices.extend_from_slice(&[a, b, c]);
+        }
+        painter.add(Shape::mesh(mesh));
+    }
+    let stroke = Stroke::new(el.stroke_width * zoom, stroke_color(el));
+    if stroke.width > 0.0 && stroke.color.a() > 0 {
+        // Geschlossene Linie statt offenem Linienzug: nur so werden die Ecken
+        // sauber verbunden und es entsteht keine Lücke am Start-/Endpunkt.
+        painter.add(Shape::closed_line(pts, stroke));
     }
 }
 
@@ -1008,18 +1135,41 @@ fn draw_multi_selection_box(
 ) {
     let center = to_screen(Pos2::new(el.x + el.w / 2.0, el.y + el.h / 2.0));
     let cl = local_corners(el.w * zoom, el.h * zoom);
-    let mut pts: Vec<Pos2> = cl
+    let pts: Vec<Pos2> = cl
         .iter()
         .map(|lc| local_to_world(center, el.rotation, *lc))
         .collect();
-    pts.push(pts[0]);
-    painter.add(Shape::line(
+    painter.add(Shape::closed_line(
         pts,
-        Stroke::new(1.5, Color32::from_rgb(40, 120, 220)),
+        Stroke::new(1.5_f32, Color32::from_rgb(40, 120, 220)),
     ));
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Passt die Höhe aller Textelemente an ihren umgebrochenen Inhalt an.
+///
+/// Läuft mit `scale = 1.0`, damit die gespeicherte Höhe unabhängig vom Zoom
+/// ist — sonst würde ein Dokument je nach Zoomstand mit anderen Werten
+/// gespeichert.
+fn reflow_text_heights(app: &mut EditorApp, ctx: &egui::Context) {
+    let page_idx = app.page_index;
+    let Some(page) = app.doc.pages.get_mut(page_idx) else {
+        return;
+    };
+    ctx.fonts_mut(|fonts| {
+        for el in page.elements.iter_mut() {
+            // Nur Textboxen, und nur solche, deren Höhe der Nutzer nicht
+            // selbst festgelegt hat.
+            if el.kind != ElementKind::Text || !el.auto_height {
+                continue;
+            }
+            let layout = crate::text_layout::layout(fonts, el, 1.0);
+            let min_h = el.font_size * 1.2;
+            el.h = layout.height.max(min_h);
+        }
+    });
+}
+
 fn draw_selection(
     el: &Element,
     painter: &egui::Painter,
@@ -1035,7 +1185,7 @@ fn draw_selection(
         let handle_color = Color32::from_rgb(40, 120, 220);
         for p in [start, end] {
             painter.circle_filled(p, 6.0, Color32::WHITE);
-            painter.circle_stroke(p, 6.0, Stroke::new(2.0, handle_color));
+            painter.circle_stroke(p, 6.0, Stroke::new(2.0_f32, handle_color));
         }
         return;
     }
@@ -1047,11 +1197,9 @@ fn draw_selection(
         .map(|lc| local_to_world(center, el.rotation, *lc))
         .collect();
 
-    let mut line = pts.clone();
-    line.push(pts[0]);
-    painter.add(Shape::line(
-        line,
-        Stroke::new(1.5, Color32::from_rgb(40, 120, 220)),
+    painter.add(Shape::closed_line(
+        pts.clone(),
+        Stroke::new(1.5_f32, Color32::from_rgb(40, 120, 220)),
     ));
 
     if el.kind == ElementKind::Image && !crop_mode {
@@ -1063,7 +1211,7 @@ fn draw_selection(
         );
         painter.line_segment(
             [top_mid, grip],
-            Stroke::new(1.5, Color32::from_rgb(40, 120, 220)),
+            Stroke::new(1.5_f32, Color32::from_rgb(40, 120, 220)),
         );
         painter.circle_filled(grip, 6.0, Color32::from_rgb(40, 120, 220));
     }
@@ -1085,10 +1233,13 @@ fn draw_selection(
     } else {
         for p in &pts {
             painter.circle_filled(*p, 5.0, Color32::WHITE);
-            painter.circle_stroke(*p, 5.0, Stroke::new(1.5, handle_color));
+            painter.circle_stroke(*p, 5.0, Stroke::new(1.5_f32, handle_color));
         }
-        // Kanten-Griffe (Mitten) nur für Rechtecke und Ellipsen.
-        if el.kind == ElementKind::Rectangle || el.kind == ElementKind::Ellipse {
+        // Kanten-Griffe (Mitten) für alle Flächenformen, nicht für Linien.
+        if matches!(
+            el.kind,
+            ElementKind::Rectangle | ElementKind::Ellipse | ElementKind::Path
+        ) {
             for p in edge_mid_positions(el, &to_screen, zoom) {
                 painter.rect_filled(
                     Rect::from_center_size(p, Vec2::splat(8.0)),
@@ -1098,7 +1249,7 @@ fn draw_selection(
                 painter.rect_stroke(
                     Rect::from_center_size(p, Vec2::splat(8.0)),
                     1.5,
-                    Stroke::new(1.5, handle_color),
+                    Stroke::new(1.5_f32, handle_color),
                     egui::StrokeKind::Inside,
                 );
             }
@@ -1133,13 +1284,26 @@ fn crop_edge_handles(el: &Element, center: Pos2, zoom: f32) -> [Pos2; 4] {
     [left, right, top, bottom]
 }
 
-fn point_in_element(
+/// Treffer-Stärke für die Auswahl-Priorisierung.
+///
+/// `None`  – Pointer liegt außerhalb der Bounding-Box (kein Treffer).
+/// `Some(0)` – Schwacher Treffer: nur Bounding-Box, am Punkt selbst ist
+///             kein sichtbarer Inhalt (z. B. Inneres eines Rahmens ohne
+///             Füllung oder leerer Bereich eines Text-Elements).
+/// `Some(1)` – Stark: Pointer liegt auf sichtbarem Inhalt (Text-Glyphen,
+///             Füllung, Rahmenlinie, Bild, Linie).
+///
+/// Bei überlappenden Objekten gewinnt das oberste Element mit der höchsten
+/// Stärke — so lässt sich z. B. Text durch Klick auf die Glyphen auswählen,
+/// selbst wenn ein ungefüllter Rahmen darüber liegt.
+fn element_hit_strength(
     el: &Element,
     pointer_screen: Pos2,
     to_screen: &impl Fn(Pos2) -> Pos2,
     zoom: f32,
-) -> bool {
-    // Linien: Distanz zur Linie prüfen (mit Toleranz).
+    ctx: &egui::Context,
+) -> Option<u8> {
+    // Linien: Distanz zur Linie prüfen (mit Toleranz abhängig von Strichstärke).
     if el.kind == ElementKind::Line {
         let center = to_screen(Pos2::new(el.x + el.w / 2.0, el.y));
         let start = local_to_world(center, el.rotation, Vec2::new(-el.w * zoom / 2.0, 0.0));
@@ -1148,7 +1312,13 @@ fn point_in_element(
         let ap = pointer_screen - start;
         let t = (ap.dot(ab) / ab.dot(ab)).clamp(0.0, 1.0);
         let closest = start + ab * t;
-        return pointer_screen.distance(closest) < 8.0;
+        let stroke_half = (el.stroke_width * zoom / 2.0).max(0.0);
+        let tol = 8.0_f32.max(stroke_half + 3.0);
+        return if pointer_screen.distance(closest) < tol {
+            Some(1)
+        } else {
+            None
+        };
     }
 
     let center = to_screen(Pos2::new(el.x + el.w / 2.0, el.y + el.h / 2.0));
@@ -1160,10 +1330,91 @@ fn point_in_element(
         let ry = (el.h * zoom).max(1.0) / 2.0 + 4.0;
         let dx = local.x / rx;
         let dy = local.y / ry;
-        return dx * dx + dy * dy <= 1.0;
+        if dx * dx + dy * dy > 1.0 {
+            return None;
+        }
+        return Some(1);
     }
 
-    local.x.abs() <= el.w * zoom / 2.0 && local.y.abs() <= el.h * zoom / 2.0
+    let hw = el.w * zoom / 2.0;
+    let hh = el.h * zoom / 2.0;
+    if local.x.abs() > hw || local.y.abs() > hh {
+        return None;
+    }
+
+    match el.kind {
+        ElementKind::Image => Some(1),
+        ElementKind::Rectangle => {
+            let has_fill = el.fill_color[3] > 0;
+            if has_fill {
+                return Some(1);
+            }
+            // Rahmen ohne Füllung: nur die Kontur ist ein starker Treffer,
+            // das Innere ist schwach (damit darunter liegende Objekte, z. B.
+            // Text, durch Klick ausgewählt werden können).
+            let stroke_half = (el.stroke_width * zoom / 2.0).max(0.0);
+            let tol = stroke_half + 4.0;
+            let dist_to_edge = (hw - local.x.abs()).min(hh - local.y.abs());
+            if dist_to_edge <= tol {
+                Some(1)
+            } else {
+                Some(0)
+            }
+        }
+        ElementKind::Text => {
+            // Enge Bounding-Box um die tatsächlichen Glyphen berechnen.
+            // Nur da ist das Text-Element "stark" treffbar; außerhalb
+            // (aber innerhalb w×h) ist es nur ein schwacher Treffer.
+            if el.text.trim().is_empty() {
+                return Some(0);
+            }
+            let tight = text_tight_rect(el, to_screen, zoom, ctx);
+            if tight.contains(pointer_screen) {
+                Some(1)
+            } else {
+                Some(0)
+            }
+        }
+        _ => Some(1),
+    }
+}
+
+/// Berechnet das enge Rechteck (Bildschirmkoordinaten) des tatsächlichen
+/// Text-Inhalts — also der Fläche, die von den Glyphen bedeckt ist, nicht
+/// der vollen `w × h`-Box des Elements.
+fn text_tight_rect(
+    el: &Element,
+    to_screen: &impl Fn(Pos2) -> Pos2,
+    zoom: f32,
+    ctx: &egui::Context,
+) -> Rect {
+    let mut font = FontId::new(el.font_size * zoom, crate::fonts::family_for(&el.font));
+    if el.font == "default" || el.font.is_empty() {
+        if el.bold && el.italic {
+            font = FontId::new(el.font_size * zoom, FontFamily::Name("Bold Italic".into()));
+        } else if el.bold {
+            font = FontId::new(el.font_size * zoom, FontFamily::Name("Bold".into()));
+        } else if el.italic {
+            font = FontId::new(el.font_size * zoom, FontFamily::Name("Italics".into()));
+        }
+    }
+    let galley = ctx.fonts_mut(|f| {
+        f.layout(el.text.clone(), font, Color32::TRANSPARENT, (el.w * zoom).max(1.0))
+    });
+    let galley_size = galley.size();
+
+    let mut pos = to_screen(Pos2::new(el.x, el.y)) + Vec2::new(el.indent * zoom, 0.0);
+    match el.align {
+        crate::model::TextAlign::Left => {}
+        crate::model::TextAlign::Center => pos.x += (el.w * zoom - galley_size.x) / 2.0,
+        crate::model::TextAlign::Right => pos.x += el.w * zoom - galley_size.x,
+    }
+    match el.valign {
+        crate::model::VAlign::Top => {}
+        crate::model::VAlign::Middle => pos.y += (el.h * zoom - galley_size.y) / 2.0,
+        crate::model::VAlign::Bottom => pos.y += el.h * zoom - galley_size.y,
+    }
+    Rect::from_min_size(pos, galley_size)
 }
 
 fn corner_positions(el: &Element, to_screen: &impl Fn(Pos2) -> Pos2, zoom: f32) -> [Pos2; 4] {
@@ -1204,6 +1455,7 @@ fn start_interaction(
     to_page: impl Fn(Pos2) -> Vec2,
     zoom: f32,
     shift: bool,
+    ctx: &egui::Context,
 ) {
     let sel = app.primary();
     let crop_mode = app.crop_mode;
@@ -1337,13 +1589,34 @@ fn start_interaction(
         }
     }
 
-    // 4) Körper (oberstes getroffenes Objekt)
-    let hit = app.doc.pages[page_idx]
-        .elements
-        .iter()
-        .rev()
-        .find(|e| point_in_element(e, pointer, &to_screen, zoom))
-        .map(|e| e.id);
+    // 4) Körper (oberstes getroffenes Objekt mit der höchsten Treffer-Stärke).
+    // Stärke: 1 = sichtbarer Inhalt (Glyphen, Füllung, Rahmen, Bild, Linie),
+    //         0 = nur Bounding-Box (z. B. Inneres eines ungefüllten Rahmens).
+    // Bei Überlappung gewinnt das oberste Element mit der höchsten Stärke —
+    // so lässt sich z. B. Text unter einem ungefüllten Rahmen durch Klick
+    // auf die Glyphen auswählen, der Rahmen selbst durch Klick auf seine
+    // Kontur.
+    let mut best_strength: i32 = -1;
+    let mut best_id: Option<u64> = None;
+    for el in app.doc.pages[page_idx].elements.iter().rev() {
+        let to_scr = &to_screen;
+        match element_hit_strength(el, pointer, to_scr, zoom, ctx) {
+            None => {}
+            Some(s) => {
+                let s = s as i32;
+                if s > best_strength {
+                    best_strength = s;
+                    best_id = Some(el.id);
+                }
+                // Sobald wir einen starken Treffer (s == 1) gefunden haben,
+                // kann kein späteres (tiefer liegendes) Element mehr gewinnen.
+                if best_strength >= 1 {
+                    break;
+                }
+            }
+        }
+    }
+    let hit = best_id;
 
     let shift_held = shift;
 
@@ -1426,6 +1699,104 @@ fn resize_to_pointer(
     el.h = new_h;
     el.x = new_center.x - new_w / 2.0;
     el.y = new_center.y - new_h / 2.0;
+}
+
+/// Dockt die beweglichen Außenkanten eines Elements an die nächste Snap-
+/// Zielposition (Seitenränder, Seitenmitten, Außenkanten/Mitten anderer
+/// Objekte), wenn sie innerhalb der Snap-Schwelle (8 px Bildschirm) liegt.
+/// `anchor` = Fixpunkt des Resizes (gegenüberliegende Ecke bzw. Kantenmitte);
+/// eine Kante gilt als beweglich, wenn der Anker auf der gegenüberliegenden
+/// Seite des Element-Zentrums liegt. Liefert die Positionen der Snap-Linien
+/// (vertikal, horizontal) in Seitenkoordinaten — `None`, wenn nicht andockiert.
+fn snap_resize_edges(
+    el: &mut Element,
+    anchor: Pos2,
+    x_targets: &[f32],
+    y_targets: &[f32],
+    snap_px: f32,
+    zoom: f32,
+) -> (Option<f32>, Option<f32>) {
+    let el_cx = el.x + el.w / 2.0;
+    let el_cy = el.y + el.h / 2.0;
+    let mut snap_v = None;
+    let mut snap_h = None;
+
+    // X-Achse: linke oder rechte Außenkante ist beweglich (je nach Anker-Seite).
+    if anchor.x > el_cx {
+        // Anker liegt rechts → linke Außenkante bewegt sich.
+        if let Some(target) = pick_snap(el.x, x_targets, snap_px, zoom) {
+            let delta = target - el.x;
+            el.x += delta;
+            el.w -= delta;
+            snap_v = Some(target);
+        }
+    } else if anchor.x < el_cx {
+        // Anker liegt links → rechte Außenkante bewegt sich.
+        let right = el.x + el.w;
+        if let Some(target) = pick_snap(right, x_targets, snap_px, zoom) {
+            el.w += target - right;
+            snap_v = Some(target);
+        }
+    }
+
+    // Y-Achse.
+    if anchor.y > el_cy {
+        if let Some(target) = pick_snap(el.y, y_targets, snap_px, zoom) {
+            let delta = target - el.y;
+            el.y += delta;
+            el.h -= delta;
+            snap_h = Some(target);
+        }
+    } else if anchor.y < el_cy {
+        let bottom = el.y + el.h;
+        if let Some(target) = pick_snap(bottom, y_targets, snap_px, zoom) {
+            el.h += target - bottom;
+            snap_h = Some(target);
+        }
+    }
+
+    (snap_v, snap_h)
+}
+
+/// Wählt das am nächsten gelegene Ziel innerhalb der Snap-Schwelle. Maß:
+/// Bildschirm-Pixel = |obj_val - target| / zoom.
+fn pick_snap(obj_val: f32, targets: &[f32], snap_px: f32, zoom: f32) -> Option<f32> {
+    let mut best: Option<(f32, f32)> = None;
+    for &target in targets {
+        let dist = (obj_val - target).abs() / zoom;
+        if dist < snap_px && best.map_or(true, |(d, _)| dist < d) {
+            best = Some((dist, target));
+        }
+    }
+    best.map(|(_, t)| t)
+}
+
+/// Sammelt alle Snap-Ziele einer Seite: Seitenränder und -mitten sowie
+/// die Außenkanten aller Objekte, deren ID nicht in `exclude` steht
+/// (typischerweise die gerade gezogenen / skalierten IDs).
+/// Objekt-Mitten werden bewusst NICHT aufgenommen — sie sind keine
+/// sichtbaren Kanten und würden Andockpunkte erzeugen, die nicht dem
+/// realen Objekt-Rahmen entsprechen.
+/// Liefert (X-Targets, Y-Targets) in Seitenkoordinaten.
+fn collect_snap_targets(
+    elements: &[Element],
+    exclude: &[u64],
+    pw_pt: f32,
+    ph_pt: f32,
+) -> (Vec<f32>, Vec<f32>) {
+    let mut xs: Vec<f32> = vec![0.0, pw_pt / 2.0, pw_pt];
+    let mut ys: Vec<f32> = vec![0.0, ph_pt / 2.0, ph_pt];
+    for el in elements {
+        if exclude.contains(&el.id) {
+            continue;
+        }
+        // Nur echte Außenkanten der Objekte.
+        xs.push(el.x);
+        xs.push(el.x + el.w);
+        ys.push(el.y);
+        ys.push(el.y + el.h);
+    }
+    (xs, ys)
 }
 
 /// Ändert nur eine Dimension (Breite bei Left/Right, Höhe bei Top/Bottom).

@@ -10,9 +10,14 @@
 //! und `odt` referenzieren via `crate::app` die Binary-internen UI-Module und
 //! bleiben daher Binary-exklusiv.
 
+pub mod fonts;
 pub mod geometry;
 pub mod history;
+pub mod merge;
 pub mod model;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod pdf_import;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod printing;
 pub mod store;
+pub mod text_layout;

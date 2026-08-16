@@ -96,3 +96,64 @@ Die folgenden drei Punkte waren im Code-Stand ≤ v0.4.1 offen und sind in
 | 18. Juli 2026 | Manuell (Code-Review) | Phase-0-Fixes | SW-001/002/003 als in `main` gefixt bestätigt |
 
 Ein formelles externes Audit hat nicht stattgefunden.
+
+---
+
+## Backend-Schwachstellen (gefunden 14.08.2026, behoben in v0.6.0)
+
+Die bisherigen Einträge SW-001 bis SW-003 betrafen ausschließlich den
+Rust-Client. Das PHP-Backend unter `web/` war nie geprüft worden. Ein Review
+förderte vier Befunde zutage, von denen drei kritisch waren.
+
+### SW-004 — Token-Schutz war vollständig umgehbar · KRITISCH · behoben
+
+`web/index.php` prüfte den Token nur im API-Endpunkt `?get=<slug>`. Der
+„hübsche" Pfad `/<slug>` — sowohl die Roh-JSON-Auslieferung als auch das
+Einbetten in die HTML-Seite — prüfte gar nichts.
+
+```
+curl https://boxdoc.at/geheimdoc     # lieferte den Inhalt im Klartext
+```
+
+**Fix:** `has_access()` wird auf allen drei Lesepfaden aufgerufen.
+
+### SW-005 — `?list=1` gab alle Dokumente preis · KRITISCH · behoben
+
+Der Endpunkt listete ohne jede Authentifizierung die Slugs **aller**
+Dokumente aller Nutzer auf, inklusive der token-geschützten. Zusammen mit
+SW-004 war damit jedes Dokument auf dem Server les- und (bei fehlendem
+Token) überschreibbar.
+
+**Fix:** Es werden nur Dokumente gelistet, auf die der Aufrufer Zugriff hat.
+Zusätzlich bekommen neue Dokumente jetzt standardmäßig einen Token —
+öffentlich nur noch auf ausdrückliches `?public=1`.
+
+### SW-006 — Stored XSS beim Einbetten · KRITISCH · behoben
+
+Der Dokumentinhalt wurde unescaped in ein `<script type="application/json">`
+injiziert. Ein Textelement mit `</script><script>…</script>` brach aus dem
+Tag aus und führte beliebiges JavaScript im Kontext der Seite aus.
+
+**Fix:** `str_replace('</', '<\/', $doc_json)`. Innerhalb von JSON ist `<\/`
+äquivalent zu `</`, der Inhalt bleibt also unverändert.
+
+### SW-007 — Denial of Service · behoben
+
+- `stream.php` hielt einen PHP-Worker **120 Sekunden** pro Verbindung. Auf
+  typischem Shared Hosting (5–10 Worker) genügten ein Dutzend Tabs, um die
+  gesamte Seite lahmzulegen. → Lebensdauer auf 25 s gesenkt; `EventSource`
+  reconnectet ohnehin automatisch.
+- `POST ?new=1` hatte kein Rate-Limit; jedes Dokument darf 10 MB groß sein.
+  → 20 neue Dokumente pro IP und Stunde.
+
+### Verbleibende Härtungsempfehlungen
+
+- **Token in der URL** (`?t=…`) landet in Server-Logs, Referrern und der
+  Browser-History. Der Header `X-BoxDoc-Token` ist implementiert und wird
+  bevorzugt; der Query-Parameter bleibt aus Kompatibilitätsgründen erlaubt.
+  Bei einem Bruch der Abwärtskompatibilität sollte er entfallen.
+- `docs/` ist per `.htaccess` gesperrt. Das greift nur unter Apache mit
+  aktiviertem `AllowOverride`. Auf nginx muss die Sperre in der
+  Server-Konfiguration nachgezogen werden.
+- Es gibt keine Zugriffs-Protokollierung. Für eine Mehrbenutzer-Instanz wäre
+  ein Audit-Log sinnvoll.

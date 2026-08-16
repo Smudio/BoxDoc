@@ -25,10 +25,16 @@ use crate::store::{FontStore, ImageStore};
 
 /// Events, die vom Hintergrund-Task an den ui-Loop gesendet werden.
 pub enum WebEvent {
-    /// Initiales Laden oder Polling hat neuen Inhalt geliefert.
-    Loaded(String),
-    /// Speichern war erfolgreich.
-    Saved,
+    /// Initiales Laden — der Stand wird unverändert übernommen.
+    Loaded { json: String, version: u64 },
+    /// Der Server hat einen neueren Stand. Muss mit dem lokalen Stand
+    /// **zusammengeführt** werden, nicht ihn ersetzen.
+    RemoteChanged { json: String, version: u64 },
+    /// Speichern war erfolgreich. `version` ist der neue Serverstand.
+    Saved { version: u64 },
+    /// Speichern abgelehnt, weil jemand anders zuerst war (HTTP 409).
+    /// Der mitgelieferte Serverstand wird gemergt und erneut gespeichert.
+    SaveConflict { json: String, version: u64 },
     /// Ein Fehler ist aufgetreten.
     Error(String),
 }
@@ -56,6 +62,18 @@ pub struct WebDoc {
     pub last_known_modified: f64,
     /// Hash des zuletzt geladenen Inhalts — zur Änderungserkennung beim Pollen.
     pub last_content_hash: u64,
+    /// Serverseitige Versionsnummer des zuletzt gesehenen Standes.
+    ///
+    /// Grundlage der optimistischen Nebenläufigkeit: Beim Speichern wird sie
+    /// mitgeschickt. Hat der Server inzwischen eine höhere Version, lehnt er
+    /// mit 409 ab, statt fremde Arbeit zu überschreiben.
+    pub version: u64,
+    /// Der zuletzt mit dem Server abgeglichene Dokumentstand.
+    ///
+    /// Das ist die `base` des Drei-Wege-Merges — ohne sie ließe sich nicht
+    /// unterscheiden, ob ein Unterschied eine eigene Änderung oder eine fremde
+    /// ist.
+    pub base_doc: Option<Document>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -115,6 +133,8 @@ impl WebDoc {
             base,
             last_known_modified: 0.0,
             last_content_hash: 0,
+            version: 0,
+            base_doc: None,
         })
     }
 
@@ -156,6 +176,8 @@ impl WebDoc {
             base,
             last_known_modified: 0.0,
             last_content_hash: 0,
+            version: 0,
+            base_doc: None,
         })
     }
 
@@ -224,42 +246,85 @@ impl WebDoc {
     /// Bevorzugt: eingebettetes JSON aus der HTML-Seite lesen (sofort da,
     /// kein extra Fetch). Fallback: fetch an die API.
     pub fn spawn_initial_load(&self) {
-        // 1. Eingebettetes JSON aus <script id="boxdoc-content"> lesen
+        // 1. Eingebettetes JSON aus <script id="boxdoc-content"> lesen.
+        //    Version 0, damit der erste Poll die echte Version nachzieht.
         if let Some(embedded) = read_embedded_content() {
             if !embedded.trim().is_empty() && embedded.trim() != "{}" {
-                push_event(WebEvent::Loaded(embedded));
+                push_event(WebEvent::Loaded {
+                    json: embedded,
+                    version: 0,
+                });
                 return;
             }
         }
-        // 2. Fallback: per fetch laden
+        // 2. Fallback: per fetch laden, inklusive Version.
         let url = self.api_get_url();
+        let meta_url = format!("{}/api.php?meta={}&t={}", self.base, self.slug, self.token);
         wasm_bindgen_futures::spawn_local(async move {
+            let version = fetch_text(&meta_url)
+                .await
+                .ok()
+                .and_then(|t| serde_json::from_str::<VersionResponse>(&t).ok())
+                .map(|m| m.version)
+                .unwrap_or(0);
             match fetch_text(&url).await {
-                Ok(text) => push_event(WebEvent::Loaded(text)),
+                Ok(text) => push_event(WebEvent::Loaded {
+                    json: text,
+                    version,
+                }),
                 Err(e) => push_event(WebEvent::Error(format!("Laden fehlgeschlagen: {}", e))),
             }
         });
     }
 
-    /// Startet einen Polling-Request. Bei Änderung wird `Loaded` gepusht.
+    /// Fragt beim Server nur die **Versionsnummer** ab und lädt das Dokument
+    /// ausschließlich dann, wenn es sich tatsächlich geändert hat.
+    ///
+    /// Vorher wurde alle 2 Sekunden das komplette Dokument samt aller
+    /// base64-Bilder geladen — bei einem 3-MB-Dokument rund 1,5 MB/s pro
+    /// offenem Tab. Jetzt kostet ein unveränderter Poll ein paar Dutzend Bytes.
     pub fn spawn_poll(&self) {
-        let url = self.api_get_url();
-        let known_hash = self.last_content_hash;
+        let meta_url = format!(
+            "{}/api.php?meta={}&t={}",
+            self.base, self.slug, self.token
+        );
+        let get_url = self.api_get_url();
+        let known_version = self.version;
+
         wasm_bindgen_futures::spawn_local(async move {
-            match fetch_text(&url).await {
-                Ok(text) => {
-                    if hash_str(&text) != known_hash {
-                        push_event(WebEvent::Loaded(text));
-                    }
-                }
-                Err(_e) => { /* Polling-Fehler still ignorieren, nächster Versuch später */ }
+            let Ok(meta_text) = fetch_text(&meta_url).await else {
+                // Polling-Fehler still ignorieren, nächster Versuch später.
+                return;
+            };
+            let Ok(meta) = serde_json::from_str::<VersionResponse>(&meta_text) else {
+                return;
+            };
+            if meta.version <= known_version {
+                return; // nichts Neues
+            }
+            // Erst jetzt das eigentliche Dokument holen.
+            if let Ok(text) = fetch_text(&get_url).await {
+                push_event(WebEvent::RemoteChanged {
+                    json: text,
+                    version: meta.version,
+                });
             }
         });
     }
 
-    /// Startet einen asynchronen PUT. Bei Erfolg wird `Saved` gepusht.
-    pub fn spawn_save(&self, doc: Document, images: ImageStore, fonts: FontStore) {
-        let url = self.api_put_url();
+    /// Startet einen asynchronen PUT mit `If-Match`-Semantik.
+    ///
+    /// Der Server akzeptiert nur, wenn die mitgeschickte Version noch die
+    /// aktuelle ist. Andernfalls antwortet er mit 409 und dem neueren Stand —
+    /// der wird dann gemergt statt überschrieben.
+    pub fn spawn_save(
+        &self,
+        doc: Document,
+        images: ImageStore,
+        fonts: FontStore,
+        version: u64,
+    ) {
+        let url = format!("{}&version={}", self.api_put_url(), version);
         wasm_bindgen_futures::spawn_local(async move {
             let body = match serialize_project(&doc, &images, &fonts) {
                 Ok(b) => b,
@@ -269,16 +334,38 @@ impl WebDoc {
                 }
             };
             match put_text(&url, &body).await {
-                Ok(_) => {
-                    // Hash updaten, damit der nächste Poll unsere eigene Save
-                    // nicht als externe Änderung fehlinterpretiert.
-                    let _ = body; // hash wird im Haupt-Thread gesetzt
-                    push_event(WebEvent::Saved);
+                Ok(PutOutcome::Ok { version }) => {
+                    push_event(WebEvent::Saved { version });
+                }
+                Ok(PutOutcome::Conflict { json, version }) => {
+                    push_event(WebEvent::SaveConflict { json, version });
                 }
                 Err(e) => push_event(WebEvent::Error(format!("Speichern fehlgeschlagen: {}", e))),
             }
         });
     }
+}
+
+/// Antwort des `?meta=`-Endpunkts — bewusst winzig.
+#[derive(Serialize, Deserialize)]
+struct VersionResponse {
+    version: u64,
+}
+
+/// Antwort auf einen erfolgreichen PUT.
+#[derive(Serialize, Deserialize)]
+struct PutResponse {
+    #[serde(default)]
+    version: u64,
+}
+
+/// Ergebnis eines PUT-Versuchs.
+pub enum PutOutcome {
+    /// Gespeichert; `version` ist der neue Serverstand.
+    Ok { version: u64 },
+    /// Abgelehnt (409) — jemand anders war schneller. `json` ist der aktuelle
+    /// Serverstand, den der Client jetzt einmergen muss.
+    Conflict { json: String, version: u64 },
 }
 
 // -----------------------------------------------------------------------------
@@ -433,7 +520,7 @@ async fn fetch_text(url: &str) -> Result<String, String> {
     Ok(text)
 }
 
-async fn put_text(url: &str, body: &str) -> Result<(), String> {
+async fn put_text(url: &str, body: &str) -> Result<PutOutcome, String> {
     let window = web_sys::window().ok_or("kein window")?;
     let mut opts = RequestInit::new();
     opts.method("PUT");
@@ -448,10 +535,48 @@ async fn put_text(url: &str, body: &str) -> Result<(), String> {
         .map_err(|e| format!("fetch: {:?}", e))?;
     let resp: Response = resp_val.dyn_into().map_err(|e| format!("cast: {:?}", e))?;
 
-    if !resp.ok() {
-        return Err(format!("HTTP {}", resp.status()));
+    let status = resp.status();
+    let text = JsFuture::from(resp.text().map_err(|e| format!("text: {:?}", e))?)
+        .await
+        .map_err(|e| format!("text await: {:?}", e))?
+        .as_string()
+        .unwrap_or_default();
+
+    // 409 = jemand anders hat zwischenzeitlich gespeichert. Der Body enthält
+    // den aktuellen Serverstand, damit der Client sofort mergen kann, ohne
+    // einen weiteren Roundtrip.
+    if status == 409 {
+        let version = serde_json::from_str::<ConflictResponse>(&text)
+            .map(|c| c.version)
+            .unwrap_or(0);
+        let doc_json = serde_json::from_str::<ConflictResponse>(&text)
+            .ok()
+            .and_then(|c| c.document)
+            .unwrap_or(text);
+        return Ok(PutOutcome::Conflict {
+            json: doc_json,
+            version,
+        });
     }
-    Ok(())
+
+    if !(200..300).contains(&status) {
+        return Err(format!("HTTP {}", status));
+    }
+
+    let version = serde_json::from_str::<PutResponse>(&text)
+        .map(|r| r.version)
+        .unwrap_or(0);
+    Ok(PutOutcome::Ok { version })
+}
+
+/// Antwort des Servers bei einem Versionskonflikt (HTTP 409).
+#[derive(Serialize, Deserialize)]
+struct ConflictResponse {
+    #[serde(default)]
+    version: u64,
+    /// Der aktuelle Serverstand als JSON-String.
+    #[serde(default)]
+    document: Option<String>,
 }
 
 /// Liest das eingebettete JSON aus der Seite, falls von PHP injiziert.

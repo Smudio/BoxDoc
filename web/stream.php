@@ -20,14 +20,21 @@ header('Access-Control-Allow-Origin: *');
 
 // Konfiguration
 const DOCS_DIR = __DIR__ . '/docs/';
-const POLL_INTERVAL_US = 100_000; // 100 ms
-const MAX_LIFETIME_S = 120;       // Request-Timeout Schutz
+const POLL_INTERVAL_US = 250_000; // 250 ms
+// Lebensdauer bewusst kurz: Jede offene SSE-Verbindung belegt einen
+// PHP-Worker vollstaendig. Auf typischem Shared Hosting gibt es davon nur eine
+// Handvoll — bei 120 s Haltezeit genuegen ein Dutzend Tabs, um die ganze Seite
+// lahmzulegen. EventSource reconnectet automatisch, der kuerzere Zyklus faellt
+// also nicht auf.
+const MAX_LIFETIME_S = 25;
 
 $slug = $_GET['slug'] ?? '';
-$token = $_GET['t'] ?? '';
+// Token bevorzugt aus dem Header; EventSource kann allerdings keine Header
+// setzen, deshalb bleibt der Query-Parameter hier zulaessig.
+$token = (string) ($_SERVER['HTTP_X_BOXDOC_TOKEN'] ?? $_GET['t'] ?? '');
 
-// Slug validieren
-if (!preg_match('/^[a-z0-9]{8,32}$/', $slug)) {
+// Slug validieren — identische Regel wie in index.php.
+if (!preg_match('/^[a-z0-9]{4,32}$/', $slug)) {
     http_response_code(400);
     echo "event: error\ndata: invalid slug\n\n";
     exit;
@@ -41,7 +48,10 @@ if (!is_file($meta_path)) {
     exit;
 }
 $meta = json_decode((string) file_get_contents($meta_path), true);
-if (!hash_equals((string) ($meta['token'] ?? ''), (string) $token)) {
+$required = (string) ($meta['token'] ?? '');
+// Oeffentliche Dokumente (kein Token hinterlegt) sind frei lesbar; geschuetzte
+// verlangen exakte Uebereinstimmung.
+if ($required !== '' && !hash_equals($required, $token)) {
     http_response_code(403);
     echo "event: error\ndata: invalid token\n\n";
     exit;

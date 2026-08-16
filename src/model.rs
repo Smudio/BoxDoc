@@ -477,6 +477,8 @@ pub enum ElementKind {
     Rectangle,
     Line,
     Ellipse,
+    /// Freier Streckenzug (siehe `Element::points`).
+    Path,
 }
 
 /// Ein einzelnes Objekt auf der Seite: Text oder Bild.
@@ -512,6 +514,16 @@ pub struct Element {
     pub valign: VAlign,
     /// Einzug jeder Zeile in Punkten.
     pub indent: f32,
+    /// Nur für `Text`: Wächst die Box automatisch mit dem Inhalt?
+    ///
+    /// `true` (Standard): `h` wird bei jedem Reflow aus dem umgebrochenen Text
+    /// berechnet. `valign` hat dann keine Wirkung, weil die Box exakt so hoch
+    /// ist wie ihr Inhalt.
+    ///
+    /// `false`: Der Nutzer hat die Höhe selbst festgelegt (Unterkante gezogen).
+    /// Der Text wird innerhalb dieser festen Höhe gemäß `valign` ausgerichtet.
+    #[serde(default = "default_true")]
+    pub auto_height: bool,
 
     // --- Bild ---
     pub crop: Crop,
@@ -532,8 +544,30 @@ pub struct Element {
     /// Eckradius für Rechtecke.
     #[serde(default)]
     pub corner_radius: f32,
+
+    // --- Pfad ---
+    /// Stützpunkte eines freien Streckenzugs, **normalisiert auf die Box**:
+    /// `[0,0]` ist die linke obere Ecke, `[1,1]` die rechte untere.
+    ///
+    /// Warum normalisiert und nicht in Punkten? Weil damit Verschieben,
+    /// Skalieren und Drehen eines Pfads dieselben Felder benutzen wie bei
+    /// jeder anderen Form (`x`,`y`,`w`,`h`,`rotation`) — die Stützpunkte
+    /// bleiben unangetastet. Absolute Punkte müssten bei jedem Ziehen
+    /// mitgeführt werden, und jeder vergessene Pfad wäre ein stiller Fehler.
+    ///
+    /// Nur für `ElementKind::Path` belegt; Kurven werden beim Import in
+    /// Strecken aufgelöst.
+    #[serde(default)]
+    pub points: Vec<[f32; 2]>,
+    /// Ist der Streckenzug geschlossen (Fläche) oder offen (Linienzug)?
+    /// Ein offener Pfad wird nie gefüllt.
+    #[serde(default)]
+    pub path_closed: bool,
 }
 
+fn default_true() -> bool {
+    true
+}
 fn default_fill_color() -> [u8; 4] {
     [80, 140, 220, 60]
 }
@@ -568,6 +602,7 @@ impl Element {
             align: TextAlign::Left,
             valign: VAlign::default(),
             indent: 0.0,
+            auto_height: true,
             crop: Crop::default(),
             image_w: 0,
             image_h: 0,
@@ -575,6 +610,8 @@ impl Element {
             stroke_width: default_stroke_width(),
             stroke_color: default_stroke_color(),
             corner_radius: 0.0,
+            points: Vec::new(),
+            path_closed: false,
         }
     }
 
@@ -602,6 +639,7 @@ impl Element {
             align: TextAlign::Left,
             valign: VAlign::default(),
             indent: 0.0,
+            auto_height: true,
             crop: Crop::default(),
             image_w: w as u32,
             image_h: h as u32,
@@ -609,6 +647,8 @@ impl Element {
             stroke_width: default_stroke_width(),
             stroke_color: default_stroke_color(),
             corner_radius: 0.0,
+            points: Vec::new(),
+            path_closed: false,
         }
     }
 
@@ -631,6 +671,7 @@ impl Element {
             align: TextAlign::Left,
             valign: VAlign::default(),
             indent: 0.0,
+            auto_height: true,
             crop: Crop::default(),
             image_w: 0,
             image_h: 0,
@@ -638,6 +679,8 @@ impl Element {
             stroke_width: default_stroke_width(),
             stroke_color: default_stroke_color(),
             corner_radius: 0.0,
+            points: Vec::new(),
+            path_closed: false,
         }
     }
 
@@ -660,6 +703,7 @@ impl Element {
             align: TextAlign::Left,
             valign: VAlign::default(),
             indent: 0.0,
+            auto_height: true,
             crop: Crop::default(),
             image_w: 0,
             image_h: 0,
@@ -667,6 +711,8 @@ impl Element {
             stroke_width: 2.0,
             stroke_color: [40, 40, 40, 255],
             corner_radius: 0.0,
+            points: Vec::new(),
+            path_closed: false,
         }
     }
 
@@ -689,6 +735,7 @@ impl Element {
             align: TextAlign::Left,
             valign: VAlign::default(),
             indent: 0.0,
+            auto_height: true,
             crop: Crop::default(),
             image_w: 0,
             image_h: 0,
@@ -696,7 +743,55 @@ impl Element {
             stroke_width: default_stroke_width(),
             stroke_color: default_stroke_color(),
             corner_radius: 0.0,
+            points: Vec::new(),
+            path_closed: false,
         }
+    }
+
+    /// Baut ein Pfad-Element aus **absoluten Seitenkoordinaten** (pt).
+    ///
+    /// Die Box wird als Hüllbox der Punkte gesetzt, die Punkte selbst darauf
+    /// normalisiert. Ein Pfad ohne Ausdehnung in einer Richtung (etwa ein
+    /// senkrechter Linienzug) behält dort eine Mindestbreite, damit die
+    /// Normalisierung nicht durch null teilt und der Pfad greifbar bleibt.
+    pub fn new_path(id: u64, points: &[(f32, f32)], closed: bool) -> Self {
+        /// Kleinste Boxkante in pt — darunter wäre der Pfad nicht mehr
+        /// anklickbar und die Normalisierung numerisch instabil.
+        const MIN_EXTENT: f32 = 0.5;
+
+        let mut el = Element::new_rectangle(id, 0.0, 0.0);
+        el.kind = ElementKind::Path;
+        el.path_closed = closed;
+        el.fill_color = [0, 0, 0, 0];
+        el.stroke_color = [40, 40, 40, 255];
+        el.stroke_width = 1.0;
+
+        if points.is_empty() {
+            el.w = MIN_EXTENT;
+            el.h = MIN_EXTENT;
+            return el;
+        }
+
+        let (mut min_x, mut min_y) = points[0];
+        let (mut max_x, mut max_y) = points[0];
+        for (x, y) in points {
+            min_x = min_x.min(*x);
+            min_y = min_y.min(*y);
+            max_x = max_x.max(*x);
+            max_y = max_y.max(*y);
+        }
+        let w = (max_x - min_x).max(MIN_EXTENT);
+        let h = (max_y - min_y).max(MIN_EXTENT);
+
+        el.x = min_x;
+        el.y = min_y;
+        el.w = w;
+        el.h = h;
+        el.points = points
+            .iter()
+            .map(|(x, y)| [(x - min_x) / w, (y - min_y) / h])
+            .collect();
+        el
     }
 }
 

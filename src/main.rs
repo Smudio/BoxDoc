@@ -7,6 +7,7 @@ mod fonts;
 mod geometry;
 mod history;
 mod io;
+mod merge;
 mod model;
 #[cfg(not(target_arch = "wasm32"))]
 mod odt;
@@ -16,6 +17,7 @@ mod pdf_import;
 mod printing;
 mod settings_io;
 mod store;
+mod text_layout;
 mod themes;
 #[cfg(target_arch = "wasm32")]
 mod web_sync;
@@ -27,6 +29,10 @@ fn main() -> eframe::Result<()> {
             .with_title("BoxDoc")
             .with_inner_size([1100.0, 760.0])
             .with_min_inner_size([640.0, 420.0]),
+        // Der Close-Wunsch wird nicht sofort ausgeführt, sondern erst an die App
+        // gemeldet. So kann `EditorApp` bei ungespeicherten Änderungen
+        // nachfragen, statt die Arbeit kommentarlos zu verwerfen.
+        // Siehe `app.rs` → Close-Guard in `ui()`.
         ..Default::default()
     };
     eframe::run_native(

@@ -3,7 +3,7 @@
 BoxDoc ist ein nativer, KI-freundlicher Dokumenten-Editor (Rust + egui).
 Diese Datei ist die einzige verbindliche Quelle für Status und Planung.
 
-> Letztes Update: 18. Juli 2026 · Aktuelle Version: **v0.4.2-dev** (Cargo.toml)
+> Letztes Update: 14. August 2026 · Aktuelle Version: **v0.6.0** (Cargo.toml)
 
 ---
 
@@ -21,7 +21,9 @@ Diese Datei ist die einzige verbindliche Quelle für Status und Planung.
 | WASM | Gerüst: `main.rs:46-77`, `index.html`, `Trunk.toml`, 18 `cfg`-Attribute; File-I/O via Browser-API | `src/io.rs:361` (`web_impl`) |
 | Papier | A3, A4, A5, Letter, Legal · Portrait/Landscape · Mehrere Seiten | `src/model.rs` |
 
-**Offen (bekannt):** keine Ellipse/Kreis, kein PDF-Import, kein responsives Mobile, keine Tests/CI.
+**Offen (bekannt):** kein responsives Mobile, keine CI, ODT-Export ohne Shapes/Textformatierung,
+Text-Rotation wird nicht gerendert, keine Toolbar, WYSIWYG-Textbearbeitung fehlt.
+Bestandsaufnahme: [`REVIEW.md`](REVIEW.md).
 
 ---
 
@@ -31,7 +33,11 @@ Diese Datei ist die einzige verbindliche Quelle für Status und Planung.
 2. **AI-first** — die `.boxdoc`-Datei bleibt die einzige AI-Schnittstelle. Jede Phase muss file-basiert funktionieren.
 3. **Simple first** — pro Phase nur das Nötigste. WebRTC, Plugin-System, Auto-Save sind bewusst **nicht** Teil der Roadmap.
 4. **Server-optional** — BoxDoc läuft lokal ohne jeden Server. Server-Variante (Phase 4) ist additiv.
-5. **Keine Tests als Blocker** — Tests sind nicht Teil der Definition-of-Done der Phasen. Sie kommen später, wenn sich das Modell stabilisiert hat.
+5. **Tests gehören zur Definition-of-Done** — *geändert am 14.08.2026.* Die frühere Regel
+   ("Tests kommen später") war die Ursache für die Hälfte der in `REVIEW.md` dokumentierten
+   Fehler: nie speichernder Auto-Save, nicht undo-barer Text, PDF ohne Zeilenumbruch. Jeder
+   davon wäre von einem trivialen Test gefangen worden. Neue Logik in `model`, `history`,
+   `merge`, `text_layout` und `io` braucht ab sofort einen Test.
 
 ---
 
@@ -204,3 +210,77 @@ Später, nicht zeitkritisch:
 - **Tests als DoD** — werden erst in Phase 7 relevant.
 - **Plugin-System** — kann folgen, wenn sich das Modell stabilisiert hat.
 - **CI/CD-Pipeline** — folgt mit Phase 7; aktuell manueller Build.
+
+---
+
+## Phase 8 — Zuverlässigkeit & Multiuser · v0.6.0 ✅ erledigt
+
+**Ziel:** Die in `REVIEW.md` dokumentierten Datenverlust-Pfade schließen und
+gleichzeitiges Bearbeiten korrekt lösen.
+
+### Datenverlust (Sprint 1)
+- [x] Close-Guard: Fenster schließen bei `modified` fragt nach
+      (`app.rs` → `PendingAction`, `show_unsaved_dialog`)
+- [x] Neu/Öffnen/Datei-Browser laufen über `request_action`
+- [x] `Strg+S`, `Strg+Umschalt+S`, `Strg+O`, `Strg+N`, `Strg+P`,
+      `Strg+A`, `Strg+D`, `Strg+X` (`app.rs` → `handle_shortcuts`)
+- [x] Shortcuts im Menü sichtbar (`menu_entry`)
+- [x] Neues Menü „Bearbeiten" mit ausgegrautem Undo/Redo
+- [x] Textbearbeitung ist undo-bar (`canvas.rs`, Snapshot vor dem Commit)
+- [x] Pfeiltasten-Verschieben ist undo-bar, als ein Schritt zusammengefasst
+- [x] Focus-Guards: `Entf`, `L`, Pfeiltasten und Strg+C/V wirken nicht mehr
+      in Textfeldern — behebt u. a. „Strg+V im JSON-Editor tut nichts"
+- [x] `panic!` im PDF-Export durch `Result` ersetzt (`printing.rs`)
+- [x] Alle Settings werden persistiert (vorher nur Theme + Panel-Position)
+- [x] Doppeltes „Rahmenstärke"-Bedienelement entfernt
+
+### PDF / WYSIWYG (Sprint 2)
+- [x] `src/text_layout.rs` — **ein** Layout-Pfad für Canvas und PDF
+- [x] Zeilenumbruch im PDF (vorher nur `\n`-Split)
+- [x] Exakte Zeilenbreiten statt `Zeichen × 0,5 × Größe`
+- [x] Ausrichtung wirkt je Zeile, nicht auf den Block
+- [x] `corner_radius` wird auf dem Canvas gerendert (war `let _ = radius`)
+- [x] Modell-Mutation aus `draw_element` in expliziten Reflow-Schritt gezogen
+- [x] `auto_height` im Modell — Auto-Höhe und `valign` schließen sich nicht
+      mehr stillschweigend gegenseitig aus
+
+### Multiuser (Sprint 3)
+- [x] `src/merge.rs` — Drei-Wege-Merge auf Element-Ebene
+- [x] Optimistische Nebenläufigkeit über `version` + HTTP 409
+- [x] Konflikt liefert den Serverstand gleich mit (kein zweiter Roundtrip)
+- [x] Polling über `?meta=` statt Volldokument
+- [x] Auto-Save-Debounce repariert (feuerte nie)
+- [x] `base_doc` als gemeinsame Merge-Basis
+
+### Backend-Sicherheit (Sprint 4)
+- [x] `has_access()` auf dem `/<slug>`-Pfad und bei der HTML-Auslieferung
+- [x] `?list=1` zeigt nur zugängliche Dokumente
+- [x] XSS beim JSON-Inject behoben (`</` → `<\/`)
+- [x] Token per `X-BoxDoc-Token`-Header
+- [x] Neue Dokumente sind standardmäßig token-geschützt
+- [x] Rate-Limit auf `?new=1`; atomares Schreiben mit eindeutigem Temp-Namen
+- [x] `stream.php`: Lebensdauer 120 s → 25 s (Worker-Erschöpfung)
+
+### Formen-Geometrie (Nachtrag)
+- [x] `geometry.rs` — Umrisse einmalig in Seitenkoordinaten
+- [x] Linien drehen um ihren Mittelpunkt (PDF drehte um den Startpunkt)
+- [x] Rechteck-Rotationsrichtung im PDF korrigiert
+- [x] Alpha wird im PDF berücksichtigt (`blend_over_white`)
+- [x] ~5 200 Zeichen duplizierte Formenlogik entfernt
+
+### Tests
+- [x] 92 Tests: `merge`, `text_layout`, `geometry`, `history`, Dateiformat,
+      PDF-Roundtrip, Canvas/PDF-Deckungsgleichheit
+- [x] PDF-Test liest das erzeugte PDF mit pdfium zurück und vergleicht den Text
+
+---
+
+## Phase 9 — Bedienung (offen)
+
+- [ ] Toolbar mit den sechs Kernwerkzeugen
+- [ ] WYSIWYG-Textbearbeitung (Font/Größe/Farbe/Ausrichtung im Overlay)
+- [ ] Text-Rotation rendern + Rotationsgriff für alle Element-Typen
+- [ ] ODT-Export: Rechteck/Linie und Textformatierung
+- [ ] Leere Textelemente nach `Esc` aufräumen
+- [ ] 48 deprecated egui-APIs migrieren; CI mit `-D warnings`
+- [ ] `app.rs` / `canvas.rs` aufteilen (Phase 7d/e)

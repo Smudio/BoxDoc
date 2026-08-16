@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use egui::{Align, Color32, Context, Frame, Layout, Sense, Stroke, Vec2};
+use egui::{Align, Color32, Context, Frame, Layout, Vec2};
 use serde::Deserialize;
 
 use crate::canvas::show_canvas;
@@ -69,6 +69,10 @@ impl BBoxAnchor {
 pub struct View {
     pub zoom: f32,
     pub pan: Vec2,
+    /// Zeitpunkt des letzten Seitenwechsels durch Scrollen (egui-Zeit in s).
+    /// Sperrt kurz weitere Wechsel, damit eine Mausrad-Raste nicht mehrere
+    /// Seiten überspringt.
+    pub last_page_flip: f64,
 }
 
 impl Default for View {
@@ -77,6 +81,7 @@ impl Default for View {
         View {
             zoom: 1.0,
             pan: Vec2::new(0.0, 24.0),
+            last_page_flip: f64::NEG_INFINITY,
         }
     }
 }
@@ -174,6 +179,57 @@ struct ListDoc {
     protected: bool,
 }
 
+/// Eine Aktion, die ungespeicherte Änderungen verwerfen würde und daher erst
+/// nach Bestätigung ausgeführt wird.
+///
+/// Der gesamte Zweck dieses Typs ist es, zu verhindern, dass Nutzerarbeit
+/// kommentarlos verloren geht. Jede Aktion, die `doc` ersetzt, muss über
+/// `request_action` laufen — niemals direkt.
+#[derive(Clone, PartialEq)]
+pub enum PendingAction {
+    /// Neues, leeres Dokument.
+    NewDocument,
+    /// Datei-Dialog zum Öffnen.
+    OpenDialog,
+    /// Konkrete Datei öffnen (Datei-Browser).
+    OpenFile(PathBuf),
+    /// Anwendung beenden.
+    Quit,
+}
+
+impl PendingAction {
+    /// Beschriftung für den Bestätigungsdialog.
+    fn label(&self) -> &'static str {
+        match self {
+            PendingAction::NewDocument => "Neues Dokument anlegen",
+            PendingAction::OpenDialog | PendingAction::OpenFile(_) => "Anderes Dokument öffnen",
+            PendingAction::Quit => "BoxDoc beenden",
+        }
+    }
+}
+
+/// Die drei Ausgänge des „Ungespeicherte Änderungen"-Dialogs.
+enum UnsavedDecision {
+    /// Speichern, dann die geparkte Aktion ausführen.
+    SaveThenContinue,
+    /// Änderungen verwerfen und fortfahren.
+    Discard,
+    /// Nichts tun, Dokument unverändert lassen.
+    Cancel,
+}
+
+/// Welche Seiten-Führungslinie(n) beim Ziehen aktiv sind (Snap-Visual).
+/// Werte sind Seiten-Koordinaten in pt.
+#[derive(Clone, Copy, Default)]
+pub struct SnapLines {
+    /// Vertikale Linie (Seiten-X), an die eine Außenkante oder der
+    /// horizontale Mittelpunkt eines Objekts andockt.
+    pub vertical: Option<f32>,
+    /// Horizontale Linie (Seiten-Y), an die eine Außenkante oder der
+    /// vertikale Mittelpunkt eines Objekts andockt.
+    pub horizontal: Option<f32>,
+}
+
 pub struct EditorApp {
     pub doc: Document,
     pub page_index: usize,
@@ -209,8 +265,11 @@ pub struct EditorApp {
     pub clip_origins: Vec<(f32, f32)>,
     /// Paste-Modus aktiv: Preview folgt dem Cursor, Klick platziert.
     pub pasting: bool,
-    /// Snap-Visual: vertikale Mittellinie aktiv (beim Drag).
-    pub snap_center: bool,
+    /// Snap-Visual: vertikale/horizontale Führungslinie(n) der Seite,
+    /// an die mindestens eine Außenkante oder der Mittelpunkt eines
+    /// gezogenen Objekts gerade andockt. Wert = Seitenkoordinate in pt;
+    /// `None` = keine aktive Linie auf der jeweiligen Achse.
+    pub snap_lines: SnapLines,
     /// Linien-Zeichenmodus: None oder Some(start_point) wenn erster Punkt gesetzt.
     pub line_drawing: Option<(f32, f32)>,
     /// Theme-Fade: Quell-Thema.
@@ -228,6 +287,9 @@ pub struct EditorApp {
     pub history: crate::history::History,
     /// Flag: Snapshot beim nächsten DragValue-Focus-Gain machen.
     pub prop_snapshot_pending: bool,
+    /// Zeitpunkt des letzten Pfeiltasten-Verschiebens (egui-time). Dient dazu,
+    /// eine Serie von Tastendrücken zu EINEM Undo-Schritt zusammenzufassen.
+    pub last_nudge_time: f64,
 
     // --- JSON-Editor (Rohtext-Ansicht des Dokuments) ---
     /// JSON-Editor-Fenster sichtbar?
@@ -261,15 +323,40 @@ pub struct EditorApp {
     /// Konflikt-Dialog anzeigen.
     pub show_conflict_dialog: bool,
 
+    // --- Schutz vor Datenverlust ---
+    /// Aktion, die auf die Bestätigung "ungespeicherte Änderungen verwerfen?"
+    /// wartet. `None` = kein Dialog offen.
+    pub pending_action: Option<PendingAction>,
+    /// Wurde das Beenden bereits bestätigt? Verhindert, dass der Close-Guard
+    /// den Schließvorgang ein zweites Mal abfängt.
+    pub quit_confirmed: bool,
+    /// Die App möchte das Fenster schließen (nach bestätigtem Beenden).
+    /// Wird im nächsten `ui()` in ein `ViewportCommand::Close` übersetzt.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub close_requested_by_app: bool,
+
     // --- Web-Sync (WASM-only, AI-Schnittstelle für den Browser) ---
     #[cfg(target_arch = "wasm32")]
     pub web_doc: Option<crate::web_sync::WebDoc>,
     /// Zeitstempel des letzten Polls (Sekunden, egui-time).
     #[cfg(target_arch = "wasm32")]
     pub web_last_poll: f64,
-    /// Zeitstempel der letzten eigenen Änderung (für Auto-Save-Debounce).
+    /// Zeitpunkt der **ersten** Änderung seit dem letzten Speichern.
+    ///
+    /// Bewusst nicht „letzte Änderung": Ein in jedem Frame erneuertes
+    /// Zeitfenster läuft nie ab (genau daran scheiterte die frühere Fassung —
+    /// die Web-Version speicherte nie).
     #[cfg(target_arch = "wasm32")]
-    pub web_last_modified: f64,
+    pub web_dirty_at: Option<f64>,
+    /// Kam während eines laufenden PUT eine weitere Änderung dazu?
+    #[cfg(target_arch = "wasm32")]
+    pub web_dirty_since_save: bool,
+    /// Wurde das Dokument initial geladen?
+    #[cfg(target_arch = "wasm32")]
+    pub web_initial_loaded: bool,
+    /// True, wenn gerade ein initialer GET läuft.
+    #[cfg(target_arch = "wasm32")]
+    pub web_load_in_flight: bool,
     /// True, wenn gerade ein PUT läuft.
     #[cfg(target_arch = "wasm32")]
     pub web_save_in_flight: bool,
@@ -334,7 +421,7 @@ impl Default for EditorApp {
             clipboard: Vec::new(),
             clip_origins: Vec::new(),
             pasting: false,
-            snap_center: false,
+            snap_lines: SnapLines::default(),
             line_drawing: None,
             theme_from: theme,
             theme_target: theme,
@@ -342,6 +429,7 @@ impl Default for EditorApp {
             theme_init_pending: true,
             history: crate::history::History::default(),
             prop_snapshot_pending: false,
+            last_nudge_time: 0.0,
             show_json: false,
             json_buf: String::new(),
             json_focused: false,
@@ -354,13 +442,23 @@ impl Default for EditorApp {
             last_disk_write: None,
             pending_external_change: false,
             show_conflict_dialog: false,
+            pending_action: None,
+            quit_confirmed: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            close_requested_by_app: false,
 
             #[cfg(target_arch = "wasm32")]
             web_doc: crate::web_sync::WebDoc::from_url(),
             #[cfg(target_arch = "wasm32")]
             web_last_poll: 0.0,
             #[cfg(target_arch = "wasm32")]
-            web_last_modified: 0.0,
+            web_dirty_at: None,
+            #[cfg(target_arch = "wasm32")]
+            web_dirty_since_save: false,
+            #[cfg(target_arch = "wasm32")]
+            web_initial_loaded: false,
+            #[cfg(target_arch = "wasm32")]
+            web_load_in_flight: false,
             #[cfg(target_arch = "wasm32")]
             web_save_in_flight: false,
             #[cfg(target_arch = "wasm32")]
@@ -596,6 +694,91 @@ impl EditorApp {
         self.status = String::from("Objekt(e) gelöscht.");
     }
 
+    // ===================================================================
+    // Z-Order (Reihenfolge der Elemente auf der Seite)
+    // ===================================================================
+
+    /// Index des Elements `id` auf der aktuellen Seite, oder `None`.
+    fn element_index(&self, id: u64) -> Option<usize> {
+        let page = self.doc.pages.get(self.page_index)?;
+        page.elements.iter().position(|e| e.id == id)
+    }
+
+    /// Anzahl der Elemente auf der aktuellen Seite.
+    fn element_count(&self) -> usize {
+        self.doc
+            .pages
+            .get(self.page_index)
+            .map(|p| p.elements.len())
+            .unwrap_or(0)
+    }
+
+    /// Bewegt das Element `id` eine Position nach vorne (oben / zuletzt
+    /// gezeichnet). Hat keinen Effekt am Anfang oder wenn nicht gefunden.
+    pub fn bring_forward(&mut self, id: u64) {
+        let len = self.element_count();
+        let Some(idx) = self.element_index(id) else {
+            return;
+        };
+        if idx + 1 >= len {
+            return;
+        }
+        self.push_history();
+        if let Some(page) = self.doc.current_page_mut(self.page_index) {
+            page.elements.swap(idx, idx + 1);
+        }
+        self.modified = true;
+    }
+
+    /// Bewegt das Element `id` eine Position nach hinten (unten / zuerst
+    /// gezeichnet).
+    pub fn send_backward(&mut self, id: u64) {
+        let Some(idx) = self.element_index(id) else {
+            return;
+        };
+        if idx == 0 {
+            return;
+        }
+        self.push_history();
+        if let Some(page) = self.doc.current_page_mut(self.page_index) {
+            page.elements.swap(idx, idx - 1);
+        }
+        self.modified = true;
+    }
+
+    /// Bringt das Element `id` ganz nach vorne (ganz oben).
+    pub fn bring_to_front(&mut self, id: u64) {
+        let len = self.element_count();
+        let Some(idx) = self.element_index(id) else {
+            return;
+        };
+        if idx + 1 >= len {
+            return;
+        }
+        self.push_history();
+        if let Some(page) = self.doc.current_page_mut(self.page_index) {
+            let el = page.elements.remove(idx);
+            page.elements.push(el);
+        }
+        self.modified = true;
+    }
+
+    /// Schickt das Element `id` ganz nach hinten (ganz unten).
+    pub fn send_to_back(&mut self, id: u64) {
+        let Some(idx) = self.element_index(id) else {
+            return;
+        };
+        if idx == 0 {
+            return;
+        }
+        self.push_history();
+        if let Some(page) = self.doc.current_page_mut(self.page_index) {
+            let el = page.elements.remove(idx);
+            page.elements.insert(0, el);
+        }
+        self.modified = true;
+    }
+
     pub fn add_page(&mut self) {
         self.doc.pages.push(crate::model::Page::default());
         self.page_index = self.doc.pages.len() - 1;
@@ -660,6 +843,228 @@ impl EditorApp {
             }
             Err(e) => self.set_status(format!("Fehler beim Öffnen: {e}")),
         }
+    }
+
+    // ===================================================================
+    // Schutz vor Datenverlust
+    // ===================================================================
+
+    /// Führt eine potenziell destruktive Aktion aus — aber nur, wenn nichts
+    /// verloren gehen kann. Andernfalls wird sie geparkt und der
+    /// Bestätigungsdialog geöffnet.
+    ///
+    /// **Jede** Stelle, die `self.doc` ersetzt oder die App beendet, muss
+    /// hierüber gehen. Direktaufrufe von `new_document()` o. ä. sind ein Bug.
+    pub fn request_action(&mut self, action: PendingAction) {
+        if self.modified {
+            self.pending_action = Some(action);
+        } else {
+            self.perform_action(action);
+        }
+    }
+
+    /// Führt eine geparkte Aktion tatsächlich aus (nach Bestätigung oder wenn
+    /// es nichts zu verlieren gab).
+    fn perform_action(&mut self, action: PendingAction) {
+        match action {
+            PendingAction::NewDocument => self.new_document(),
+            PendingAction::OpenDialog => crate::io::open_project_dialog(self),
+            PendingAction::OpenFile(path) => {
+                #[cfg(not(target_arch = "wasm32"))]
+                self.open_path(path);
+                #[cfg(target_arch = "wasm32")]
+                let _ = path;
+            }
+            PendingAction::Quit => {
+                self.quit_confirmed = true;
+                #[cfg(not(target_arch = "wasm32"))]
+                self.request_close();
+            }
+        }
+    }
+
+    /// Sendet den Schließbefehl an das Fenster.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn request_close(&mut self) {
+        self.close_requested_by_app = true;
+    }
+
+    /// Zeigt den Bestätigungsdialog, falls eine Aktion wartet.
+    ///
+    /// Drei Wege heraus: speichern und fortfahren, verwerfen und fortfahren,
+    /// oder abbrechen. „Speichern" ist der voreingestellte, sichere Weg.
+    fn show_unsaved_dialog(&mut self, ctx: &Context) {
+        let Some(action) = self.pending_action.clone() else {
+            return;
+        };
+
+        let mut decision: Option<UnsavedDecision> = None;
+
+        egui::Window::new("Ungespeicherte Änderungen")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.add_space(4.0);
+                ui.label(format!(
+                    "„{}\u{201c} verwirft die ungespeicherten Änderungen an diesem Dokument.",
+                    action.label()
+                ));
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Speichern und fortfahren").clicked() {
+                        decision = Some(UnsavedDecision::SaveThenContinue);
+                    }
+                    if ui.button("Verwerfen").clicked() {
+                        decision = Some(UnsavedDecision::Discard);
+                    }
+                    if ui.button("Abbrechen").clicked() {
+                        decision = Some(UnsavedDecision::Cancel);
+                    }
+                });
+            });
+
+        // Escape = abbrechen (der sichere Ausgang).
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            decision = Some(UnsavedDecision::Cancel);
+        }
+
+        match decision {
+            None => {}
+            Some(UnsavedDecision::Cancel) => {
+                self.pending_action = None;
+                self.set_status("Abgebrochen.");
+            }
+            Some(UnsavedDecision::Discard) => {
+                self.pending_action = None;
+                self.modified = false;
+                self.perform_action(action);
+            }
+            Some(UnsavedDecision::SaveThenContinue) => {
+                crate::io::save_project_dialog(self, false);
+                if self.modified {
+                    // Speichern wurde abgebrochen oder ist fehlgeschlagen —
+                    // die Aktion bleibt geparkt, damit nichts verloren geht.
+                    self.set_status("Nicht gespeichert — Aktion abgebrochen.");
+                    self.pending_action = None;
+                } else {
+                    self.pending_action = None;
+                    self.perform_action(action);
+                }
+            }
+        }
+    }
+
+    /// Globale Tastenkürzel. Wird einmal pro Frame vor dem Canvas ausgeführt.
+    ///
+    /// Wichtig: `consume_key` entfernt das Event, damit kein Widget es zusätzlich
+    /// sieht. Kürzel, die im Textfeld eine andere Bedeutung haben (Strg+A/X/D),
+    /// werden nur ausgelöst, wenn gerade nicht getippt wird.
+    fn handle_shortcuts(&mut self, ctx: &Context) {
+        // Bei offenem Bestätigungsdialog keine weiteren Aktionen auslösen.
+        if self.pending_action.is_some() {
+            return;
+        }
+
+        let typing = ctx.wants_keyboard_input();
+        let ctrl = egui::Modifiers::COMMAND;
+        let ctrl_shift = egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT);
+
+        // --- Datei: gelten immer, auch beim Tippen ---
+        if ctx.input_mut(|i| i.consume_key(ctrl_shift, egui::Key::S)) {
+            crate::io::save_project_dialog(self, true);
+        } else if ctx.input_mut(|i| i.consume_key(ctrl, egui::Key::S)) {
+            crate::io::save_project_dialog(self, false);
+        }
+        if ctx.input_mut(|i| i.consume_key(ctrl, egui::Key::O)) {
+            self.request_action(PendingAction::OpenDialog);
+        }
+        if ctx.input_mut(|i| i.consume_key(ctrl, egui::Key::N)) {
+            self.request_action(PendingAction::NewDocument);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if ctx.input_mut(|i| i.consume_key(ctrl, egui::Key::P)) {
+            crate::io::print_dialog(self, ctx);
+        }
+
+        // --- Bearbeiten: nur wenn nicht getippt wird ---
+        if typing {
+            return;
+        }
+        if ctx.input_mut(|i| i.consume_key(ctrl, egui::Key::A)) {
+            self.select_all();
+        }
+        if ctx.input_mut(|i| i.consume_key(ctrl, egui::Key::D)) {
+            self.duplicate_selection();
+        }
+        if ctx.input_mut(|i| i.consume_key(ctrl, egui::Key::X)) {
+            self.cut_selection();
+        }
+    }
+
+    /// Alle Elemente der aktuellen Seite auswählen.
+    pub fn select_all(&mut self) {
+        let ids: Vec<u64> = self
+            .doc
+            .pages
+            .get(self.page_index)
+            .map(|p| p.elements.iter().map(|e| e.id).collect())
+            .unwrap_or_default();
+        let n = ids.len();
+        self.selection = ids;
+        self.set_status(format!("{n} Objekt(e) ausgewählt."));
+    }
+
+    /// Auswahl duplizieren — leicht versetzt, damit das Duplikat sichtbar ist.
+    pub fn duplicate_selection(&mut self) {
+        if self.selection.is_empty() {
+            return;
+        }
+        self.push_history();
+        const OFFSET: f32 = 12.0;
+        let originals: Vec<Element> = self
+            .doc
+            .pages
+            .get(self.page_index)
+            .map(|p| {
+                p.elements
+                    .iter()
+                    .filter(|e| self.selection.contains(&e.id))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut new_ids = Vec::with_capacity(originals.len());
+        for mut el in originals {
+            let new_id = self.next_id();
+            // Bilder teilen sich die Pixeldaten unter der neuen ID.
+            if el.kind == ElementKind::Image {
+                if let Some(entry) = self.images.map.get(&el.id).cloned() {
+                    self.images.map.insert(new_id, entry);
+                }
+            }
+            el.id = new_id;
+            el.x += OFFSET;
+            el.y += OFFSET;
+            new_ids.push(new_id);
+            if let Some(page) = self.doc.pages.get_mut(self.page_index) {
+                page.elements.push(el);
+            }
+        }
+        self.selection = new_ids;
+        self.touch();
+        self.set_status("Dupliziert.");
+    }
+
+    /// Ausschneiden = kopieren + löschen.
+    pub fn cut_selection(&mut self) {
+        if self.selection.is_empty() {
+            return;
+        }
+        self.copy_selection();
+        self.delete_selected();
+        self.set_status("Ausgeschnitten.");
     }
 
     // ===================================================================
@@ -913,15 +1318,21 @@ impl EditorApp {
     fn tick_web_sync(&mut self, ctx: &egui::Context) {
         use crate::web_sync::{next_event, WebEvent};
 
+        /// Ruhezeit nach der letzten Änderung, bevor gespeichert wird.
+        const AUTOSAVE_DEBOUNCE_S: f64 = 2.0;
+        /// Abstand zwischen zwei Versionsabfragen.
+        const POLL_INTERVAL_S: f64 = 2.0;
+
         let now = ctx.input(|i| i.time);
         let needs_initial_load = match &self.web_doc {
-            Some(w) => w.last_content_hash == 0,
+            Some(w) => !self.web_initial_loaded,
             None => false,
         };
 
         // 1) Initiales Laden (einmalig pro WebDoc).
-        if needs_initial_load {
+        if needs_initial_load && !self.web_load_in_flight {
             if let Some(w) = &self.web_doc {
+                self.web_load_in_flight = true;
                 w.spawn_initial_load();
                 self.web_status = "Lade Dokument…".to_string();
             }
@@ -930,94 +1341,177 @@ impl EditorApp {
         // 2) Events abpumpen (sync, vom Hintergrund-Task gepusht).
         while let Some(ev) = next_event() {
             match ev {
-                WebEvent::Loaded(json) => self.apply_web_doc(&json),
-                WebEvent::Saved => {
+                WebEvent::Loaded { json, version } => {
+                    self.web_load_in_flight = false;
+                    self.web_initial_loaded = true;
+                    self.adopt_web_doc(&json, version);
+                }
+                WebEvent::RemoteChanged { json, version } => {
+                    // NICHT ersetzen — zusammenführen. Sonst geht alles
+                    // verloren, was seit dem letzten Abgleich lokal entstand.
+                    self.merge_web_doc(&json, version);
+                }
+                WebEvent::Saved { version } => {
                     self.web_save_in_flight = false;
-                    self.modified = false;
+                    // `modified` nur zurücksetzen, wenn seit dem Absenden
+                    // nichts Neues dazugekommen ist.
+                    if !self.web_dirty_since_save {
+                        self.modified = false;
+                        self.web_dirty_at = None;
+                    }
+                    if let Some(w) = &mut self.web_doc {
+                        w.version = version;
+                        w.base_doc = Some(self.doc.clone());
+                    }
                     self.web_status = "Gespeichert.".to_string();
+                }
+                WebEvent::SaveConflict { json, version } => {
+                    // Jemand anders war schneller. Serverstand einmergen und
+                    // danach erneut speichern.
+                    self.web_save_in_flight = false;
+                    self.merge_web_doc(&json, version);
+                    self.web_dirty_at = Some(0.0); // sofort erneut speichern
                 }
                 WebEvent::Error(msg) => {
                     self.web_save_in_flight = false;
+                    self.web_load_in_flight = false;
                     self.web_status = msg;
                 }
             }
         }
 
-        // 3) Auto-Save: 2 s nach der letzten eigenen Änderung, falls modified.
-        if self.modified && !self.web_save_in_flight && self.web_last_modified > 0.0 {
-            if now - self.web_last_modified > 2.0 {
+        // 3) Auto-Save nach Ruhezeit.
+        //
+        // `web_dirty_at` markiert den Zeitpunkt der ERSTEN Änderung seit dem
+        // letzten Speichern — nicht den letzten Frame. Genau daran scheiterte
+        // die alte Fassung: Sie setzte den Zeitstempel in jedem Frame neu, in
+        // dem `modified` true war, sodass die Ruhezeit nie ablief und die
+        // Web-Version niemals speicherte.
+        if self.modified && self.web_dirty_at.is_none() {
+            self.web_dirty_at = Some(now);
+        }
+        if let Some(dirty_at) = self.web_dirty_at {
+            if !self.web_save_in_flight
+                && self.web_initial_loaded
+                && now - dirty_at > AUTOSAVE_DEBOUNCE_S
+            {
                 if let Some(w) = &self.web_doc {
                     self.web_save_in_flight = true;
+                    self.web_dirty_since_save = false;
                     self.web_status = "Speichern…".to_string();
-                    w.spawn_save(self.doc.clone(), self.images.clone(), self.fonts.clone());
+                    w.spawn_save(
+                        self.doc.clone(),
+                        self.images.clone(),
+                        self.fonts.clone(),
+                        w.version,
+                    );
                 }
             }
         }
 
-        // 4) Polling: alle 2 s nach externen Änderungen suchen.
-        if !needs_initial_load && (now - self.web_last_poll) > 2.0 {
+        // 4) Polling: nur die Versionsnummer abfragen (wenige Bytes).
+        if self.web_initial_loaded && (now - self.web_last_poll) > POLL_INTERVAL_S {
             self.web_last_poll = now;
             if let Some(w) = &self.web_doc {
-                // Bei ungespeicherten eigenen Änderungen nicht reloaden, nur pollen.
-                // Spawn_poll pusht nur bei Hash-Unterschied ein Event.
                 w.spawn_poll();
             }
         }
-
-        // 5) Wenn modified sich ändert: Auto-Save-Timer neu starten.
-        if self.modified {
-            self.web_last_modified = now;
-        }
     }
 
-    /// Wendet ein vom Backend geladenes JSON als neuen Dokumentstand an.
-    /// Dient als Undo-Schritt, damit externe Änderungen zurückrollbar sind.
+    /// Übernimmt einen Serverstand unverändert (initiales Laden).
     #[cfg(target_arch = "wasm32")]
-    fn apply_web_doc(&mut self, json: &str) {
-        let project: crate::io::Project = match serde_json::from_str(json) {
-            Ok(p) => p,
-            Err(e) => {
-                self.web_status = format!("Ungültiges JSON: {}", e);
-                return;
-            }
+    fn adopt_web_doc(&mut self, json: &str, version: u64) {
+        let Some((doc, images, fonts, next_id)) = self.decode_web_json(json) else {
+            return;
         };
-
-        let (doc, images, fonts, next_id) = crate::web_sync::decode_project(project);
-
-        // Hash aktualisieren, damit der nächste Poll unsere eigene Loaded-Aktion
-        // nicht sofort als externe Änderung erkennt.
-        let hash = crate::web_sync::hash_of(json);
-        let initial_load = match &self.web_doc {
-            Some(w) => w.last_content_hash == 0,
-            None => false,
-        };
-
-        // History nur beim Folge-Reload, nicht beim initialen Load (sonst
-        // landet der Start-Zustand als Undo-Schritt).
-        if !initial_load {
-            self.push_history();
-        }
-
         self.doc = doc;
         self.images = images;
         self.fonts = fonts;
         self.fonts_dirty = true;
         self.next_id = next_id;
         self.modified = false;
+        self.web_dirty_at = None;
         self.editing = None;
         self.crop_mode = false;
         self.interaction = Interaction::None;
-        self.web_status = if initial_load {
-            "Geladen.".to_string()
-        } else {
-            "Extern aktualisiert.".to_string()
+        self.history.init(self.snapshot());
+        if let Some(w) = &mut self.web_doc {
+            w.version = version;
+            w.last_content_hash = crate::web_sync::hash_of(json);
+            w.base_doc = Some(self.doc.clone());
+        }
+        self.web_status = "Geladen.".to_string();
+    }
+
+    /// Führt einen neueren Serverstand mit dem lokalen zusammen.
+    ///
+    /// Das ist der Kern der Mehrbenutzer-Fähigkeit: Der lokale Stand wird
+    /// nicht überschrieben, sondern gegen die gemeinsame Basis mit dem
+    /// Serverstand gemergt. Was zwei Leute an verschiedenen Stellen getan
+    /// haben, überlebt beides.
+    #[cfg(target_arch = "wasm32")]
+    fn merge_web_doc(&mut self, json: &str, version: u64) {
+        let Some((remote_doc, images, fonts, next_id)) = self.decode_web_json(json) else {
+            return;
         };
 
+        // Ohne bekannte Basis ist kein Drei-Wege-Merge möglich. Dann gilt der
+        // Serverstand als Basis und der lokale Stand als Änderung darauf —
+        // das erhält lokale Arbeit immer noch besser als blindes Ersetzen.
+        let base = self
+            .web_doc
+            .as_ref()
+            .and_then(|w| w.base_doc.clone())
+            .unwrap_or_else(|| remote_doc.clone());
+
+        let (merged, report) = crate::merge::merge_documents(&base, &self.doc, &remote_doc);
+
+        self.push_history();
+        self.doc = merged;
+        // Bilder und Fonts additiv übernehmen — sie sind unveränderlich und
+        // per ID eindeutig, dürfen also nie verloren gehen.
+        for (id, entry) in images.map {
+            self.images.map.entry(id).or_insert(entry);
+        }
+        for (name, entry) in fonts.map {
+            self.fonts.map.entry(name).or_insert(entry);
+        }
+        self.fonts_dirty = true;
+        self.next_id = self.next_id.max(next_id);
+        self.editing = None;
+        self.interaction = Interaction::None;
+
         if let Some(w) = &mut self.web_doc {
-            w.last_content_hash = hash;
-            w.last_known_modified = js_sys::Date::now() / 1000.0;
+            w.version = version;
+            w.last_content_hash = crate::web_sync::hash_of(json);
+            // Neue gemeinsame Basis ist der Serverstand — nur er ist beiden
+            // Seiten bekannt.
+            w.base_doc = Some(remote_doc);
+        }
+
+        // Nach dem Merge weicht der lokale Stand in der Regel vom Server ab
+        // → als änderungsbedürftig markieren, damit er hochgeladen wird.
+        self.modified = true;
+        self.web_dirty_since_save = true;
+        self.web_status = report.summary();
+    }
+
+    /// Dekodiert Server-JSON. Bei ungültigem JSON wird nur der Status gesetzt —
+    /// ein kaputter Serverstand darf das lokale Dokument nicht beschädigen.
+    #[cfg(target_arch = "wasm32")]
+    fn decode_web_json(
+        &mut self,
+        json: &str,
+    ) -> Option<(Document, crate::store::ImageStore, crate::store::FontStore, u64)> {
+        match serde_json::from_str::<crate::io::Project>(json) {
+            Ok(project) => Some(crate::web_sync::decode_project(project)),
+            Err(e) => {
+                self.web_status = format!("Ungültiges JSON vom Server: {}", e);
+                None
+            }
         }
     }
+
 }
 
 impl eframe::App for EditorApp {
@@ -1030,6 +1524,26 @@ impl eframe::App for EditorApp {
             self.fonts_dirty = false;
             crate::fonts::install_with_custom(&ctx, &self.fonts);
         }
+
+        // --- Close-Guard -------------------------------------------------
+        // Muss VOR allem anderen laufen: wenn der Nutzer das Fenster schließt
+        // und es ungespeicherte Änderungen gibt, wird der Schließvorgang
+        // abgebrochen und stattdessen der Bestätigungsdialog gezeigt.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if self.close_requested_by_app {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            } else if ctx.input(|i| i.viewport().close_requested())
+                && self.modified
+                && !self.quit_confirmed
+            {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.pending_action = Some(PendingAction::Quit);
+            }
+        }
+
+        // Globale Tastenkürzel (Strg+S/O/N/A/D/X/P).
+        self.handle_shortcuts(&ctx);
 
         // File-Watch: Watcher an file_path anpassen und ankommende Ereignisse
         // abpumpen (AI-Schnittstelle).
@@ -1079,6 +1593,9 @@ impl eframe::App for EditorApp {
             self.theme_anim = (self.theme_anim + dt / crate::themes::fade_duration()).min(1.0);
             crate::themes::tick_fade(&ctx, self.theme_from, self.theme_target, self.theme_anim);
         }
+
+        // Bestätigungsdialog für Aktionen, die Arbeit verwerfen würden.
+        self.show_unsaved_dialog(&ctx);
 
         self.show_menu(&ctx);
         self.show_files_panel(&ctx);
@@ -1138,17 +1655,23 @@ impl EditorApp {
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("Datei", |ui| {
-                    if ui.button("Neu").clicked() {
-                        self.new_document();
+                    // Destruktive Aktionen laufen über `request_action`, damit
+                    // ungespeicherte Arbeit nie kommentarlos verloren geht.
+                    if menu_entry(ui, "Neu", "Strg+N").clicked() {
+                        self.request_action(PendingAction::NewDocument);
+                        ui.close_menu();
                     }
-                    if ui.button("Öffnen…").clicked() {
-                        crate::io::open_project_dialog(self);
+                    if menu_entry(ui, "Öffnen…", "Strg+O").clicked() {
+                        self.request_action(PendingAction::OpenDialog);
+                        ui.close_menu();
                     }
-                    if ui.button("Speichern").clicked() {
+                    if menu_entry(ui, "Speichern", "Strg+S").clicked() {
                         crate::io::save_project_dialog(self, false);
+                        ui.close_menu();
                     }
-                    if ui.button("Speichern unter…").clicked() {
+                    if menu_entry(ui, "Speichern unter…", "Strg+Umschalt+S").clicked() {
                         crate::io::save_project_dialog(self, true);
+                        ui.close_menu();
                     }
                     #[cfg(not(target_arch = "wasm32"))]
                     {
@@ -1161,13 +1684,16 @@ impl EditorApp {
                         }
                         ui.separator();
                         if ui.button("PDF exportieren…").clicked() {
-                            crate::printing::export_pdf_dialog(self);
+                            crate::io::export_pdf_dialog(self, ctx);
+                            ui.close_menu();
                         }
                         if ui.button("PDF öffnen…").clicked() {
-                            crate::io::import_pdf_dialog(self);
+                            crate::io::import_pdf_dialog(self, ctx);
+                            ui.close_menu();
                         }
-                        if ui.button("Drucken…").clicked() {
-                            crate::printing::print_dialog(self);
+                        if menu_entry(ui, "Drucken…", "Strg+P").clicked() {
+                            crate::io::print_dialog(self, ctx);
+                            ui.close_menu();
                         }
                     }
                     #[cfg(target_arch = "wasm32")]
@@ -1184,6 +1710,7 @@ impl EditorApp {
                         }
                         if u != self.settings.units {
                             self.settings.units = u;
+                            crate::settings_io::save(&self.settings);
                         }
 
                         ui.separator();
@@ -1201,6 +1728,57 @@ impl EditorApp {
                         );
                         if sm != self.settings.scroll_mode {
                             self.settings.scroll_mode = sm;
+                            crate::settings_io::save(&self.settings);
+                        }
+                    });
+                });
+
+                ui.menu_button("Bearbeiten", |ui| {
+                    // Ausgegraut, wenn nichts zu tun ist — der Nutzer sieht
+                    // damit sofort, ob es noch etwas zurückzunehmen gibt.
+                    ui.add_enabled_ui(self.history.can_undo(), |ui| {
+                        if menu_entry(ui, "Rückgängig", "Strg+Z").clicked() {
+                            self.undo();
+                            ui.close_menu();
+                        }
+                    });
+                    ui.add_enabled_ui(self.history.can_redo(), |ui| {
+                        if menu_entry(ui, "Wiederholen", "Strg+Y").clicked() {
+                            self.redo();
+                            ui.close_menu();
+                        }
+                    });
+                    ui.separator();
+                    let has_sel = !self.selection.is_empty();
+                    ui.add_enabled_ui(has_sel, |ui| {
+                        if menu_entry(ui, "Ausschneiden", "Strg+X").clicked() {
+                            self.cut_selection();
+                            ui.close_menu();
+                        }
+                        if menu_entry(ui, "Kopieren", "Strg+C").clicked() {
+                            self.copy_selection();
+                            ui.close_menu();
+                        }
+                        if menu_entry(ui, "Duplizieren", "Strg+D").clicked() {
+                            self.duplicate_selection();
+                            ui.close_menu();
+                        }
+                    });
+                    ui.add_enabled_ui(!self.clipboard.is_empty(), |ui| {
+                        if menu_entry(ui, "Einfügen", "Strg+V").clicked() {
+                            self.start_paste();
+                            ui.close_menu();
+                        }
+                    });
+                    ui.separator();
+                    if menu_entry(ui, "Alles auswählen", "Strg+A").clicked() {
+                        self.select_all();
+                        ui.close_menu();
+                    }
+                    ui.add_enabled_ui(has_sel, |ui| {
+                        if menu_entry(ui, "Löschen", "Entf").clicked() {
+                            self.delete_selected();
+                            ui.close_menu();
                         }
                     });
                 });
@@ -1291,6 +1869,7 @@ impl EditorApp {
                     ui.selectable_value(&mut align, PageAlign::Right, "Rechtsbündig");
                     if align != self.settings.page_align {
                         self.settings.page_align = align;
+                        crate::settings_io::save(&self.settings);
                     }
 
                     ui.separator();
@@ -1620,13 +2199,28 @@ impl EditorApp {
                     el.rotation += 90.0;
                 }
             }
-            ElementKind::Rectangle | ElementKind::Line | ElementKind::Ellipse => {
+            ElementKind::Rectangle
+            | ElementKind::Line
+            | ElementKind::Ellipse
+            | ElementKind::Path => {
                 ui.heading(match el.kind {
                     ElementKind::Rectangle => "Rechteck",
                     ElementKind::Line => "Linie",
                     ElementKind::Ellipse => "Ellipse",
+                    ElementKind::Path => "Pfad",
                     _ => "",
                 });
+                if el.kind == ElementKind::Path {
+                    ui.label(format!(
+                        "{} Stützpunkte, {}",
+                        el.points.len(),
+                        if el.path_closed {
+                            "geschlossen"
+                        } else {
+                            "offen"
+                        }
+                    ));
+                }
                 ui.horizontal(|ui| {
                     ui.label("Drehung:");
                     ui.add(
@@ -1666,16 +2260,10 @@ impl EditorApp {
                             .suffix("pt"),
                     );
                 });
-                ui.horizontal(|ui| {
-                    ui.label("Rahmenstärke:");
-                    ui.add(
-                        egui::DragValue::new(&mut el.stroke_width)
-                            .range(0.0..=50.0)
-                            .speed(0.2)
-                            .suffix("pt"),
-                    );
-                });
-                if el.kind == ElementKind::Rectangle || el.kind == ElementKind::Ellipse {
+                if matches!(
+                    el.kind,
+                    ElementKind::Rectangle | ElementKind::Ellipse | ElementKind::Path
+                ) {
                     ui.horizontal(|ui| {
                         ui.label("Füllfarbe:");
                         let mut c = Color32::from_rgba_unmultiplied(
@@ -1705,6 +2293,43 @@ impl EditorApp {
                 }
             }
         }
+
+        // --- Z-Order (Anordnung) ---
+        // Höherer Index = weiter oben (zuletzt gezeichnet). Anzeige 1-basiert:
+        // 1 = ganz hinten, `total` = ganz vorne.
+        let total = self.doc.pages[page_idx].elements.len();
+        let z_pos = el_idx + 1;
+        let can_front = z_pos < total;
+        let can_forward = z_pos < total;
+        let can_backward = z_pos > 1;
+        let can_back = z_pos > 1;
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label("Anordnung:");
+            ui.label(format!("{}/{}", z_pos, total));
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.add_enabled_ui(can_front, |ui| {
+                if ui.button("⤒ Ganz nach vorne").clicked() {
+                    self.bring_to_front(sel);
+                }
+            });
+            ui.add_enabled_ui(can_forward, |ui| {
+                if ui.button("↑ Nach vorne").clicked() {
+                    self.bring_forward(sel);
+                }
+            });
+            ui.add_enabled_ui(can_backward, |ui| {
+                if ui.button("↓ Nach hinten").clicked() {
+                    self.send_backward(sel);
+                }
+            });
+            ui.add_enabled_ui(can_back, |ui| {
+                if ui.button("⤓ Ganz nach hinten").clicked() {
+                    self.send_to_back(sel);
+                }
+            });
+        });
 
         ui.separator();
         if ui.button("Objekt löschen").clicked() {
@@ -2588,7 +3213,8 @@ impl EditorApp {
                 .or_else(|| std::env::current_dir().ok());
             if let Some(dir) = dir {
                 let path = dir.join(format!("{}.boxdoc", name));
-                self.open_path(path);
+                // Über den Guard, damit ungespeicherte Arbeit nicht verloren geht.
+                self.request_action(PendingAction::OpenFile(path));
             }
         }
     }
@@ -2643,6 +3269,21 @@ impl EditorApp {
 }
 
 /// Formatiert eine Byte-Größe menschenlesbar (KB / MB).
+/// Menüeintrag mit rechtsbündig ausgerichtetem Tastenkürzel.
+///
+/// Ein Kürzel, das niemand sieht, existiert für den Nutzer nicht — deshalb
+/// steht es direkt neben dem Befehl.
+fn menu_entry(ui: &mut egui::Ui, label: &str, shortcut: &str) -> egui::Response {
+    ui.horizontal(|ui| {
+        let resp = ui.button(label);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(egui::RichText::new(shortcut).weak().small());
+        });
+        resp
+    })
+    .inner
+}
+
 fn human_size(bytes: u64) -> String {
     if bytes < 1024 {
         format!("{} B", bytes)

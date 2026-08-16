@@ -185,6 +185,23 @@ fn frame_xml(el: &Element, image_files: &[(u64, String, &'static str)]) -> Strin
             // (Breite/Höhe aus dem Frame, draw:ellipse ohne eigene Geometrie).
             String::from("<draw:ellipse/>")
         }
+        ElementKind::Path => {
+            // ODF kennt Polygone mit eigenem Koordinatenraum: `svg:viewBox`
+            // spannt ihn auf, `draw:points` liegt darin. Wir wählen 0..1000,
+            // damit die normalisierten Stützpunkte ganzzahlig werden.
+            const VB: f32 = 1000.0;
+            let pts = el
+                .points
+                .iter()
+                .map(|[x, y]| format!("{},{}", (x * VB) as i32, (y * VB) as i32))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let tag = if el.path_closed { "polygon" } else { "polyline" };
+            format!(
+                "<draw:{tag} svg:viewBox=\"0 0 {vb} {vb}\" draw:points=\"{pts}\"/>",
+                vb = VB as i32
+            )
+        }
         ElementKind::Rectangle | ElementKind::Line => String::new(),
     };
 

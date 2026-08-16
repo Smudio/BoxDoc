@@ -1,6 +1,6 @@
 # BoxDoc Architecture
 
-> *Technische Architektur-Dokumentation — Letztes Update: 18. Juli 2026*
+> *Technische Architektur-Dokumentation — Letztes Update: 14. August 2026*
 > *Verbindliche Planung: [`ROADMAP.md`](ROADMAP.md)*
 
 ## Überblick
@@ -51,7 +51,8 @@ pub enum ElementKind {
     Image,
     Rectangle,
     Line,
-    // Phase 1 (geplant): Ellipse
+    Ellipse,
+    Path,       // freier Streckenzug (points[] normalisiert auf die Box)
 }
 
 pub struct Element {
@@ -120,7 +121,7 @@ pub enum Interaction {
 |--------|-----------|------|----------|-----------|
 | BoxDoc | `.boxdoc` | ✅ | ✅ pretty JSON | Natives Format |
 | ODT | `.odt` | ✅ nativ | ✅ nativ | OpenDocument |
-| PDF | `.pdf` | ❌ (Phase 2) | ⚠️ nur Text+Bild, keine Shapes | printpdf |
+| PDF | `.pdf` | ✅ pdfium | ✅ Text (umgebrochen), Bild, alle Shapes | printpdf |
 
 Projektstruktur:
 
@@ -186,12 +187,153 @@ gesnapshottet (nur IDs), um Speicher zu sparen.
 ### 7. PDF-Export (`src/printing.rs`)
 
 - **Nativ:** `printpdf` 0.7.
-- **Status:** Text + Bilder; **Rechtecke und Linien werden aktuell
-  ignoriert** (`printing.rs:104-105`, leerer Match-Arm).
+- **Status:** Text, Bilder, Rechteck, Ellipse, Linie, freier Pfad.
+- **Textlayout kommt aus `src/text_layout.rs`** — demselben Modul, das der
+  Canvas benutzt. `printing.rs` rechnet bewusst nichts mehr selbst aus:
+  Jede eigene Schätzung wäre eine neue Quelle für Abweichungen zwischen
+  Bildschirm und PDF. Vorher brach der Export nur an `\n` um und schätzte
+  Textbreiten mit `Zeichen × 0,5 × Größe`; ein umgebrochener Absatz lief
+  im PDF aus der Seite heraus.
+- Der Export braucht deshalb den `egui::Context` (Schriftsystem). Die
+  Dialoge liegen in `io.rs`, der reine Export in `printing.rs` — dadurch
+  ist er ohne GUI testbar (`tests/pdf_wysiwyg.rs`).
 - **Shell-Aufruf (Windows):** `cmd /C start <pdf>` mit separaten `.arg()`-
   Aufrufen (SW-001 gefixt, siehe `SECURITY.md`).
 - **WASM:** Status-Text "nicht unterstützt".
-- Vollständiger Shape-Export + PDF-Import folgen in Phase 2.
+
+### 7a. Textlayout (`src/text_layout.rs`)
+
+Die **einzige** Quelle der Wahrheit für Zeilenumbruch, Ausrichtung und
+Zeilenposition. Canvas und PDF-Export rufen dieselbe Funktion:
+
+```rust
+pub fn layout(fonts: &mut FontsView, el: &Element, scale: f32) -> TextLayout
+```
+
+`scale` ist beim Canvas der Zoomfaktor (damit Glyphen scharf bleiben) und
+beim Export 1.0. Rückgabewerte sind **immer in pt**. Die Umbruchstellen sind
+identisch, weil Schriftgröße und Umbruchbreite proportional mitskalieren —
+abgesichert durch `text_layout::tests::umbruch_ist_zoomunabhaengig`.
+
+`auto_height` im Modell entscheidet, ob `h` aus dem Inhalt berechnet wird
+(dann ist `valign` wirkungslos) oder ob der Nutzer sie festgelegt hat (dann
+richtet `valign` den Text darin aus). Der Reflow läuft als expliziter Schritt
+in `canvas::reflow_text_heights` — nicht mehr als Seiteneffekt beim Zeichnen.
+
+### 7c. Formen-Geometrie (`src/geometry.rs`)
+
+Analog zum Textlayout: Die Umrisse aller Formen entstehen genau einmal, in
+**BoxDoc-Seitenkoordinaten** (pt, Ursprung oben links, y nach unten, Rotation
+im Uhrzeigersinn).
+
+```rust
+pub fn line_endpoints(el)   -> (Pos2, Pos2)
+pub fn rect_outline(el)     -> Vec<Pos2>   // inkl. corner_radius
+pub fn ellipse_outline(el)  -> Vec<Pos2>
+pub fn path_outline(el)     -> Vec<Pos2>   // freier Pfad
+pub fn quad_corners(el)     -> [Pos2; 4]   // Bilder, Auswahlrahmen
+pub fn triangulate(&[Pos2]) -> Vec<[u32; 3]>   // Füllung, auch konkav
+```
+
+`triangulate` ist Ear Clipping. Der Canvas füllte Formen vorher als
+Dreiecksfächer um den ersten Punkt — richtig für konvexe Umrisse, und mehr gab
+es lange nicht. Seit dem PDF-Import gibt es konkave Pfade, und der Fächer malt
+dort über jede Einbuchtung hinweg.
+
+Beide Renderer bilden davon nur noch ab — Canvas mit `to_screen`, PDF mit
+`printing::to_pdf`. Weil beide Abbildungen affin und uniform skalierend sind,
+ist das Ergebnis per Konstruktion deckungsgleich; `tests/pdf_geometry.rs`
+simuliert beide Wege und vergleicht sie.
+
+Vorher rechnete jeder Renderer selbst, mit drei verschiedenen Konventionen:
+
+| Form | Canvas | PDF (vorher) |
+|---|---|---|
+| Linie | Drehpunkt = Mittelpunkt | Drehpunkt = **Startpunkt** |
+| Rechteck | im Uhrzeigersinn | **gegen** den Uhrzeigersinn |
+| Ellipse | im Uhrzeigersinn | im Uhrzeigersinn (zufällig richtig) |
+
+Bei `rotation = 0` fiel nichts davon auf — bei jedem anderen Winkel stand die
+Linie im PDF an einer völlig anderen Stelle.
+
+#### Transparenz
+
+`printpdf` 0.7 stellt die PDF-Transparenz (`ExtGState` mit `ca`/`CA`) nicht
+über `PdfLayerReference` bereit. Alpha wurde deshalb schlicht ignoriert — eine
+zu 23 % deckende Füllung kam knallig deckend heraus. `blend_over_white()`
+mischt die Farbe stattdessen über den (immer weißen) Seitenhintergrund. Für
+Formen auf der Seite ist das exakt das Canvas-Bild. **Grenze:** Überlappen
+zwei halbtransparente Formen, scheint die untere im PDF nicht durch.
+
+### 7d. PDF-Import (`src/pdf_import.rs`)
+
+Nativ, via `pdfium-render`. Leitgedanke: **nichts wegwerfen, nichts erfinden.**
+Erst wird versucht, eine Grundform wiederzuerkennen (die lässt sich in BoxDoc
+weiterbearbeiten), sonst bleibt die Geometrie unverändert als `Path` erhalten.
+
+Der wiederkehrende Fehler dabei war immer derselbe — die **Bounding-Box**. Sie
+ist achsparallel und kennt weder Richtung noch Drehung:
+
+| Objekt | mit Hüllbox | Quelle der Wahrheit |
+|---|---|---|
+| Linie | alle waagrecht, senkrechte unsichtbar (Breite 0) | Stützpunkte des Pfads |
+| Text | jede Beschriftung waagrecht | Zeichenmatrix (`a`,`b`) |
+| Bild | flach in zu großer Box | Bildmatrix (Einheitsquadrat → Ecken) |
+| Rechteck | gedrehte werden zur größeren Hüllbox | vier Eckpunkte |
+
+Bei gedrehtem Text liefert pdfium nur die achsparallele Hüllbox. Die gesuchte
+Box folgt daraus durch Auflösen von
+`HB_b = w·|cos θ| + h·|sin θ|`, `HB_h = w·|sin θ| + h·|cos θ|`
+(Determinante `cos 2θ`; nur nahe 45° mehrdeutig, dort dient die Schriftgröße
+als Höhe). Der Mittelpunkt ist unkritisch — die Hüllbox eines gedrehten
+Rechtecks ist auf dessen Mittelpunkt zentriert.
+
+Weitere Fallen, die der Import inzwischen kennt:
+
+- **Form-XObjects** (eingebettete Miniatur-Dokumente) werden rekursiv gelesen;
+  ihre Kinder liegen im Koordinatensystem des Formulars, die Matrizen werden
+  verkettet (`Mat::then`). Vorher fehlte solcher Inhalt komplett.
+- **`f` schließt implizit**: Ein gefüllter Pfad braucht kein `h`. Ohne diese
+  Regel verschwand ein Großteil aller gefüllten Formen.
+- **Unsichtbarer Text** (Render-Modus 3) wird ausgelassen — sonst steht der
+  OCR-Layer eines Scans sichtbar über dem Seitenbild.
+- **Nur gestrichene Pfade** werden nicht gefüllt (`fill_mode`), sonst deckt
+  ihre Fläche darunterliegenden Inhalt zu.
+- **Ellipsen** werden an der Form geprüft (Ellipsengleichung), nicht an der
+  Zahl der Bögen. Sonst wird jedes abgerundete Rechteck zur Ellipse.
+
+**Grenzen:** Flächen mit Löchern (mehrere Teilpfade mit Even-Odd/Nonzero)
+werden je Teilpfad gefüllt, das Loch also mit; Farbverläufe und Muster
+(Shading) werden ausgelassen; bei gespiegelten Bildern bleibt die Drehung
+erhalten, die Spiegelung nicht.
+
+Abgesichert durch `tests/pdf_import.rs` — die Test-PDFs entstehen dort **von
+Hand aus Content-Stream-Operatoren**, nicht über BoxDocs eigenen Export: Ein
+Import, der nur die eigenen Dateien versteht, wäre wertlos.
+
+### 7b. Multiuser-Merge (`src/merge.rs`)
+
+Drei-Wege-Merge auf Element-Ebene für gleichzeitiges Bearbeiten:
+
+```rust
+pub fn merge_documents(base, local, remote) -> (Document, MergeReport)
+```
+
+Möglich ohne CRDT, weil jedes Element eine stabile, nie wiederverwendete
+`u64`-ID hat. Pro Element wird feldweise gemergt; ändern beide Seiten
+dasselbe Feld, gewinnt der lokale Wert und der Konflikt wird im
+`MergeReport` gemeldet. Löschung vs. Änderung entscheidet zugunsten der
+Änderung — ein wiederauferstandenes Element ist mit einem Tastendruck weg,
+verlorene Arbeit nicht.
+
+Zusammenspiel mit dem Server (`src/web_sync.rs`):
+
+1. `?meta=<slug>` liefert nur die Versionsnummer (Polling, wenige Bytes).
+2. Ist sie höher, wird das Dokument geladen und **gemergt**, nicht ersetzt.
+3. `PUT ...&version=<n>` schreibt optimistisch. Bei veralteter Version
+   antwortet der Server mit 409 **und dem aktuellen Stand**; der Client
+   merged und sendet erneut.
+4. `WebDoc::base_doc` hält den zuletzt abgeglichenen Stand als Merge-Basis.
 
 ### 8. ODT (`src/odt.rs`)
 
@@ -219,8 +361,10 @@ gesnapshottet (nur IDs), um Speicher zu sparen.
 | Feature | Status | Bemerkung |
 |---------|--------|-----------|
 | Grund-Rendering | ✅ | egui/eframe WebRunner |
-| File-I/O (Open/Save) | ✅ | Browser File-Input + Blob-Download (`io.rs:514`) |
-| File-Watcher | ❌ | Fehler-Stub; Phase 4 bringt Remote-Polling |
+| File-I/O (Open/Save) | ✅ | Browser File-Input + Blob-Download |
+| Server-Sync | ✅ | Versions-Polling + Drei-Wege-Merge (`web_sync.rs`, `merge.rs`) |
+| Mehrbenutzer | ✅ | Optimistische Nebenläufigkeit, 409 + Merge |
+| File-Watcher (lokal) | ❌ | nur nativ; im Web übernimmt das der Server-Sync |
 | ODT-Import/-Export | ❌ | Status-Text; `zip`-Crate nicht in WASM-Variante |
 | PDF-Export | ❌ | Status-Text |
 | Responsiv / Mobile | ⚠️ | Phase 3 |

@@ -57,7 +57,7 @@ ELEMENT (je nach "kind" sind verschiedene Felder relevant)
 ---------------------------------------------------------
 {
   "id": <u64>,                       // stabil, niemals ändern beim Update
-  "kind": "Text" | "Image" | "Rectangle" | "Line" | "Ellipse",
+  "kind": "Text" | "Image" | "Rectangle" | "Line" | "Ellipse" | "Path",
   "x": <f32 pt>,                     // linke obere Ecke (unrotiert)
   "y": <f32 pt>,
   "w": <f32 pt>,                     // Breite
@@ -70,21 +70,44 @@ ELEMENT (je nach "kind" sind verschiedene Felder relevant)
   "bold": <bool>, "italic": <bool>, "underline": <bool>,
   "align": "Left"|"Center"|"Right", "valign": "Top"|"Middle"|"Bottom",
   "indent": <pt>,
+  "auto_height": <bool>,             // Text; true = h waechst mit dem Inhalt
   "crop": { "x":0.0, "y":0.0, "w":1.0, "h":1.0 },  // Image; normalisiert 0..1
   "image_w": <px>, "image_h": <px>,                // Image
   "fill_color": [r,g,b,a],           // Shape; Alpha 0 = transparent
   "stroke_width": <pt>,              // Shape; 0 = kein Rahmen
   "stroke_color": [r,g,b,a],         // Shape
-  "corner_radius": <pt>              // Rectangle
+  "corner_radius": <pt>,             // Rectangle
+  "points": [[0.0,0.0], [1.0,0.5]],  // Path; auf die Box normalisiert (0..1)
+  "path_closed": <bool>              // Path; offen = nie gefuellt
 }
 
 ELEMENT-TYPEN
 -------------
-Text       : text, font_size, font, color, bold, italic, underline, align, valign
+Text       : text, font_size, font, color, bold, italic, underline, align, valign,
+             indent, auto_height
 Rectangle  : fill_color, stroke_width, stroke_color, corner_radius
 Line       : stroke_width, stroke_color (Linie = Box mit h=0 + rotation)
 Ellipse    : fill_color, stroke_width, stroke_color (Kreis = w==h; corner_radius ignoriert)
+Path       : points, path_closed, fill_color, stroke_width, stroke_color
+             (freier Streckenzug, z. B. aus einem PDF-Import; die Stuetzpunkte
+             liegen normalisiert in der Box, Verschieben/Skalieren/Drehen
+             laeuft ueber x/y/w/h/rotation wie bei jeder anderen Form)
 Image      : id (verweist auf images[].id), crop, image_w, image_h
+
+TEXT-HOEHE UND UMBRUCH
+----------------------
+Text bricht automatisch an der Boxbreite `w` um — genau so auf dem Bildschirm
+wie im PDF (gemeinsames Layout, siehe src/text_layout.rs). Du musst also keine
+Zeilenumbrueche selbst setzen; `\n` erzwingt lediglich einen zusaetzlichen.
+
+- "auto_height": true  → `h` wird von BoxDoc aus dem Inhalt berechnet.
+                         Ein von dir gesetztes `h` wird ueberschrieben.
+                         "valign" hat keine Wirkung (Box = Inhaltshoehe).
+- "auto_height": false → `h` gilt wie angegeben, "valign" richtet den Text
+                         darin aus. Nutze das fuer Kaesten fester Groesse.
+
+Fuer die meisten Faelle ist auto_height: true richtig. Setze `w` passend und
+lass BoxDoc die Hoehe bestimmen.
 
 KOOORDINATENSYSTEM
 ------------------
@@ -122,7 +145,7 @@ BEISPIEL: Neues Text-Element hinzufügen (an elements anhängen)
   "x": 100.0, "y": 200.0, "w": 400.0, "h": 40.0, "rotation": 0.0,
   "text": "Neuer Absatz", "font_size": 14.0, "font": "default",
   "color": [20,20,20,255], "bold": false, "italic": false, "underline": false,
-  "align": "Left", "valign": "Top", "indent": 0.0,
+  "align": "Left", "valign": "Top", "indent": 0.0, "auto_height": true,
   "crop": {"x":0,"y":0,"w":1,"h":1}, "image_w": 0, "image_h": 0,
   "fill_color": [80,140,220,60], "stroke_width": 2.0,
   "stroke_color": [40,100,180,255], "corner_radius": 0.0
@@ -138,19 +161,32 @@ Wenn dieses Dokument auf einem BoxDoc-Server liegt (z. B. boxdoc.at),
 kannst du es über einfache HTTP-Requests lesen und ändern:
 
   Lesen:    GET  https://boxdoc.at/<slug>
-  Ändern:   PUT  https://boxdoc.at/api.php?put=<slug>   (Body = dieses JSON)
+  Version:  GET  https://boxdoc.at/api.php?meta=<slug>
+  Ändern:   PUT  https://boxdoc.at/api.php?put=<slug>&version=<n>
   Neu:      POST https://boxdoc.at/api.php?new=1&name=<slug>
   Auflisten:GET  https://boxdoc.at/api.php?list=1
 
 Der <slug> ist der Dokumentname in der URL (z. B. "lebenslauf").
-Standardmäßig sind Dokumente öffentlich (kein Token nötig). Nur wenn der
-Nutzer ein Token gesetzt hat, hängst du ?t=<token> an die URL.
+
+AUTHENTIFIZIERUNG
+- Neue Dokumente bekommen standardmäßig einen Token (nicht öffentlich).
+- Token gehört in den Header:  X-BoxDoc-Token: <token>
+  Der ältere ?t=<token>-Parameter funktioniert weiterhin, ist aber schlechter
+  (landet in Server-Logs, Referrern und der Browser-History).
+
+NEBENLÄUFIGKEIT — WICHTIG
+Jedes Dokument hat eine `version`. Beim Schreiben schickst du die Version mit,
+auf der deine Änderung aufsetzt. Ist sie veraltet, antwortet der Server mit
+HTTP 409 und liefert den aktuellen Stand im Feld "document" mit. Dann gilt:
+neuen Stand übernehmen, deine Änderung erneut darauf anwenden, nochmal senden.
+Schreibe NIE ohne Version — sonst überschreibst du fremde Arbeit.
 
 Beispiele:
-  curl https://boxdoc.at/lebenslauf
-  curl -X PUT --data-binary @doc.json https://boxdoc.at/api.php?put=lebenslauf
-  curl -X POST https://boxdoc.at/api.php?new=1&name=lebenslauf
-  curl https://boxdoc.at/api.php?list=1
+  curl -H 'X-BoxDoc-Token: abc' https://boxdoc.at/lebenslauf
+  curl -H 'X-BoxDoc-Token: abc' 'https://boxdoc.at/api.php?meta=lebenslauf'
+  curl -X PUT -H 'X-BoxDoc-Token: abc' --data-binary @doc.json \
+       'https://boxdoc.at/api.php?put=lebenslauf&version=7'
+  curl -X POST 'https://boxdoc.at/api.php?new=1&name=lebenslauf'
 "#;
 
 #[derive(Serialize, Deserialize)]
@@ -392,7 +428,7 @@ mod native {
         }
     }
 
-    pub fn import_pdf_dialog(app: &mut EditorApp) {
+    pub fn import_pdf_dialog(app: &mut EditorApp, ctx: &egui::Context) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("PDF", &["pdf"])
             .set_title("PDF öffnen")
@@ -409,7 +445,10 @@ mod native {
         // Feedback bekommt.
         app.set_status("PDF wird importiert (erster Aufruf kann etwas dauern)…");
         match crate::pdf_import::import_pdf(&path) {
-            Ok((doc, images, next_id)) => {
+            Ok((mut doc, images, next_id)) => {
+                // Textboxen an BoxDocs Schriften anpassen, sonst brechen Zeilen
+                // um, die im PDF einzeilig waren.
+                crate::pdf_import::fit_text_widths(ctx, &mut doc);
                 app.doc = doc;
                 app.images = images;
                 app.fonts = Default::default();
@@ -428,12 +467,59 @@ mod native {
         }
     }
 
-    pub fn export_pdf(app: &mut EditorApp, path: PathBuf) {
-        match crate::printing::export_pdf(&path, &app.doc, &app.images) {
+    pub fn export_pdf_dialog(app: &mut crate::app::EditorApp, ctx: &egui::Context) {
+        let mut dlg = rfd::FileDialog::new()
+            .add_filter("PDF", &["pdf"])
+            .set_title("Als PDF exportieren");
+        if let Some(stem) = app
+            .file_path
+            .as_ref()
+            .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
+        {
+            dlg = dlg.set_file_name(format!("{stem}.pdf"));
+        }
+        let Some(path) = dlg.save_file() else { return; };
+        let path = if path.extension().and_then(|e| e.to_str()) == Some("pdf") {
+            path
+        } else {
+            path.with_extension("pdf")
+        };
+        let layouts = crate::printing::collect_layouts(ctx, &app.doc);
+        match crate::printing::export_pdf(&path, &app.doc, &app.images, &layouts) {
             Ok(()) => app.set_status(format!("PDF exportiert: {}", path.display())),
             Err(e) => app.set_status(format!("PDF-Export fehlgeschlagen: {e}")),
         }
     }
+
+    pub fn print_dialog(app: &mut crate::app::EditorApp, ctx: &egui::Context) {
+        let dir = std::env::temp_dir();
+        let path = dir.join("boxdoc_drucken.pdf");
+        let layouts = crate::printing::collect_layouts(ctx, &app.doc);
+        match crate::printing::export_pdf(&path, &app.doc, &app.images, &layouts) {
+            Ok(()) => {
+                #[cfg(target_os = "windows")]
+                let _ = std::process::Command::new("cmd")
+                    .arg("/C")
+                    .arg("start")
+                    .arg("")
+                    .arg(path.display().to_string())
+                    .spawn();
+                #[cfg(target_os = "linux")]
+                let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
+                #[cfg(target_os = "macos")]
+                let _ = std::process::Command::new("open").arg(&path).spawn();
+                app.set_status("PDF erzeugt und Drucker-Dialog geöffnet.");
+            }
+            Err(e) => app.set_status(format!("Drucken fehlgeschlagen: {e}")),
+        }
+    }
+
+
+    // Hinweis: Der PDF-Export läuft nicht mehr über dieses Modul, sondern über
+    // `printing::export_pdf_dialog`. Grund: Er braucht den `egui::Context`, um
+    // den Text mit demselben Schriftsystem zu layouten, das der Canvas benutzt
+    // (siehe `text_layout`). Ohne diese gemeinsame Layout-Quelle wäre der
+    // Zeilenumbruch im PDF wieder ein anderer als auf dem Bildschirm.
 
     fn default_name(app: &EditorApp) -> Option<String> {
         Some(
