@@ -2033,6 +2033,24 @@ impl EditorApp {
                             crate::io::export_svg_dialog(self, ctx, true);
                             ui.close_menu();
                         }
+                        let img_n = self.selected_images().len();
+                        let img_label = if img_n > 1 {
+                            format!("Ausgewählte Bilder speichern… ({img_n})")
+                        } else {
+                            String::from("Ausgewähltes Bild speichern…")
+                        };
+                        let btn = ui.add_enabled(img_n > 0, egui::Button::new(img_label));
+                        if btn
+                            .on_hover_text(
+                                "Speichert die Bilddatei selbst — PNG oder JPEG, \
+                                 in Originalauflösung.",
+                            )
+                            .on_disabled_hover_text("Erst ein Bild auswählen")
+                            .clicked()
+                        {
+                            crate::io::export_image_dialog(self);
+                            ui.close_menu();
+                        }
                         ui.separator();
                         if menu_entry(ui, "Drucken…", "Strg+P").clicked() {
                             crate::io::print_dialog(self, ctx);
@@ -2354,11 +2372,7 @@ impl EditorApp {
 
                     // Für beide Fälle — ein einzelnes Objekt zu exportieren
                     // ist genauso sinnvoll wie eine Gruppe.
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        ui.separator();
-                        app.export_section(ui, ctx);
-                    }
+                    app.export_section(ui, ctx);
                 });
 
             // Undo-Snapshot: einmal pro Editier-Session.
@@ -3034,24 +3048,60 @@ impl EditorApp {
     ///
     /// Wird nur aufgerufen, wenn etwas ausgewählt ist — deshalb kein
     /// ausgegrauter Zustand.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Der SVG-Export gibt es nur auf Native (Datei-Dialog); „Bild speichern"
+    /// läuft auf Web als Download. Deshalb kann die Zeile auf Web komplett
+    /// leer bleiben — dann entfällt auch der Trenner darüber.
     fn export_section(&mut self, ui: &mut egui::Ui, ctx: &Context) {
-        let n = self.selection.len();
-        let label = if n == 1 {
-            String::from("Auswahl als SVG…")
-        } else {
-            format!("Auswahl als SVG… ({n})")
-        };
-        if ui
-            .button(label)
-            .on_hover_text(
-                "Exportiert nur die ausgewählten Objekte als Vektorgrafik — \
-                 auf ihre Hüllbox beschnitten, mit durchsichtigem Hintergrund.",
-            )
-            .clicked()
-        {
-            crate::io::export_svg_dialog(self, ctx, true);
+        let _ = ctx; // auf Web ungenutzt
+        let img_n = self.selected_images().len();
+        let svg = cfg!(not(target_arch = "wasm32"));
+        if !svg && img_n == 0 {
+            return;
         }
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let n = self.selection.len();
+                let label = if n == 1 {
+                    String::from("Auswahl als SVG…")
+                } else {
+                    format!("Auswahl als SVG… ({n})")
+                };
+                if ui
+                    .button(label)
+                    .on_hover_text(
+                        "Exportiert nur die ausgewählten Objekte als Vektorgrafik — \
+                         auf ihre Hüllbox beschnitten, mit durchsichtigem Hintergrund.",
+                    )
+                    .clicked()
+                {
+                    crate::io::export_svg_dialog(self, ctx, true);
+                }
+            }
+            // Nur zeigen, wenn ein Bild dabei ist: Bei einem Textfeld gäbe es
+            // nichts zu speichern, und ein dauerhaft ausgegrauter Knopf im
+            // Eigenschaften-Panel ist nur Lärm.
+            if img_n > 0 {
+                let label = if img_n == 1 {
+                    String::from("Bild speichern…")
+                } else {
+                    format!("Bilder speichern… ({img_n})")
+                };
+                let hint = if cfg!(target_arch = "wasm32") {
+                    "Lädt die Bilddatei selbst herunter (PNG) — in Originalauflösung \
+                     und auf den Crop beschnitten, aber ohne Drehung."
+                } else {
+                    "Speichert die Bilddatei selbst (PNG oder JPEG) — in \
+                     Originalauflösung und auf den Crop beschnitten, aber ohne \
+                     Drehung. Strg+C legt ein einzelnes Bild zusätzlich in die \
+                     Zwischenablage."
+                };
+                if ui.button(label).on_hover_text(hint).clicked() {
+                    crate::io::export_image_dialog(self);
+                }
+            }
+        });
     }
 
     /// Ausrichtungs-Buttons für Mehrfachauswahl.
@@ -3415,7 +3465,28 @@ impl EditorApp {
     // Copy / Paste
     // =======================================================================
 
+    /// Die ausgewählten Bild-Elemente der aktuellen Seite, in Seitenreihenfolge.
+    ///
+    /// Kopien statt Referenzen, damit die Aufrufer (Export, Zwischenablage)
+    /// nebenher wieder `&mut self` benutzen dürfen.
+    pub fn selected_images(&self) -> Vec<Element> {
+        let Some(page) = self.doc.pages.get(self.page_index) else {
+            return Vec::new();
+        };
+        page.elements
+            .iter()
+            .filter(|e| e.kind == ElementKind::Image && self.selection.contains(&e.id))
+            .cloned()
+            .collect()
+    }
+
     /// Kopiert alle ausgewählten Elemente in die Zwischenablage.
+    ///
+    /// Ist **genau ein Bild** ausgewählt, landet es zusätzlich als Pixelbild in
+    /// der System-Zwischenablage — sonst könnte man ein Bild aus BoxDoc zwar
+    /// kopieren, aber in Paint oder Word nicht einfügen. Bei mehreren Bildern
+    /// bleibt es bei den BoxDoc-Objekten: Welches der Bilder gemeint wäre, ist
+    /// nicht zu erraten.
     pub fn copy_selection(&mut self) {
         let sel_ids = self.selection.clone();
         let Some(page) = self.doc.pages.get(self.page_index) else {
@@ -3427,9 +3498,36 @@ impl EditorApp {
             self.clipboard.push(el.clone());
             self.clip_origins.push((el.x, el.y));
         }
-        if !self.clipboard.is_empty() {
-            self.status = format!("{} Objekt(e) kopiert.", self.clipboard.len());
+        if self.clipboard.is_empty() {
+            return;
         }
+        let mut msg = format!("{} Objekt(e) kopiert.", self.clipboard.len());
+        let images = self.selected_images();
+        if images.len() == 1 {
+            match self.copy_image_to_system_clipboard(&images[0]) {
+                Some(true) => msg.push_str(" Bild auch in der Zwischenablage."),
+                Some(false) => msg.push_str(" Bild ging nicht in die Zwischenablage."),
+                None => {}
+            }
+        }
+        self.status = msg;
+    }
+
+    /// Legt das Bild eines Elements in die System-Zwischenablage.
+    ///
+    /// `None` = kein verwertbares Bild, `Some(false)` = Versuch gescheitert
+    /// (oder Plattform ohne Unterstützung).
+    fn copy_image_to_system_clipboard(&self, el: &Element) -> Option<bool> {
+        let rgba = self.images.cropped_rgba(el)?;
+        let png = crate::store::encode_png(&rgba)?;
+        // Die Weiß-Variante nur erzeugen, wenn es wirklich Transparenz gibt —
+        // bei einem Foto wäre sie Byte für Byte dasselbe Bild.
+        let flat = if crate::store::has_alpha(&rgba) {
+            crate::store::encode_png(&crate::store::flatten_on_white(&rgba))?
+        } else {
+            png.clone()
+        };
+        Some(crate::io::set_clipboard_image(&png, &flat))
     }
 
     /// Startet den Paste-Modus: Preview folgt dem Cursor bis zum Klick.

@@ -605,6 +605,189 @@ mod native {
         }
     }
 
+    /// Speichert die ausgewählten Bilder als Bilddateien (PNG oder JPEG).
+    ///
+    /// Gespeichert wird die **Bilddatei**, nicht das Seitenobjekt: in
+    /// Originalauflösung, auf den Crop beschnitten, ohne Drehung und ohne
+    /// Seitenhintergrund (siehe `ImageStore::cropped_rgba`). Wer die
+    /// Seitendarstellung will, nimmt den SVG- oder PDF-Export.
+    ///
+    /// Bei mehreren ausgewählten Bildern fragt der Dialog nach einem Ordner —
+    /// ein Speichern-Dialog pro Bild wäre bei zehn Bildern eine Zumutung.
+    pub fn export_image_dialog(app: &mut EditorApp) {
+        let images = app.selected_images();
+        if images.is_empty() {
+            app.set_status("Kein Bild ausgewählt.");
+            return;
+        }
+        let stem = app
+            .file_path
+            .as_ref()
+            .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
+            .unwrap_or_else(|| String::from("boxdoc"));
+
+        if images.len() == 1 {
+            let el = &images[0];
+            let mut dlg = rfd::FileDialog::new()
+                .add_filter("PNG", &["png"])
+                .add_filter("JPEG", &["jpg", "jpeg"])
+                .set_title("Bild speichern")
+                .set_file_name(format!("{stem}_bild.png"));
+            if let Some(dir) = app.file_path.as_ref().and_then(|p| p.parent()) {
+                dlg = dlg.set_directory(dir);
+            }
+            let Some(path) = dlg.save_file() else { return };
+            let path = if path.extension().is_some() {
+                path
+            } else {
+                path.with_extension("png")
+            };
+            match write_element_image(app, el, &path) {
+                Ok(()) => app.set_status(format!("Bild gespeichert: {}", path.display())),
+                Err(e) => app.set_status(format!("Bild speichern fehlgeschlagen: {e}")),
+            }
+            return;
+        }
+
+        let Some(dir) = rfd::FileDialog::new()
+            .set_title("Ordner für die Bilder wählen")
+            .pick_folder()
+        else {
+            return;
+        };
+        let mut saved = 0usize;
+        let mut first_error = None;
+        for (i, el) in images.iter().enumerate() {
+            // Vorhandene Dateien nicht überschreiben: Ein Ordner-Export soll
+            // nicht stillschweigend die Bilder des letzten Exports ersetzen.
+            let path = unique_path(&dir, &format!("{stem}_bild{}", i + 1), "png");
+            match write_element_image(app, el, &path) {
+                Ok(()) => saved += 1,
+                Err(e) => {
+                    if first_error.is_none() {
+                        first_error = Some(e.to_string());
+                    }
+                }
+            }
+        }
+        match first_error {
+            None => app.set_status(format!("{saved} Bilder gespeichert: {}", dir.display())),
+            Some(e) => app.set_status(format!(
+                "{saved} von {} Bildern gespeichert — Fehler: {e}",
+                images.len()
+            )),
+        }
+    }
+
+    /// Schreibt ein einzelnes Bild-Element; das Format folgt der Dateiendung.
+    fn write_element_image(
+        app: &EditorApp,
+        el: &crate::model::Element,
+        path: &std::path::Path,
+    ) -> std::io::Result<()> {
+        ensure_canonicalizable(path)?;
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("png")
+            .to_ascii_lowercase();
+        let bytes = if ext == "jpg" || ext == "jpeg" {
+            app.images.element_jpeg(el, 92)
+        } else {
+            app.images.element_png(el)
+        };
+        let Some(bytes) = bytes else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Bilddaten konnten nicht gelesen werden",
+            ));
+        };
+        std::fs::write(path, bytes)
+    }
+
+    /// `dir/name.ext`, bei Bedarf mit `_2`, `_3`, … bis der Name frei ist.
+    fn unique_path(dir: &std::path::Path, name: &str, ext: &str) -> PathBuf {
+        let mut path = dir.join(format!("{name}.{ext}"));
+        let mut n = 2;
+        while path.exists() && n < 1000 {
+            path = dir.join(format!("{name}_{n}.{ext}"));
+            n += 1;
+        }
+        path
+    }
+
+    /// Legt ein Bild in die System-Zwischenablage, damit es in Paint, Word
+    /// oder einem Chat eingefügt werden kann.
+    ///
+    /// `png` behält die Transparenz (Format „PNG", das z. B. GIMP und
+    /// Inkscape lesen), `flat_png` ist dieselbe Grafik auf weißem Grund für
+    /// das klassische Bitmap-Format — Windows-Bitmaps kennen kein Alpha, und
+    /// ohne die Weiß-Variante klebt Paint transparente Bereiche schwarz zu.
+    ///
+    /// Der Weg über PowerShell ist derselbe wie beim Lesen der Zwischenablage
+    /// (`poll_clipboard_image`): Er kostet nichts an Abhängigkeiten und
+    /// braucht keine eigene Fensterklasse. Der Aufruf läuft synchron und
+    /// blockiert dabei rund eine Sekunde (fast alles davon PowerShell-Start).
+    /// Das ist bewusst so: Nur so kann die Statuszeile ehrlich sagen, ob das
+    /// Bild wirklich in der Zwischenablage liegt — ein Hintergrund-Thread
+    /// müsste raten oder eine spätere Meldung über die aktuelle schreiben.
+    #[cfg(target_os = "windows")]
+    pub fn set_clipboard_image(png: &[u8], flat_png: &[u8]) -> bool {
+        let dir = std::env::temp_dir();
+        let p_png = dir.join("boxdoc_clip_out.png");
+        let p_flat = dir.join("boxdoc_clip_out_flat.png");
+        if std::fs::write(&p_png, png).is_err() || std::fs::write(&p_flat, flat_png).is_err() {
+            let _ = std::fs::remove_file(&p_png);
+            let _ = std::fs::remove_file(&p_flat);
+            return false;
+        }
+        // Beide Bilder werden über einen MemoryStream geladen, nicht über
+        // Image::FromFile — sonst hält PowerShell die Dateien offen und das
+        // Aufräumen unten schlägt fehl.
+        let script = format!(
+            "$ErrorActionPreference='Stop'; \
+             Add-Type -AssemblyName System.Windows.Forms; \
+             Add-Type -AssemblyName System.Drawing; \
+             $msPng=New-Object System.IO.MemoryStream(,[System.IO.File]::ReadAllBytes('{png}')); \
+             $msBmp=New-Object System.IO.MemoryStream(,[System.IO.File]::ReadAllBytes('{flat}')); \
+             $img=[System.Drawing.Image]::FromStream($msBmp); \
+             $data=New-Object System.Windows.Forms.DataObject; \
+             $data.SetData('PNG',$false,$msPng); \
+             $data.SetImage($img); \
+             [System.Windows.Forms.Clipboard]::SetDataObject($data,$true,10,100)",
+            png = ps_quote(&p_png.display().to_string()),
+            flat = ps_quote(&p_flat.display().to_string()),
+        );
+        let ok = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-STA",
+                "-Command",
+                &script,
+            ])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        let _ = std::fs::remove_file(&p_png);
+        let _ = std::fs::remove_file(&p_flat);
+        ok
+    }
+
+    /// Escaped einen Pfad für ein einfach-gequotetes PowerShell-Literal.
+    #[cfg(target_os = "windows")]
+    fn ps_quote(s: &str) -> String {
+        s.replace('\'', "''")
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub fn set_clipboard_image(_png: &[u8], _flat_png: &[u8]) -> bool {
+        // Nur Windows: Auf Linux/macOS hängt der Weg vom Sitzungstyp ab
+        // (xclip/wl-copy/pbcopy). Ohne getestete Umsetzung lieber ehrlich
+        // „nicht unterstützt" melden als still nichts tun.
+        false
+    }
+
     pub fn print_dialog(app: &mut crate::app::EditorApp, ctx: &egui::Context) {
         let dir = std::env::temp_dir();
         let path = dir.join("boxdoc_drucken.pdf");
@@ -761,6 +944,30 @@ mod web_impl {
         None // auf Web übernimmt der paste-Listener + take_pending_image
     }
 
+    /// Bild-Export im Browser: Download der PNG-Datei.
+    pub fn export_image_dialog(app: &mut EditorApp) {
+        let images = app.selected_images();
+        let Some(el) = images.first() else {
+            app.set_status("Kein Bild ausgewählt.");
+            return;
+        };
+        match app.images.element_png(el) {
+            Some(png) => {
+                download_bytes(&png, "bild.png", "image/png");
+                app.set_status("Bild heruntergeladen.");
+            }
+            None => app.set_status("Bilddaten konnten nicht gelesen werden."),
+        }
+    }
+
+    /// Im Browser gibt es keinen synchronen Weg, ein Bild in die
+    /// Zwischenablage zu schreiben (`navigator.clipboard.write` ist async und
+    /// braucht eine Nutzergeste). Strg+C kopiert dort weiterhin nur die
+    /// BoxDoc-Objekte.
+    pub fn set_clipboard_image(_png: &[u8], _flat_png: &[u8]) -> bool {
+        false
+    }
+
     pub fn export_odt_dialog(app: &mut EditorApp) {
         app.set_status("ODT-Export wird auf Web noch nicht unterstützt.");
     }
@@ -778,11 +985,14 @@ mod web_impl {
     }
 
     fn download_file(content: &str, filename: &str, mime: &str) {
+        download_bytes(content.as_bytes(), filename, mime);
+    }
+
+    fn download_bytes(bytes: &[u8], filename: &str, mime: &str) {
         use js_sys::Uint8Array;
         use wasm_bindgen::JsCast;
         use web_sys::{Blob, BlobPropertyBag};
 
-        let bytes = content.as_bytes();
         let array = Uint8Array::new_with_length(bytes.len() as u32);
         array.copy_from(bytes);
 

@@ -52,6 +52,8 @@ BoxDoc verbindet die Einfachheit eines Objekt-Canvas mit der Vertrautheit klassi
 - PDF-Export und Drucken — mit **eingebetteter** Schrift, und zwar genau der,
   mit der auch auf dem Bildschirm gezeichnet wurde
 - SVG-Export — ganze Seite **oder nur die Auswahl**
+- Bild-Export — ein ausgewähltes Bild als PNG oder JPEG wieder herausspeichern,
+  und mit Strg+C auch direkt in die Zwischenablage (Paint, Word, Chat)
 
 ---
 
@@ -157,6 +159,41 @@ Was dabei herauskommt:
 
 Exportiert wird immer nur die **aktuelle** Seite: SVG kennt keine Seiten,
 alle übereinanderzustapeln wäre nicht das, was jemand will.
+
+---
+
+### Bilder herausspeichern und kopieren
+
+Ist ein Bild ausgewählt, steht im Eigenschaften-Panel neben „Auswahl als SVG…"
+der Knopf **„Bild speichern…"** (im Menü: **Datei → Ausgewähltes Bild
+speichern…**). Gespeichert wird die **Bilddatei selbst**, nicht die
+Seitendarstellung:
+
+- in **Originalauflösung**, nicht in der Größe, auf die du das Bild auf der
+  Seite gezogen hast,
+- auf den **Crop** beschnitten — was du siehst, ist was du bekommst,
+- aber **ohne Drehung**: `rotation` beschreibt, wie das Bild auf der Seite
+  liegt, nicht wie die Datei aussieht. Eine schräge Kopie mit transparenten
+  Ecken wäre in Paint & Co. nur im Weg. Wer die Seitendarstellung will, nimmt
+  den SVG- oder PDF-Export.
+
+Als Format stehen PNG und JPEG zur Wahl. Ein unbeschnittenes PNG wird
+**byteweise durchgereicht** statt neu kodiert — die Datei kommt genau so
+heraus, wie sie hineingegangen ist. Bei JPEG landen durchsichtige Bereiche auf
+Weiß, weil JPEG kein Alpha kennt (sonst würden sie schwarz).
+
+Sind mehrere Bilder ausgewählt, fragt der Dialog nach einem **Ordner** und legt
+sie dort einzeln ab; vorhandene Dateien werden nicht überschrieben.
+
+**Strg+C** kopiert nicht nur das BoxDoc-Objekt: Ist genau **ein Bild**
+ausgewählt, liegt es danach auch als Pixelbild in der System-Zwischenablage und
+lässt sich direkt in Paint, Word oder einen Chat einfügen. Programme, die es
+können, bekommen die Version **mit** Transparenz; für das klassische
+Bitmap-Format (Paint) wird zusätzlich eine Variante auf weißem Grund abgelegt —
+sonst würde Paint durchsichtige Bereiche schwarz zukleben. Bei mehreren Bildern
+in der Auswahl bleibt es bei den BoxDoc-Objekten: welches gemeint wäre, ist
+nicht zu erraten. Der Weg läuft über PowerShell und braucht dadurch etwa eine
+Sekunde — die Statuszeile sagt danach, ob es geklappt hat. Nur unter Windows.
 
 ---
 
