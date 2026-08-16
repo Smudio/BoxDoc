@@ -235,6 +235,30 @@ pub enum CropEdge {
     Bottom,
 }
 
+/// Wie ein Klick / Auswahl-Rechteck die bestehende Auswahl verändert.
+/// Shift = [`Add`], Strg = [`Remove`], beides oder nichts = [`Replace`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SelectionOp {
+    /// Auswahl ersetzen (normales Verhalten ohne Modifier).
+    Replace,
+    /// Zur bestehenden Auswahl hinzufügen (Shift).
+    Add,
+    /// Aus der bestehenden Auswahl entfernen (Strg).
+    Remove,
+}
+
+impl SelectionOp {
+    /// Modifier-Zustand zur Operation auflösen. Beide gleichzeitig heben
+    /// sich auf → Replace.
+    pub fn from_modifiers(shift: bool, ctrl: bool) -> Self {
+        match (shift, ctrl) {
+            (true, false) => SelectionOp::Add,
+            (false, true) => SelectionOp::Remove,
+            _ => SelectionOp::Replace,
+        }
+    }
+}
+
 /// Ausrichtungs-Operation für Mehrfachauswahl.
 enum AlignOp {
     Left,
@@ -488,12 +512,19 @@ impl EditorApp {
         self.selection.clear();
     }
 
-    pub fn toggle_selected(&mut self, id: u64) {
-        if let Some(pos) = self.selection.iter().position(|&x| x == id) {
-            self.selection.swap_remove(pos);
-        } else {
+    /// Element zur Auswahl hinzufügen, falls noch nicht enthalten.
+    /// Die Reihenfolge der bestehenden Auswahl bleibt unverändert.
+    pub fn add_selected(&mut self, id: u64) {
+        if !self.is_selected(id) {
             self.selection.push(id);
         }
+    }
+
+    /// Element ordnungserhaltend aus der Auswahl entfernen, falls enthalten.
+    /// `retain` statt `swap_remove`, damit die Primary-Auswahl (`first`)
+    /// nicht unerwartet auf ein anderes Element springt.
+    pub fn remove_selected(&mut self, id: u64) {
+        self.selection.retain(|&x| x != id);
     }
 }
 

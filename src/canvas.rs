@@ -388,8 +388,14 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                     let e = to_page(cur);
                     let (min_x, max_x) = (s.x.min(e.x), s.x.max(e.x));
                     let (min_y, max_y) = (s.y.min(e.y), s.y.max(e.y));
-                    let additive = ui.input(|i| i.modifiers.shift || i.modifiers.ctrl);
-                    if !additive {
+                    // Modifier beim Loslassen auswerten: Shift = Treffer zur
+                    // Auswahl hinzufügen, Strg = Treffer aus der Auswahl
+                    // entfernen, ohne/heben sich auf = Auswahl ersetzen.
+                    let op = crate::app::SelectionOp::from_modifiers(
+                        ui.input(|i| i.modifiers.shift),
+                        ui.input(|i| i.modifiers.ctrl),
+                    );
+                    if op == crate::app::SelectionOp::Replace {
                         app.clear_selection();
                     }
                     let hits: Vec<u64> = app.doc.pages[page_idx]
@@ -404,13 +410,14 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                         .map(|el| el.id)
                         .collect();
                     for id in hits {
-                        if additive && app.is_selected(id) {
-                            // Bereits ausgewählt → entfernen (Toggle).
-                            if let Some(pos) = app.selection.iter().position(|&x| x == id) {
-                                app.selection.swap_remove(pos);
+                        match op {
+                            crate::app::SelectionOp::Add => app.add_selected(id),
+                            crate::app::SelectionOp::Remove => app.remove_selected(id),
+                            crate::app::SelectionOp::Replace => {
+                                if !app.is_selected(id) {
+                                    app.selection.push(id);
+                                }
                             }
-                        } else if !app.is_selected(id) {
-                            app.selection.push(id);
                         }
                     }
                 }
@@ -826,7 +833,10 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
         && !click_on_ui
     {
         if let Some(pointer) = pointer {
-            let additive = ui.input(|i| i.modifiers.shift || i.modifiers.ctrl);
+            let op = crate::app::SelectionOp::from_modifiers(
+                ui.input(|i| i.modifiers.shift),
+                ui.input(|i| i.modifiers.ctrl),
+            );
             start_interaction(
                 app,
                 page_idx,
@@ -834,7 +844,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                 to_screen,
                 to_page,
                 zoom,
-                additive,
+                op,
                 ctx,
             );
         }
@@ -1997,7 +2007,7 @@ fn start_interaction(
     to_screen: impl Fn(Pos2) -> Pos2,
     to_page: impl Fn(Pos2) -> Vec2,
     zoom: f32,
-    shift: bool,
+    op: crate::app::SelectionOp,
     ctx: &egui::Context,
 ) {
     let sel = app.primary();
@@ -2180,56 +2190,68 @@ fn start_interaction(
     // Kontur.
     let hit = topmost_at(app, page_idx, pointer, &to_screen, zoom, ctx);
 
-    let shift_held = shift;
-
     match hit {
         Some(id) => {
-            if app.is_selected(id) && app.selection.len() > 1 && !shift_held {
-                // Bereits ausgewählt in einer Multi-Selection → alle verschieben.
-                let starts: Vec<(u64, f32, f32)> = app.doc.pages[page_idx]
-                    .elements
-                    .iter()
-                    .filter(|e| app.is_selected(e.id))
-                    .map(|e| (e.id, e.x, e.y))
-                    .collect();
-                app.push_history();
-                app.interaction = Interaction::DragBodies {
-                    start_pointer: pointer,
-                    starts,
-                };
-            } else if shift_held {
-                // Shift/Ctrl+Klick → Auswahl umschalten (hinzufügen/entfernen).
-                app.toggle_selected(id);
-                app.crop_mode = false;
-            } else {
-                // Einzelnes Objekt auswählen und verschieben.
-                let el = app.doc.pages[page_idx]
-                    .elements
-                    .iter()
-                    .find(|e| e.id == id)
-                    .unwrap();
-                let xy = (el.x, el.y);
-                let is_path = el.kind == ElementKind::Path;
-                app.select_only(id);
-                app.crop_mode = false;
-                // Ein ausgewählter Pfad sieht aus wie jede andere Form. Ohne
-                // diesen Hinweis findet niemand, dass an ihm die einzelnen
-                // Punkte veränderbar sind.
-                if is_path && app.path_edit.is_none() {
-                    app.status = String::from(
-                        "Pfad ausgewählt — Doppelklick oder N, um die Punkte zu bearbeiten.",
-                    );
+            match op {
+                crate::app::SelectionOp::Add => {
+                    // Shift+Klick → zur bestehenden Auswahl hinzufügen.
+                    // Bestehende Auswahl bleibt unverändert, kein Drag-Start.
+                    app.add_selected(id);
+                    app.crop_mode = false;
                 }
-                app.push_history();
-                app.interaction = Interaction::DragBodies {
-                    start_pointer: pointer,
-                    starts: vec![(id, xy.0, xy.1)],
-                };
+                crate::app::SelectionOp::Remove => {
+                    // Strg+Klick → aus der Auswahl entfernen. Die übrige
+                    // Auswahl bleibt stehen, kein Drag-Start.
+                    app.remove_selected(id);
+                    app.crop_mode = false;
+                }
+                crate::app::SelectionOp::Replace => {
+                    if app.is_selected(id) && app.selection.len() > 1 {
+                        // Bereits ausgewählt in einer Multi-Selection → alle verschieben.
+                        let starts: Vec<(u64, f32, f32)> = app.doc.pages[page_idx]
+                            .elements
+                            .iter()
+                            .filter(|e| app.is_selected(e.id))
+                            .map(|e| (e.id, e.x, e.y))
+                            .collect();
+                        app.push_history();
+                        app.interaction = Interaction::DragBodies {
+                            start_pointer: pointer,
+                            starts,
+                        };
+                    } else {
+                        // Einzelnes Objekt auswählen und verschieben.
+                        let el = app.doc.pages[page_idx]
+                            .elements
+                            .iter()
+                            .find(|e| e.id == id)
+                            .unwrap();
+                        let xy = (el.x, el.y);
+                        let is_path = el.kind == ElementKind::Path;
+                        app.select_only(id);
+                        app.crop_mode = false;
+                        // Ein ausgewählter Pfad sieht aus wie jede andere Form. Ohne
+                        // diesen Hinweis findet niemand, dass an ihm die einzelnen
+                        // Punkte veränderbar sind.
+                        if is_path && app.path_edit.is_none() {
+                            app.status = String::from(
+                                "Pfad ausgewählt — Doppelklick oder N, um die Punkte zu bearbeiten.",
+                            );
+                        }
+                        app.push_history();
+                        app.interaction = Interaction::DragBodies {
+                            start_pointer: pointer,
+                            starts: vec![(id, xy.0, xy.1)],
+                        };
+                    }
+                }
             }
         }
         None => {
-            // Leere Fläche → Auswahl-Rechteck starten.
-            if !shift_held {
+            // Leere Fläche → Auswahl-Rechteck starten. Nur bei Replace die
+            // Auswahl vorher leeren; mit Add/Remove wirkt das Rechteck auf
+            // der bestehenden Auswahl.
+            if op == crate::app::SelectionOp::Replace {
                 app.clear_selection();
             }
             app.crop_mode = false;
