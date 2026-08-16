@@ -286,6 +286,7 @@ pub fn elements_equal(a: &Element, b: &Element) -> bool {
         && a.bold == b.bold
         && a.italic == b.italic
         && a.underline == b.underline
+        && a.strikethrough == b.strikethrough
         && a.align == b.align
         && a.valign == b.valign
         && feq(a.indent, b.indent)
@@ -392,6 +393,7 @@ fn merge_element(base: &Element, local: &Element, remote: &Element) -> (Element,
     merge_field!(bold);
     merge_field!(italic);
     merge_field!(underline);
+    merge_field!(strikethrough);
     merge_field!(align);
     merge_field!(valign);
     merge_field!(auto_height);

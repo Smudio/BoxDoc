@@ -8,7 +8,7 @@ use std::sync::{Arc, OnceLock};
 
 use egui::{FontData, FontDefinitions, FontFamily};
 
-use crate::model::FONT_CHOICES;
+use crate::model::{FontStyle, FONT_CHOICES};
 use crate::store::FontStore;
 
 /// Menge der erfolgreich registrierten Schrift-Schlüssel.
@@ -28,7 +28,11 @@ fn remember(key: &str) {
 }
 
 /// Liefert die eingebetteten Bytes für einen bundled Font-Key.
-fn bundled_bytes(key: &str) -> Option<&'static [u8]> {
+///
+/// Öffentlich, weil der PDF-Export dieselben Bytes braucht: Diese Schriften
+/// liegen nur in der Binary, nicht auf der Platte. Wer sie über einen Pfad
+/// sucht, findet nichts.
+pub fn bundled_bytes(key: &str) -> Option<&'static [u8]> {
     Some(match key {
         "inter" => include_bytes!("../assets/fonts/Inter-Regular.ttf"),
         "roboto" => include_bytes!("../assets/fonts/Roboto-Regular.ttf"),
@@ -50,10 +54,16 @@ fn register(fonts: &mut FontDefinitions, key: &str, bytes: Vec<u8>) {
     remember(key);
 }
 
-/// Alias-Familien für Bold/Italic beim Default-Font (Proportional).
-/// canvas.rs nutzt FontFamily::Name("Bold"|"Italics"|"Bold Italic") für
-/// Default-Font-Elemente mit bold/italic. Diese müssen gebunden sein,
-/// sonst panicert egui beim Text-Shaping.
+/// Alias-Familien "Bold"/"Italics"/"Bold Italic" für den Default-Font.
+///
+/// **Sie enthalten keinen eigenen Schnitt** — nur dieselbe Schriftliste wie
+/// `Proportional`. Genau darum wählt [`family_for_style`] sie nicht mehr aus
+/// und meldet [`has_style`] für die Standardschrift `false`: Über sie gesetzter
+/// Text sah magerem Text auf den Punkt genau gleich.
+///
+/// Angelegt bleiben sie trotzdem: egui panickt beim Shaping, sobald eine
+/// unbekannte Familie angefragt wird, und eine leere Familie ist ein billiger
+/// Fangschutz.
 fn rebuild_proportional_aliases(fonts: &mut FontDefinitions) {
     let prop_fonts: Vec<String> = fonts
         .families
@@ -82,28 +92,40 @@ pub fn install(ctx: &egui::Context) {
 pub fn install_with_custom(ctx: &egui::Context, custom: &FontStore) {
     let mut fonts = FontDefinitions::default();
 
-    // Bundled + System-Schriften.
+    // Bundled + System-Schriften, je Schnitt.
+    //
+    // Ein echter Fett-Schnitt ist nicht nur schöner als ein nachgeahmter, er
+    // ist auch **anders breit**. Weil `text_layout` mit genau der Familie misst,
+    // die hier registriert wird, sitzen die Zeilenumbrüche damit dort, wo sie
+    // in der gedruckten Fassung auch sitzen.
     for def in FONT_CHOICES {
         if def.key == "default" {
             continue;
         }
-        let bytes: Option<Vec<u8>> = if def.bundled {
-            bundled_bytes(def.key).map(|b| b.to_vec())
-        } else {
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                def.paths
-                    .iter()
-                    .find(|p| std::fs::metadata(p).is_ok())
-                    .and_then(|p| std::fs::read(p).ok())
+        for style in FontStyle::all() {
+            // Eingebettete Schriften liegen nur als Regular in der Binary.
+            let bytes: Option<Vec<u8>> = if def.bundled {
+                if style == FontStyle::Regular {
+                    bundled_bytes(def.key).map(|b| b.to_vec())
+                } else {
+                    None
+                }
+            } else {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    def.paths_for(style)
+                        .iter()
+                        .find(|p| std::fs::metadata(p).is_ok())
+                        .and_then(|p| std::fs::read(p).ok())
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    None
+                }
+            };
+            if let Some(bytes) = bytes {
+                register(&mut fonts, &family_key(def.key, style), bytes);
             }
-            #[cfg(target_arch = "wasm32")]
-            {
-                None
-            }
-        };
-        if let Some(bytes) = bytes {
-            register(&mut fonts, def.key, bytes);
         }
     }
 
@@ -124,15 +146,63 @@ pub fn install_with_custom(ctx: &egui::Context, custom: &FontStore) {
     ctx.set_fonts(fonts);
 }
 
-/// Liefert die `FontFamily` für einen Element-Schlüssel.
-pub fn family_for(key: &str) -> FontFamily {
+/// Familienname eines Schnitts: `"arial"`, `"arial:b"`, `"arial:i"`, `"arial:bi"`.
+///
+/// Der Regular-Schnitt behält den nackten Schlüssel — so bleibt jede bereits
+/// registrierte Familie und jeder Aufruf von [`family_for`] unverändert gültig.
+fn family_key(key: &str, style: FontStyle) -> String {
+    format!("{key}{}", style.suffix())
+}
+
+/// Ist dieser Schnitt der Schrift wirklich geladen — oder müsste er
+/// nachgeahmt werden?
+///
+/// Canvas und PDF-Export fragen beide hier, damit sie sich einig sind: Wo ein
+/// echter Schnitt liegt, benutzen ihn beide; wo keiner liegt, ahmen ihn beide
+/// nach. Ohne diese gemeinsame Auskunft könnte der Bildschirm einen echten
+/// Schnitt zeigen, den das PDF nachahmt (oder umgekehrt).
+pub fn has_style(key: &str, style: FontStyle) -> bool {
+    if style == FontStyle::Regular {
+        return true;
+    }
     if key == "default" || key.is_empty() {
+        // Nein — und das war lange eine stille Lüge. Die Familien "Bold",
+        // "Italics" und "Bold Italic" existieren zwar, sind aber mit
+        // demselben mageren Schriftschnitt gefüllt wie "Proportional"
+        // (siehe `rebuild_proportional_aliases`). Fett gesetzter Text in der
+        // Standardschrift maß deshalb auf den Punkt genau so breit wie
+        // magerer und sah auf dem Bildschirm identisch aus, während im PDF
+        // echtes Helvetica-Bold stand.
+        return false;
+    }
+    let name = family_key(key, style);
+    registered().lock().unwrap().iter().any(|k| *k == name)
+}
+
+/// Liefert die `FontFamily` für einen Element-Schlüssel (Regular-Schnitt).
+pub fn family_for(key: &str) -> FontFamily {
+    family_for_style(key, FontStyle::Regular)
+}
+
+/// Liefert die `FontFamily` für Schlüssel **und Schnitt**.
+///
+/// Fehlt der Schnitt, wird auf den Regular-Schnitt derselben Schrift
+/// zurückgefallen — lieber dieselbe Schrift ohne Fettung als eine fremde
+/// Schrift mit. Fehlt auch der, bleibt der egui-Standard.
+pub fn family_for_style(key: &str, style: FontStyle) -> FontFamily {
+    if key == "default" || key.is_empty() {
+        // Immer Proportional: Die Alias-Familien "Bold"/"Italics" enthalten
+        // denselben mageren Schnitt (siehe `has_style`), sie hier zu wählen
+        // täuschte nur eine Fettung vor. Der Canvas ahmt sie stattdessen nach.
         return FontFamily::Proportional;
     }
     let list = registered().lock().unwrap();
-    if list.iter().any(|k| k == key) {
-        FontFamily::Name(key.into())
-    } else {
-        FontFamily::Proportional
+    let styled = family_key(key, style);
+    if list.iter().any(|k| *k == styled) {
+        return FontFamily::Name(styled.into());
     }
+    if list.iter().any(|k| k == key) {
+        return FontFamily::Name(key.into());
+    }
+    FontFamily::Proportional
 }

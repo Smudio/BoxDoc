@@ -67,7 +67,8 @@ ELEMENT (je nach "kind" sind verschiedene Felder relevant)
   "font_size": <pt>,
   "font": "default"|"inter"|"roboto"|"lora"|"jetbrains"|"pacifico"|<custom-font-name>,
   "color": [r, g, b, a],             // 0..255; a=255 deckend
-  "bold": <bool>, "italic": <bool>, "underline": <bool>,
+  "bold": <bool>, "italic": <bool>,
+  "underline": <bool>, "strikethrough": <bool>,
   "align": "Left"|"Center"|"Right", "valign": "Top"|"Middle"|"Bottom",
   "indent": <pt>,
   "auto_height": <bool>,             // Text; true = h waechst mit dem Inhalt
@@ -84,8 +85,8 @@ ELEMENT (je nach "kind" sind verschiedene Felder relevant)
 
 ELEMENT-TYPEN
 -------------
-Text       : text, font_size, font, color, bold, italic, underline, align, valign,
-             indent, auto_height
+Text       : text, font_size, font, color, bold, italic, underline, strikethrough,
+             align, valign, indent, auto_height
 Rectangle  : fill_color, stroke_width, stroke_color, corner_radius
 Line       : stroke_width, stroke_color (Linie = Box mit h=0 + rotation)
 Ellipse    : fill_color, stroke_width, stroke_color (Kreis = w==h; corner_radius ignoriert)
@@ -134,6 +135,25 @@ Zeilenumbrueche selbst setzen; `\n` erzwingt lediglich einen zusaetzlichen.
 Fuer die meisten Faelle ist auto_height: true richtig. Setze `w` passend und
 lass BoxDoc die Hoehe bestimmen.
 
+TEXTAUSZEICHNUNG
+----------------
+Vier Schalter, alle unabhaengig kombinierbar und alle im PDF- wie im
+SVG-Export enthalten:
+
+  "bold"          fett
+  "italic"        kursiv
+  "underline"     unterstrichen
+  "strikethrough" durchgestrichen
+
+Sie gelten immer fuer das GANZE Element — es gibt keine Auszeichnung einzelner
+Woerter innerhalb eines Textblocks. Willst du ein einzelnes Wort hervorheben,
+mach daraus ein eigenes Text-Element und setze es daneben.
+
+"bold"/"italic" waehlen einen echten Schriftschnitt, wo die Schrift einen
+mitbringt (die System-Schriften auf dem Desktop). Wo nicht — bei den
+eingebetteten Schriften und im Browser — werden sie nachgeahmt und sehen
+etwas anders aus. Der Umbruch stimmt in beiden Faellen.
+
 KOOORDINATENSYSTEM
 ------------------
 - Maßeinheit: Punkt (1 pt = 1/72 Zoll; 1 Zoll = 25,4 mm)
@@ -169,7 +189,8 @@ BEISPIEL: Neues Text-Element hinzufügen (an elements anhängen)
   "id": <nächste freie ID>, "kind": "Text",
   "x": 100.0, "y": 200.0, "w": 400.0, "h": 40.0, "rotation": 0.0,
   "text": "Neuer Absatz", "font_size": 14.0, "font": "default",
-  "color": [20,20,20,255], "bold": false, "italic": false, "underline": false,
+  "color": [20,20,20,255], "bold": false, "italic": false,
+  "underline": false, "strikethrough": false,
   "align": "Left", "valign": "Top", "indent": 0.0, "auto_height": true,
   "crop": {"x":0,"y":0,"w":1,"h":1}, "image_w": 0, "image_h": 0,
   "fill_color": [80,140,220,60], "stroke_width": 2.0,

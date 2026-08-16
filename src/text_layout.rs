@@ -17,7 +17,7 @@
 //! Umbruchstellen sind identisch, weil Schriftgröße und Umbruchbreite
 //! proportional mitskalieren.
 
-use crate::model::{Element, TextAlign, VAlign};
+use crate::model::{Element, FontStyle, TextAlign, VAlign};
 
 /// Eine fertig umgebrochene, ausgerichtete Textzeile.
 #[derive(Debug, Clone, PartialEq)]
@@ -133,20 +133,49 @@ pub fn natural_width(fonts: &mut egui::epaint::text::FontsView<'_>, el: &Element
 /// Nur Rückfallwert für Zeilen ohne Glyphen (Leerzeilen).
 const DEFAULT_ASCENT_RATIO: f32 = 0.8;
 
-/// Bestimmt die egui-`FontId` für ein Element, inklusive Bold/Italic-Variante
-/// bei der Standardschrift.
+/// Bestimmt die egui-`FontId` für ein Element, inklusive Fett-/Kursiv-Schnitt.
+///
+/// Früher galt das nur für die Standardschrift — bei jeder anderen wurde der
+/// Schnitt beim Layout stillschweigend fallen gelassen. Auf dem Bildschirm
+/// stand dann magere Schrift, im PDF fette; und weil fette Glyphen breiter
+/// sind, brachen beide auch an verschiedenen Stellen um.
 pub fn font_id_for(el: &Element, scale: f32) -> egui::FontId {
-    let size = el.font_size * scale;
-    if el.font == "default" || el.font.is_empty() {
-        let family = match (el.bold, el.italic) {
-            (true, true) => egui::FontFamily::Name("Bold Italic".into()),
-            (true, false) => egui::FontFamily::Name("Bold".into()),
-            (false, true) => egui::FontFamily::Name("Italics".into()),
-            (false, false) => egui::FontFamily::Proportional,
-        };
-        egui::FontId::new(size, family)
-    } else {
-        egui::FontId::new(size, crate::fonts::family_for(&el.font))
+    egui::FontId::new(
+        el.font_size * scale,
+        crate::fonts::family_for_style(&el.font, FontStyle::of(el)),
+    )
+}
+
+/// Lage und Stärke der Auszeichnungslinien eines Textelements — in pt,
+/// relativ zur **Grundlinie** der jeweiligen Zeile.
+///
+/// Warum hier und nicht dreimal beim Zeichnen: Unterstreichung und
+/// Durchstreichung sind gemalte Linien, keine Glyphen. Rechnete jeder Renderer
+/// ihre Lage selbst aus, säße derselbe Strich auf dem Bildschirm, im PDF und
+/// im SVG an drei verschiedenen Stellen — genau der Fehler, den dieses Modul
+/// für den Zeilenumbruch bereits behoben hat.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DecorationMetrics {
+    /// Abstand der Unterstreichung **unterhalb** der Grundlinie.
+    pub underline_dy: f32,
+    /// Abstand der Durchstreichung **oberhalb** der Grundlinie. Etwa halbe
+    /// x-Höhe, damit der Strich durch die Mitte der Kleinbuchstaben läuft.
+    pub strike_dy: f32,
+    /// Strichstärke beider Linien.
+    pub thickness: f32,
+}
+
+/// Die Auszeichnungs-Maße zu einer Schriftgröße.
+///
+/// Die Anteile sind die üblichen typografischen Verhältnisse; sie aus der
+/// Schriftdatei zu lesen wäre genauer, ist über egui aber nicht zugänglich —
+/// und eine falsche, aber überall **gleiche** Lage ist hier mehr wert als eine
+/// richtige, die nur einer der drei Renderer kennt.
+pub fn decoration_metrics(font_size: f32) -> DecorationMetrics {
+    DecorationMetrics {
+        underline_dy: font_size * 0.14,
+        strike_dy: font_size * 0.26,
+        thickness: (font_size * 0.06).max(0.4),
     }
 }
 

@@ -12,18 +12,19 @@ Diese Datei ist die einzige verbindliche Quelle für Status und Planung.
 | Bereich | Stand | Wo |
 |---|---|---|
 | Elemente | `Text`, `Image`, `Rectangle`, `Line`, `Ellipse`, `Path` (mit Bézier-Kurven) | `src/model.rs` |
+| Text | fett, kursiv, unterstrichen, durchgestrichen; echte Schriftschnitte, sonst nachgeahmt | `src/text_layout.rs`, `src/fonts.rs` |
 | Editor | Multi-Select, Copy/Paste-Ghost, Crop, Rotation, Resize, Snapping | `src/canvas.rs` |
 | Zeichnen | Auswahl · Linie · Pfad (Pen) · Freihand, dazu Knotenbearbeitung | `src/canvas.rs`, `src/geometry.rs` |
 | Undo/Redo | Snapshot-basiert, max. 200 Einträge | `src/history.rs` |
 | AI-Sync | Native `notify`-File-Watcher, Reload als Undo-Schritt | `src/file_watch.rs` |
 | Multiuser | Drei-Wege-Merge, optimistische Nebenläufigkeit über `version` | `src/merge.rs`, `src/web_sync.rs` |
 | ODT | Import + Export (nativ) mit ZIP-Limit, **ohne Shapes** | `src/odt.rs` |
-| PDF | Import (pdfium) + Export (printpdf), alle Shapes, echte Kurven | `src/pdf_import.rs`, `src/printing.rs` |
+| PDF | Import (pdfium) + Export (printpdf), alle Shapes, echte Kurven, eingebettete Schriften | `src/pdf_import.rs`, `src/printing.rs` |
 | SVG | Export: ganze Seite **oder Auswahl**, echte Primitive und Transparenz | `src/svg.rs` |
 | Sicherheit | Shell-Args separiert, Pfad-Checks, ZIP-Limit, Backend-Token | `SECURITY.md` |
 | WASM | Lauffähig inkl. File-I/O über Browser-API und Server-Sync | `src/io.rs` (`web_impl`) |
 | Papier | A3, A4, A5, Letter, Legal · Portrait/Landscape · Mehrere Seiten | `src/model.rs` |
-| Tests | 227 bestanden, `cargo test` | `src/`, `tests/` |
+| Tests | 247 bestanden, `cargo test` | `src/`, `tests/` |
 
 **Offen (bekannt):** kein responsives Mobile, keine CI, ODT-Export ohne
 Shapes/Textformatierung, Text-Rotation wird nicht gerendert, keine eigene
@@ -416,6 +417,66 @@ besonders eine **Auswahl**. Und der Zeiger soll vorher sagen, was ein Klick tut.
 **Nicht enthalten:** SVG-**Import**, mehrseitige SVG-Ausgabe, Einbetten der
 Schriften in die SVG-Datei (sie werden nur benannt, mit generischer
 Rückfallebene).
+
+---
+
+## Phase 12 — Textauszeichnung & Schrifteinbettung · v0.7.0 ✅ erledigt
+
+**Ziel:** Fett, kursiv, unterstrichen und durchgestrichen sollen vollständig
+funktionieren — auf dem Bildschirm, im PDF und im SVG. Auslöser war, dass eine
+ausgezeichnete Seite nicht sauber als PDF herauskam.
+
+Die Schalter gab es größtenteils schon. Was fehlte, war, dass sie *ankamen*.
+
+### Neu
+- [x] `strikethrough` (durchgestrichen) im Modell, im Panel, im Canvas, im
+      PDF- und im SVG-Export sowie im Merge — der letzte fehlende der vier
+      klassischen Auszeichnungen
+- [x] `FontStyle` (Regular/Bold/Italic/BoldItalic) als eigener Typ statt
+      zweier durchgereichter `bool`
+- [x] **Echte Schnitte** je Schrift: `FontDef` kennt jetzt `bold_paths`,
+      `italic_paths` und `bold_italic_paths`; `fonts.rs` registriert sie als
+      eigene Familien, `printing.rs` bettet die passende Datei ein
+- [x] `fonts::has_style` als **gemeinsame** Auskunft für Bildschirm und PDF,
+      ob ein echter Schnitt vorliegt oder nachgeahmt werden muss
+- [x] Nachahmung von fett auch auf dem Canvas (mehrfach versetzt gezeichnet),
+      passend zum Umriss, den der PDF-Export zeichnet
+- [x] `text_layout::decoration_metrics` — Lage und Stärke der
+      Auszeichnungslinien einmal in pt, für Canvas, PDF und SVG
+
+### Behoben
+- [x] **Der Schnitt fiel beim Layout unter den Tisch.** `font_id_for` wertete
+      `bold`/`italic` nur für die Standardschrift aus. Fettes Arial stand auf
+      dem Bildschirm mager und im PDF fett — und weil fette Glyphen breiter
+      sind, brachen beide an verschiedenen Stellen um
+- [x] **Die Alias-Familien „Bold"/„Italics" waren leer** — sie enthielten
+      denselben mageren Schnitt wie `Proportional`. Fett gesetzter Text in der
+      Standardschrift maß auf den Punkt genau so breit wie magerer
+- [x] **Eingebettete Schriften kamen nie ins PDF.** Der Export suchte sie über
+      `paths`, das bei ihnen leer ist, und fiel auf Arial zurück — im
+      Browser-Build, wo es *nur* diese Schriften gibt, betraf das alles
+- [x] **Für „default" stand Helvetica im PDF**, nicht die Schrift, mit der
+      egui zeichnet. Andere Zeichenbreiten als die gemessenen: Der Text lief
+      über seine Breite hinaus, die Unterstreichung endete sichtbar vor dem
+      letzten Buchstaben. Jetzt kommen die Bytes aus
+      `egui::FontDefinitions::default()`
+- [x] **Der Unterstrich riss den Grafikzustand mit** — er setzte die
+      Strichstärke mitten in der Zeilenschleife auf seinen eigenen Wert, sodass
+      ab der zweiten Zeile der nachgeahmte Fettdruck um ein Vielfaches zu dick
+      auftrug. Glyphen und Linien laufen jetzt in getrennten Durchgängen
+- [x] **Die Linienfarbe war ererbt:** ohne eigene Zuweisung nahm ein
+      Unterstrich die Randfarbe des zuletzt gezeichneten Rechtecks an
+- [x] Der Hit-Test rechnete mit dem mageren Schnitt und griff bei fettem Text
+      daneben
+
+### Tests
+- [x] `cargo test` meldet 247 bestandene Tests (vorher 227); neu ist
+      `tests/text_styles.rs` (18) plus zwei zum SVG-Export
+
+**Nicht enthalten:** Auszeichnung einzelner Wörter innerhalb eines Textblocks
+(sie gilt je Element), Kursiv-Nachahmung auf dem Canvas (egui kann eine Galley
+nicht scheren — im PDF wird geschert), Einbetten von Custom-Fonts aus der
+`.boxdoc`-Datei in das PDF.
 
 ---
 

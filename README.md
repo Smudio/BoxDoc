@@ -11,6 +11,9 @@ BoxDoc verbindet die Einfachheit eines Objekt-Canvas mit der Vertrautheit klassi
 **Objekte**
 - Frei verschiebbare Text- und Bild-Objekte
 - Text mit Inline-Bearbeitung (Doppelklick), Einzug, Farbe, Schriftart und -größe
+- Auszeichnung: **fett**, *kursiv*, unterstrichen, durchgestrichen — frei
+  kombinierbar und vollständig im PDF- wie im SVG-Export. Wo die Schrift einen
+  echten Schnitt mitbringt, wird er benutzt; sonst wird er nachgeahmt
 - Bilder per Drag & Drop — skalieren, frei drehen, zuschneiden (Crop)
 - Horizontale und vertikale Textausrichtung
 - Formen: Rechteck, Ellipse, Linie
@@ -46,7 +49,8 @@ BoxDoc verbindet die Einfachheit eines Objekt-Canvas mit der Vertrautheit klassi
 **Dateiformate**
 - Natives `.boxdoc`-Format (Speichern/Öffnen)
 - ODT-Import und -Export (OpenDocument, LibreOffice-kompatibel)
-- PDF-Export und Drucken
+- PDF-Export und Drucken — mit **eingebetteter** Schrift, und zwar genau der,
+  mit der auch auf dem Bildschirm gezeichnet wurde
 - SVG-Export — ganze Seite **oder nur die Auswahl**
 
 ---

@@ -378,6 +378,42 @@ fn text_wird_als_text_und_nicht_als_pfad_exportiert() {
 }
 
 #[test]
+fn unterstrich_und_durchstreichung_stehen_in_einem_attribut() {
+    // SVG kennt nur ein `text-decoration` je Element. Zweimal notiert gewönne
+    // das letzte, und die Unterstreichung fiele stillschweigend weg.
+    let mut el = Element::new_text(1, 40.0, 40.0);
+    el.text = String::from("Hallo Welt");
+    el.underline = true;
+    el.strikethrough = true;
+    let doc = doc_mit(vec![el]);
+    let layouts = boxdoc::printing::collect_layouts(&ctx(), &doc);
+    let svg = svg_string(&doc, &ImageStore::default(), &layouts, &Scope::Page(0)).expect("Export");
+
+    assert_eq!(
+        svg.matches("text-decoration=").count(),
+        1,
+        "genau ein text-decoration erwartet:\n{svg}"
+    );
+    assert!(
+        svg.contains("text-decoration=\"underline line-through\""),
+        "{svg}"
+    );
+}
+
+#[test]
+fn nur_durchgestrichener_text_wird_nicht_unterstrichen() {
+    let mut el = Element::new_text(1, 40.0, 40.0);
+    el.text = String::from("Hallo Welt");
+    el.strikethrough = true;
+    let doc = doc_mit(vec![el]);
+    let layouts = boxdoc::printing::collect_layouts(&ctx(), &doc);
+    let svg = svg_string(&doc, &ImageStore::default(), &layouts, &Scope::Page(0)).expect("Export");
+
+    assert!(svg.contains("text-decoration=\"line-through\""), "{svg}");
+    assert!(!svg.contains("underline"), "{svg}");
+}
+
+#[test]
 fn text_ohne_layout_wird_uebersprungen_statt_falsch_gesetzt() {
     // Dieselbe Regel wie im PDF-Export: Lieber nichts als geratener Umbruch.
     let mut el = Element::new_text(1, 40.0, 40.0);

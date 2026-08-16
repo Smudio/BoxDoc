@@ -54,6 +54,7 @@ Jedes Element hat zwingend einen `"kind"` und eine `"id"` (`u64`). Je nach
   "bold": <bool>,
   "italic": <bool>,
   "underline": <bool>,
+  "strikethrough": <bool>,
   "align": "Left" | "Center" | "Right",
   "valign": "Top" | "Middle" | "Bottom",
   "indent": <pt>,
@@ -92,7 +93,7 @@ gezeichnet). Das letzte Element verdeckt frühere bei Überlappung.
 
 | Kind        | Relevante Felder                                                |
 |-------------|----------------------------------------------------------------|
-| `Text`      | text, font_size, font, color, bold, italic, underline, align, valign |
+| `Text`      | text, font_size, font, color, bold, italic, underline, strikethrough, align, valign |
 | `Rectangle` | fill_color, stroke_width, stroke_color, corner_radius          |
 | `Line`      | stroke_width, stroke_color (Linie = horizontale Box mit h=0 + rotation) |
 | `Ellipse`   | fill_color, stroke_width, stroke_color (Kreis = Spezialfall mit w == h; `corner_radius` wird ignoriert) |
@@ -102,6 +103,34 @@ gezeichnet). Das letzte Element verdeckt frühere bei Überlappung.
 **Linien zeichnen:** Eine Linie ist ein `Rectangle` mit `h: 0`, `fill_color`
 transparent, `stroke_color` = Linienfarbe, `stroke_width` = Dicke. Position
 über `x,y` + `w` + `rotation` (Winkel gegen Uhrzeigersinn).
+
+---
+
+### Textauszeichnung
+
+Vier Schalter, alle frei kombinierbar und alle im PDF- **und** SVG-Export
+enthalten:
+
+| Feld              | Wirkung          |
+|-------------------|------------------|
+| `bold`            | fett             |
+| `italic`          | kursiv           |
+| `underline`       | unterstrichen    |
+| `strikethrough`   | durchgestrichen  |
+
+Sie gelten immer für das **ganze Element**. Eine Auszeichnung einzelner Wörter
+innerhalb eines Textblocks gibt es nicht — soll ein Wort hervorstechen, mach
+ein eigenes Text-Element daraus und setze es daneben.
+
+`bold` und `italic` wählen einen echten Schriftschnitt, wo die Schrift einen
+mitbringt (die System-Schriften auf dem Desktop: Arial, Calibri, Georgia …).
+Wo nicht — bei den eingebetteten Schriften und damit überall im Browser —
+werden sie nachgeahmt und sehen etwas anders aus als ein gesetzter Schnitt.
+Der Zeilenumbruch stimmt in beiden Fällen, weil er mit derselben Schrift
+gemessen wird, mit der auch gezeichnet wird.
+
+`underline` und `strikethrough` sind gezeichnete Linien, keine Schnitte; sie
+funktionieren deshalb bei jeder Schrift gleich.
 
 ---
 
@@ -238,7 +267,7 @@ An `elements` anhängen (nächste freie ID):
   "id": 42, "kind": "Text",
   "x": 100.0, "y": 200.0, "w": 400.0, "h": 40.0, "rotation": 0.0,
   "text": "Neuer Absatz", "font_size": 14.0, "font": "default",
-  "color": [20, 20, 20, 255], "bold": false, "italic": false, "underline": false,
+  "color": [20, 20, 20, 255], "bold": false, "italic": false, "underline": false, "strikethrough": false,
   "align": "Left", "valign": "Top", "indent": 0.0,
   "crop": { "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 },
   "image_w": 0, "image_h": 0,
@@ -256,7 +285,7 @@ Aus dem `elements`-Array entfernen.
   "id": 43, "kind": "Rectangle",
   "x": 0.0, "y": 0.0, "w": 595.0, "h": 8.0, "rotation": 0.0,
   "text": "", "font_size": 14.0, "font": "default",
-  "color": [20, 20, 20, 255], "bold": false, "italic": false, "underline": false,
+  "color": [20, 20, 20, 255], "bold": false, "italic": false, "underline": false, "strikethrough": false,
   "align": "Left", "valign": "Top", "indent": 0.0,
   "crop": { "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 },
   "image_w": 0, "image_h": 0,
@@ -271,7 +300,7 @@ Aus dem `elements`-Array entfernen.
   "id": 44, "kind": "Line",
   "x": 100.0, "y": 300.0, "w": 400.0, "h": 0.0, "rotation": 0.0,
   "text": "", "font_size": 14.0, "font": "default",
-  "color": [20, 20, 20, 255], "bold": false, "italic": false, "underline": false,
+  "color": [20, 20, 20, 255], "bold": false, "italic": false, "underline": false, "strikethrough": false,
   "align": "Left", "valign": "Top", "indent": 0.0,
   "crop": { "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 },
   "image_w": 0, "image_h": 0,
@@ -287,7 +316,7 @@ Kreis = Spezialfall mit `w == h`. `corner_radius` wird bei Ellipse ignoriert.
   "id": 45, "kind": "Ellipse",
   "x": 200.0, "y": 150.0, "w": 200.0, "h": 120.0, "rotation": 0.0,
   "text": "", "font_size": 14.0, "font": "default",
-  "color": [20, 20, 20, 255], "bold": false, "italic": false, "underline": false,
+  "color": [20, 20, 20, 255], "bold": false, "italic": false, "underline": false, "strikethrough": false,
   "align": "Left", "valign": "Top", "indent": 0.0,
   "crop": { "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 },
   "image_w": 0, "image_h": 0,

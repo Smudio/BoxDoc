@@ -49,7 +49,7 @@ Token-Schutz ist optional (Default = öffentlich). Nur wenn beim Erstellen
 ### Beispiel — Inline (minifiziert, in Single Quotes)
 
 ```bash
-curl -X PUT --data-binary '{"doc":{"format":"A4","orientation":"Portrait","pages":[{"elements":[{"id":1,"kind":"Text","x":50,"y":50,"w":400,"h":40,"rotation":0,"text":"Hallo\nWelt","font_size":14,"font":"default","color":[20,20,20,255],"bold":false,"italic":false,"underline":false,"align":"Left","valign":"Top","indent":0,"crop":{"x":0,"y":0,"w":1,"h":1},"image_w":0,"image_h":0,"fill_color":[0,0,0,0],"stroke_width":0,"stroke_color":[0,0,0,0],"corner_radius":0}]}]},"images":[]}' "https://boxdoc.at/index.php?put=meindokument"
+curl -X PUT --data-binary '{"doc":{"format":"A4","orientation":"Portrait","pages":[{"elements":[{"id":1,"kind":"Text","x":50,"y":50,"w":400,"h":40,"rotation":0,"text":"Hallo\nWelt","font_size":14,"font":"default","color":[20,20,20,255],"bold":false,"italic":false,"underline":false,"strikethrough":false,"align":"Left","valign":"Top","indent":0,"crop":{"x":0,"y":0,"w":1,"h":1},"image_w":0,"image_h":0,"fill_color":[0,0,0,0],"stroke_width":0,"stroke_color":[0,0,0,0],"corner_radius":0}]}]},"images":[]}' "https://boxdoc.at/index.php?put=meindokument"
 ```
 
 ## Dateiformat (Kurzversion)
@@ -76,7 +76,7 @@ curl -X PUT --data-binary '{"doc":{"format":"A4","orientation":"Portrait","pages
   "font_size": 14.0,
   "font": "default | inter | roboto | lora | jetbrains | pacifico",
   "color": [20, 20, 20, 255],
-  "bold": false, "italic": false, "underline": false,
+  "bold": false, "italic": false, "underline": false, "strikethrough": false,
   "align": "Left | Center | Right",
   "valign": "Top | Middle | Bottom",
   "indent": 0.0,

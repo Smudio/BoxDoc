@@ -379,8 +379,13 @@ fn text(out: &mut String, el: &Element, layout: &TextLayout) {
     if el.italic {
         out.push_str(" font-style=\"italic\"");
     }
-    if el.underline {
-        out.push_str(" text-decoration=\"underline\"");
+    // `text-decoration` nimmt beide Werte in einem Attribut auf; zweimal
+    // notiert gewönne nur das letzte.
+    match (el.underline, el.strikethrough) {
+        (true, true) => out.push_str(" text-decoration=\"underline line-through\""),
+        (true, false) => out.push_str(" text-decoration=\"underline\""),
+        (false, true) => out.push_str(" text-decoration=\"line-through\""),
+        (false, false) => {}
     }
     out.push_str(&rotation(el));
     out.push_str(">\n");

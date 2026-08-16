@@ -3,7 +3,7 @@
 
 use egui::{
     epaint::{Mesh, Vertex},
-    Color32, FontFamily, FontId, Pos2, Rect, Sense, Shape, Stroke, Vec2,
+    Color32, FontId, Pos2, Rect, Sense, Shape, Stroke, Vec2,
 };
 
 use crate::app::{CropEdge, EditorApp, Interaction};
@@ -311,7 +311,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
             ));
             // Ghost-Text rendern.
             if el.kind == ElementKind::Text && !el.text.is_empty() {
-                let font = FontId::new(el.font_size * zoom, crate::fonts::family_for(&el.font));
+                let font = crate::text_layout::font_id_for(el, zoom);
                 let color = Color32::from_rgba_unmultiplied(100, 160, 230, 50);
                 let galley = painter.layout(el.text.clone(), font, color, (el.w * zoom).max(1.0));
                 painter.galley(to_screen(Pos2::new(gx, gy)), galley, color);
@@ -355,7 +355,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                 ));
                 // Preview-Text rendern.
                 if el.kind == ElementKind::Text && !el.text.is_empty() {
-                    let font = FontId::new(el.font_size * zoom, crate::fonts::family_for(&el.font));
+                    let font = crate::text_layout::font_id_for(el, zoom);
                     let color =
                         Color32::from_rgba_unmultiplied(el.color[0], el.color[1], el.color[2], 160);
                     let galley =
@@ -1292,6 +1292,14 @@ fn draw_element(
             let layout = ctx.fonts_mut(|f| crate::text_layout::layout(f, el, zoom));
 
             let origin = to_screen(Pos2::new(el.x, el.y));
+            // Fehlt der echte Fett-Schnitt (eingebettete Schriften bringen nur
+            // Regular mit), wird er nachgeahmt: die Zeile mehrfach um einen
+            // Bruchteil versetzt malen. Das entspricht dem Umriss, den der
+            // PDF-Export in diesem Fall zeichnet — siehe `printing::draw_text`.
+            let style = crate::model::FontStyle::of(el);
+            let synth_bold = el.bold && !crate::fonts::has_style(&el.font, style);
+            let metrics = crate::text_layout::decoration_metrics(el.font_size);
+
             for laid in &layout.lines {
                 if laid.text.is_empty() {
                     continue;
@@ -1310,15 +1318,36 @@ fn draw_element(
                 let pos = origin
                     + Vec2::new(laid.x * zoom, laid.baseline_y * zoom - ascent);
 
-                if el.underline {
-                    let underline_y = origin.y + laid.baseline_y * zoom + 2.0;
+                // Auszeichnungslinien zuerst, damit die Glyphen darüber liegen.
+                let decoration = |dy_pt: f32| {
+                    let y = origin.y + (laid.baseline_y + dy_pt) * zoom;
                     painter.line_segment(
                         [
-                            Pos2::new(origin.x + laid.x * zoom, underline_y),
-                            Pos2::new(origin.x + (laid.x + laid.width) * zoom, underline_y),
+                            Pos2::new(origin.x + laid.x * zoom, y),
+                            Pos2::new(origin.x + (laid.x + laid.width) * zoom, y),
                         ],
-                        Stroke::new((el.font_size * zoom * 0.05).max(1.0), color),
+                        Stroke::new((metrics.thickness * zoom).max(1.0), color),
                     );
+                };
+                if el.underline {
+                    decoration(metrics.underline_dy);
+                }
+                if el.strikethrough {
+                    decoration(-metrics.strike_dy);
+                }
+
+                if synth_bold {
+                    // Versatz = halbe Strichstärke des PDF-Umrisses (3 % der
+                    // Schriftgröße), damit beide gleich stark auftragen.
+                    let d = (el.font_size * 0.015 * zoom).max(0.35);
+                    for off in [
+                        Vec2::new(-d, 0.0),
+                        Vec2::new(d, 0.0),
+                        Vec2::new(0.0, -d),
+                        Vec2::new(0.0, d),
+                    ] {
+                        painter.galley(pos + off, galley.clone(), color);
+                    }
                 }
                 painter.galley(pos, galley, color);
             }
@@ -1765,16 +1794,9 @@ fn text_tight_rect(
     zoom: f32,
     ctx: &egui::Context,
 ) -> Rect {
-    let mut font = FontId::new(el.font_size * zoom, crate::fonts::family_for(&el.font));
-    if el.font == "default" || el.font.is_empty() {
-        if el.bold && el.italic {
-            font = FontId::new(el.font_size * zoom, FontFamily::Name("Bold Italic".into()));
-        } else if el.bold {
-            font = FontId::new(el.font_size * zoom, FontFamily::Name("Bold".into()));
-        } else if el.italic {
-            font = FontId::new(el.font_size * zoom, FontFamily::Name("Italics".into()));
-        }
-    }
+    // Derselbe Schnitt wie beim Zeichnen — sonst greift der Hit-Test daneben,
+    // sobald fette Glyphen breiter sind als magere.
+    let font = crate::text_layout::font_id_for(el, zoom);
     let galley = ctx.fonts_mut(|f| {
         f.layout(el.text.clone(), font, Color32::TRANSPARENT, (el.w * zoom).max(1.0))
     });

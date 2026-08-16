@@ -14,7 +14,7 @@ use printpdf::{
     Line, Mm, PdfDocument, PdfDocumentReference, PdfLayerReference, Point, Polygon, Px, Rgb,
 };
 
-use crate::model::{page_size_pt, Document, Element, ElementKind};
+use crate::model::{page_size_pt, Document, Element, ElementKind, FontStyle};
 
 type E = Box<dyn std::error::Error>;
 
@@ -57,8 +57,8 @@ pub fn export_pdf(
         PdfDocument::new("BoxDoc", Mm(pw_mm), Mm(ph_mm), "Ebene 1");
     // Fallback-Schrift (wird verwendet, wenn eine Element-Schrift fehlt).
     let fallback_font = system_font(&document)?;
-    // Cache: Schrift-Schlüssel → eingebetteter Font.
-    let mut font_cache: std::collections::HashMap<String, IndirectFontRef> =
+    // Cache: Schrift-Schlüssel + Schnitt → eingebetteter Font.
+    let mut font_cache: std::collections::HashMap<String, ResolvedFont> =
         std::collections::HashMap::new();
 
     for (pi, page) in doc.pages.iter().enumerate() {
@@ -71,7 +71,13 @@ pub fn export_pdf(
         for el in &page.elements {
             match el.kind {
                 ElementKind::Text => {
-                    let font = resolve_text_font(&document, &el.font, el.bold, el.italic, &fallback_font, &mut font_cache);
+                    let font = resolve_text_font(
+                        &document,
+                        &el.font,
+                        FontStyle::of(el),
+                        &fallback_font,
+                        &mut font_cache,
+                    );
                     // Ohne vorberechnetes Layout wird der Text übersprungen,
                     // statt ihn falsch (unumgebrochen) zu setzen.
                     if let Some(layout) = layouts.get(&el.id) {
@@ -113,65 +119,141 @@ fn system_font(doc: &PdfDocumentReference) -> Result<IndirectFontRef, E> {
         .map_err(|e| -> E { format!("keine verwendbare Schrift gefunden: {e}").into() })
 }
 
-/// Lädt die zu `key` gehörende Schrift aus `FONT_CHOICES`. Liefert `None`,
-/// wenn die Datei fehlt oder nicht lesbar ist.
-fn load_font_by_key(doc: &PdfDocumentReference, key: &str) -> Option<IndirectFontRef> {
+/// Lädt den Schnitt `style` der zu `key` gehörenden Schrift aus
+/// `FONT_CHOICES`. `None`, wenn dieser Schnitt hier nicht beschaffbar ist.
+fn load_font_by_key(
+    doc: &PdfDocumentReference,
+    key: &str,
+    style: FontStyle,
+) -> Option<IndirectFontRef> {
     let def = crate::model::FONT_CHOICES.iter().find(|f| f.key == key)?;
-    let path = def.paths.iter().find(|p| std::fs::metadata(p).is_ok())?;
+
+    // Eingebettete Schriften stehen in der Binary, nicht auf der Platte.
+    //
+    // Der Export suchte sie früher trotzdem über `paths` — eine Liste, die bei
+    // genau diesen Schriften leer ist. Er fand also nie eine, fiel auf die
+    // Fallback-Schrift zurück und setzte jedes Dokument in Arial. Im
+    // Browser-Build, wo es *nur* diese Schriften gibt, betraf das alles.
+    if def.bundled {
+        // Nur der Regular-Schnitt ist eingebettet; der Rest wird nachgeahmt.
+        if style != FontStyle::Regular {
+            return None;
+        }
+        return doc.add_external_font(crate::fonts::bundled_bytes(key)?).ok();
+    }
+
+    let path = def
+        .paths_for(style)
+        .iter()
+        .find(|p| std::fs::metadata(p).is_ok())?;
     let f = File::open(path).ok()?;
     doc.add_external_font(f).ok()
 }
 
-/// Wählt den Schrift-Slot passend zu `bold`/`italic`. Die kursiven/fetten
-/// Varianten werden gecacht, sodass sie nur einmal pro Dokument geladen werden.
-/// Schlüssel im Cache ist `<font>|<bold>|<italic>`.
+/// Bettet die Schrift ein, die egui für `FontFamily::Proportional` benutzt —
+/// also die, die der Nutzer als "Standard" auf dem Bildschirm sieht.
+///
+/// `FontDefinitions::default()` trägt die Bytes der eingebauten Schriften bei
+/// sich; wir nehmen den ersten Eintrag der Proportional-Familie, denn genau
+/// den nimmt auch das Shaping. `None`, wenn egui ohne eingebaute Schriften
+/// gebaut wurde.
+fn default_font(doc: &PdfDocumentReference) -> Option<IndirectFontRef> {
+    let defs = egui::FontDefinitions::default();
+    let name = defs
+        .families
+        .get(&egui::FontFamily::Proportional)?
+        .first()?
+        .clone();
+    let bytes = defs.font_data.get(&name)?.font.to_vec();
+    doc.add_external_font(&bytes[..]).ok()
+}
+
+/// Eine für den Export aufgelöste Schrift — und was an ihr noch nachgeahmt
+/// werden muss.
+#[derive(Clone)]
+struct ResolvedFont {
+    font: IndirectFontRef,
+    /// Kein echter Fett-Schnitt vorhanden: über einen Umriss nachahmen.
+    synth_bold: bool,
+    /// Kein echter Kursiv-Schnitt vorhanden: über die Textmatrix scheren.
+    synth_italic: bool,
+}
+
+/// Wählt den Schrift-Slot passend zum Schnitt und meldet mit, was daran
+/// nachgeahmt werden muss. Gecacht, damit jede Schrift nur einmal pro Dokument
+/// eingebettet wird; Schlüssel ist `<font>|<schnitt>`.
+///
+/// Vorrang hat immer der **echte** Schnitt (`arialbd.ttf` für fettes Arial):
+/// Er hat eigene Glyphenformen und eigene Breiten, und genau mit diesen
+/// Breiten hat `text_layout` den Umbruch bereits gerechnet. Ein nachgeahmter
+/// Fettdruck wäre an denselben Umbruchstellen zu breit.
 fn resolve_text_font(
     doc: &PdfDocumentReference,
     font_key: &str,
-    bold: bool,
-    italic: bool,
+    style: FontStyle,
     fallback: &IndirectFontRef,
-    cache: &mut std::collections::HashMap<String, IndirectFontRef>,
-) -> IndirectFontRef {
-    // Für "default" nutzen wir die PDF-Builtin-Varianten von Helvetica, die
-    // Bold/Italic direkt unterstützen — kein externer Font nötig.
-    if font_key == "default" || font_key.is_empty() {
-        let cache_key = format!("__builtin|{bold}|{italic}");
-        if let Some(f) = cache.get(&cache_key) {
-            return f.clone();
-        }
-        let variant = match (bold, italic) {
-            (true, true) => BuiltinFont::HelveticaBoldOblique,
-            (true, false) => BuiltinFont::HelveticaBold,
-            (false, true) => BuiltinFont::HelveticaOblique,
-            (false, false) => BuiltinFont::Helvetica,
-        };
-        let f = doc
-            .add_builtin_font(variant)
-            .unwrap_or_else(|_| fallback.clone());
-        cache.insert(cache_key, f.clone());
-        return f;
-    }
-
-    // Externe Schrift: Wir versuchen zuerst eine passend benannte
-    // Variante (z. B. arialbd.ttf für bold) zu finden; fällt das schief,
-    // verwenden wir die Regular-Schrift und simulieren Bold nach.
-    let cache_key = format!("{font_key}|{bold}|{italic}");
+    cache: &mut std::collections::HashMap<String, ResolvedFont>,
+) -> ResolvedFont {
+    let cache_key = format!("{font_key}|{}", style.suffix());
     if let Some(f) = cache.get(&cache_key) {
         return f.clone();
     }
 
-    let regular = load_font_by_key(doc, font_key).unwrap_or_else(|| fallback.clone());
-    let f = if bold || italic {
-        // Pragmatische Lösung: Wir laden nur die Regular-Variante und
-        // simulieren Bold/Italic beim Zeichnen (siehe draw_text). Damit
-        // bleibt der Cache schlüssel-stabil — wir melden die Regular zurück.
-        regular
+    // Für "default" wird **genau die Schrift eingebettet, mit der egui auf dem
+    // Bildschirm zeichnet**.
+    //
+    // Vorher stand hier Helvetica. Das ist eine andere Schrift mit anderen
+    // Zeichenbreiten als die, mit der `text_layout` den Umbruch gerechnet hat:
+    // Der Text lief im PDF ein Stück über seine gemessene Breite hinaus, und
+    // die Unterstreichung — die genau diese gemessene Breite bekommt — endete
+    // sichtbar vor dem letzten Buchstaben. Mit derselben Schriftdatei auf
+    // beiden Seiten stimmen Breiten und Umbruch per Konstruktion.
+    let resolved = if font_key == "default" || font_key.is_empty() {
+        match default_font(doc) {
+            // Kein echter Fett-/Kursiv-Schnitt vorhanden — genau wie auf dem
+            // Bildschirm (siehe `fonts::has_style`), also beidseitig nachahmen.
+            Some(font) => ResolvedFont {
+                font,
+                synth_bold: style.bold(),
+                synth_italic: style.italic(),
+            },
+            // Ohne eingebaute egui-Schriften bleibt Helvetica; dessen echte
+            // Schnitte sind dann das kleinere Übel gegenüber Nachahmung.
+            None => {
+                let variant = match style {
+                    FontStyle::BoldItalic => BuiltinFont::HelveticaBoldOblique,
+                    FontStyle::Bold => BuiltinFont::HelveticaBold,
+                    FontStyle::Italic => BuiltinFont::HelveticaOblique,
+                    FontStyle::Regular => BuiltinFont::Helvetica,
+                };
+                ResolvedFont {
+                    font: doc
+                        .add_builtin_font(variant)
+                        .unwrap_or_else(|_| fallback.clone()),
+                    synth_bold: false,
+                    synth_italic: false,
+                }
+            }
+        }
+    } else if let Some(font) = load_font_by_key(doc, font_key, style) {
+        // Echter Schnitt gefunden — nichts nachzuahmen.
+        ResolvedFont {
+            font,
+            synth_bold: false,
+            synth_italic: false,
+        }
     } else {
-        regular
+        // Kein echter Schnitt: Regular einbetten und den Rest nachahmen.
+        ResolvedFont {
+            font: load_font_by_key(doc, font_key, FontStyle::Regular)
+                .unwrap_or_else(|| fallback.clone()),
+            synth_bold: style.bold(),
+            synth_italic: style.italic(),
+        }
     };
-    cache.insert(cache_key, f.clone());
-    f
+
+    cache.insert(cache_key, resolved.clone());
+    resolved
 }
 
 /// Zeichnet ein Textelement anhand des **vorberechneten** Layouts.
@@ -184,25 +266,25 @@ fn draw_text(
     layer: &PdfLayerReference,
     el: &Element,
     page_h_mm: f32,
-    font: &IndirectFontRef,
+    resolved: &ResolvedFont,
     layout: &crate::text_layout::TextLayout,
 ) {
     // Textfarbe inkl. Alpha (siehe blend_over_white). r/g/b werden weiter
-    // unten fuer den Synth-Bold-Umriss gebraucht.
+    // unten fuer den Synth-Bold-Umriss und die Auszeichnungslinien gebraucht.
     let blended = blend_over_white(el.color);
     let (r, g, b) = (blended.r, blended.g, blended.b);
-    layer.set_fill_color(Color::Rgb(blended));
+    let font = &resolved.font;
 
-    // Bei externen Schriften (nicht "default") wird Bold über einen leichten
-    // Outline simuliert. Italic wird über die Text-Matrix geschert (12°).
-    // Für Builtin-Fonts (Helvetica) ist Bold/Italic bereits im Font enthalten.
-    let is_builtin = el.font == "default" || el.font.is_empty();
-    let needs_synth_bold = el.bold && !is_builtin;
-    let needs_shear = el.italic && !is_builtin;
-    let shear = 12.0f32.to_radians().tan();
-
+    // Glyphen und Auszeichnungslinien laufen in **zwei getrennten Durchgängen**.
+    //
+    // Vorher standen sie ineinander: Der Unterstrich der ersten Zeile setzte
+    // die Strichstärke auf seinen eigenen Wert, und ab der zweiten Zeile trug
+    // der nachgeahmte Fettdruck damit fünfmal zu dick auf. Getrennte
+    // Durchgänge haben je einen eigenen Grafikzustand, der den anderen nicht
+    // mehr überschreiben kann.
     layer.save_graphics_state();
-    if needs_synth_bold {
+    layer.set_fill_color(Color::Rgb(blended));
+    if resolved.synth_bold {
         // Synth-Bold: schmaler Strich um die Glyphen. ~3 % der font_size ist
         // ein typischer Wert für „faux bold".
         layer.set_outline_color(Color::Rgb(Rgb::new(r, g, b, None)));
@@ -211,17 +293,16 @@ fn draw_text(
         layer.set_text_rendering_mode(printpdf::TextRenderingMode::FillStroke);
     }
 
+    let shear = 12.0f32.to_radians().tan();
     for laid in &layout.lines {
         if laid.text.is_empty() {
             continue;
         }
-        let line = laid.text.as_str();
-        let line_w = laid.width;
         // PDF-Koordinaten: y zeigt nach oben, Ursprung unten links.
         let pdf_y_mm = page_h_mm - pt_to_mm(el.y + laid.baseline_y);
         let pdf_x_mm = pt_to_mm(el.x + laid.x);
 
-        if needs_shear {
+        if resolved.synth_italic {
             // Scherung über die Text-Matrix. PDF-Text-Matrix:
             //   [a b c d e f]  →  a=1, b=0, c=tan(12°), d=1, e=x_pt, f=y_pt.
             // Positives c schert nach rechts (italic-Look). Position in Pt
@@ -233,34 +314,70 @@ fn draw_text(
             layer.set_text_matrix(printpdf::TextMatrix::Raw([
                 1.0, 0.0, shear, 1.0, x_pt, y_pt,
             ]));
-            layer.write_text(line.to_string(), font);
+            layer.write_text(laid.text.clone(), font);
             layer.end_text_section();
         } else {
             layer.use_text(
-                line.to_string(),
+                laid.text.clone(),
                 el.font_size,
                 Mm(pdf_x_mm),
                 Mm(pdf_y_mm),
                 font,
             );
         }
+    }
+    layer.restore_graphics_state();
 
-        // Unterstrich: dünne Linie direkt unter der Grundlinie, genau so breit
-        // wie die gemessene Zeile.
-        if el.underline {
-            let underline_y_mm = pdf_y_mm - pt_to_mm(el.font_size) * 0.18;
-            let underline = Line {
+    if el.underline || el.strikethrough {
+        draw_text_decorations(layer, el, page_h_mm, layout, Rgb::new(r, g, b, None));
+    }
+}
+
+/// Zieht Unter- und Durchstreichung unter bzw. durch die bereits gesetzten
+/// Zeilen.
+///
+/// Lage und Stärke kommen aus `text_layout::decoration_metrics` — demselben
+/// Ort, aus dem Canvas und SVG-Export sie holen. Die Farbe wird hier
+/// **ausdrücklich** gesetzt: Die Linienfarbe ist Teil des Seitenzustands, und
+/// ohne eigene Zuweisung erbte ein Unterstrich schlicht die Randfarbe des
+/// zuletzt gezeichneten Rechtecks.
+fn draw_text_decorations(
+    layer: &PdfLayerReference,
+    el: &Element,
+    page_h_mm: f32,
+    layout: &crate::text_layout::TextLayout,
+    color: Rgb,
+) {
+    let metrics = crate::text_layout::decoration_metrics(el.font_size);
+
+    layer.save_graphics_state();
+    layer.set_outline_color(Color::Rgb(color));
+    layer.set_outline_thickness(metrics.thickness);
+
+    for laid in &layout.lines {
+        if laid.text.is_empty() {
+            continue;
+        }
+        let x0 = pt_to_mm(el.x + laid.x);
+        let x1 = pt_to_mm(el.x + laid.x + laid.width);
+        // Auf der Seite zeigt y nach unten, im PDF nach oben — der Unterstrich
+        // liegt unter der Grundlinie, also im PDF bei kleinerem y.
+        let baseline_mm = page_h_mm - pt_to_mm(el.y + laid.baseline_y);
+
+        let rule = |dy_mm: f32| {
+            layer.add_line(Line {
                 points: vec![
-                    (Point::new(Mm(pdf_x_mm), Mm(underline_y_mm)), false),
-                    (
-                        Point::new(Mm(pdf_x_mm + pt_to_mm(line_w)), Mm(underline_y_mm)),
-                        false,
-                    ),
+                    (Point::new(Mm(x0), Mm(baseline_mm + dy_mm)), false),
+                    (Point::new(Mm(x1), Mm(baseline_mm + dy_mm)), false),
                 ],
                 is_closed: false,
-            };
-            layer.set_outline_thickness((el.font_size * 0.05).max(0.5));
-            layer.add_line(underline);
+            });
+        };
+        if el.underline {
+            rule(-pt_to_mm(metrics.underline_dy));
+        }
+        if el.strikethrough {
+            rule(pt_to_mm(metrics.strike_dy));
         }
     }
     layer.restore_graphics_state();

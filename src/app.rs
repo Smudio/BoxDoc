@@ -2518,21 +2518,46 @@ impl EditorApp {
                 ui.horizontal(|ui| {
                     if ui
                         .selectable_label(el.bold, egui::RichText::new("B").strong())
+                        .on_hover_text("Fett")
                         .clicked()
                     {
                         el.bold = !el.bold;
                     }
                     if ui
                         .selectable_label(el.italic, egui::RichText::new("I").italics())
+                        .on_hover_text("Kursiv")
                         .clicked()
                     {
                         el.italic = !el.italic;
                     }
                     if ui
                         .selectable_label(el.underline, egui::RichText::new("U").underline())
+                        .on_hover_text("Unterstrichen")
                         .clicked()
                     {
                         el.underline = !el.underline;
+                    }
+                    if ui
+                        .selectable_label(
+                            el.strikethrough,
+                            egui::RichText::new("S").strikethrough(),
+                        )
+                        .on_hover_text("Durchgestrichen")
+                        .clicked()
+                    {
+                        el.strikethrough = !el.strikethrough;
+                    }
+                    // Ohne echten Schnitt wird fett/kursiv nur nachgeahmt. Das
+                    // sieht anders aus als ein gesetzter Schnitt — der Hinweis
+                    // erspart die Suche nach dem vermeintlichen Fehler.
+                    let style = crate::model::FontStyle::of(el);
+                    if style != crate::model::FontStyle::Regular
+                        && !crate::fonts::has_style(&el.font, style)
+                    {
+                        ui.label(egui::RichText::new("≈").weak()).on_hover_text(
+                            "Diese Schrift bringt den Schnitt nicht mit — \
+                             fett und kursiv werden nachgeahmt.",
+                        );
                     }
                 });
                 ui.horizontal(|ui| {

@@ -202,7 +202,20 @@ gesnapshottet (nur IDs), um Speicher zu sparen.
 ### 7. PDF-Export (`src/printing.rs`)
 
 - **Nativ:** `printpdf` 0.7.
-- **Status:** Text, Bilder, Rechteck, Ellipse, Linie, freier Pfad.
+- **Status:** Text (inkl. fett, kursiv, unterstrichen, durchgestrichen),
+  Bilder, Rechteck, Ellipse, Linie, freier Pfad.
+- **Eingebettet wird die Schrift, mit der auch gezeichnet wurde.** Für die
+  Standardschrift kommen die Bytes aus `egui::FontDefinitions::default()`,
+  für die mitgelieferten aus `fonts::bundled_bytes`, für System-Schriften von
+  der Platte — je Schnitt. Vorher stand für „default" Helvetica im PDF und die
+  eingebetteten Schriften fielen sogar ganz auf Arial zurück (der Export suchte
+  sie über `paths`, das bei ihnen leer ist). Beides sind andere Schriften mit
+  anderen Zeichenbreiten als die, mit der `text_layout` den Umbruch gerechnet
+  hat: Der Text lief über seine gemessene Breite hinaus, und die
+  Unterstreichung endete sichtbar vor dem letzten Buchstaben.
+- **Grenze:** Schriften, die als Custom-Font in der `.boxdoc`-Datei stecken,
+  werden noch nicht eingebettet — sie landen in der Fallback-Schrift. Dafür
+  müsste `printing` den `FontStore` mitbekommen.
 - **Textlayout kommt aus `src/text_layout.rs`** — demselben Modul, das der
   Canvas benutzt. `printing.rs` rechnet bewusst nichts mehr selbst aus:
   Jede eigene Schätzung wäre eine neue Quelle für Abweichungen zwischen
@@ -267,6 +280,53 @@ abgesichert durch `text_layout::tests::umbruch_ist_zoomunabhaengig`.
 (dann ist `valign` wirkungslos) oder ob der Nutzer sie festgelegt hat (dann
 richtet `valign` den Text darin aus). Der Reflow läuft als expliziter Schritt
 in `canvas::reflow_text_heights` — nicht mehr als Seiteneffekt beim Zeichnen.
+
+#### Textauszeichnung
+
+Vier unabhängige Schalter am Element: `bold`, `italic`, `underline`,
+`strikethrough`. Sie zerfallen in **zwei verschiedene Dinge**, und das ist der
+Grund, warum sie an verschiedenen Stellen behandelt werden:
+
+- **Schnitte** (`bold`, `italic`) wechseln die *Schriftdatei*. Sie ändern
+  damit die Zeichenbreiten und folglich den Zeilenumbruch, müssen also schon
+  ins **Layout** einfließen — `text_layout::font_id_for` wählt über
+  `fonts::family_for_style` die passende Familie.
+- **Auszeichnungslinien** (`underline`, `strikethrough`) sind gemalte Striche.
+  Sie ändern nichts am Umbruch, brauchen aber überall dieselbe Lage:
+  `text_layout::decoration_metrics` liefert sie einmal in pt relativ zur
+  Grundlinie, Canvas, PDF und SVG bilden nur noch ab.
+
+`fonts::has_style(key, style)` ist die gemeinsame Auskunft darüber, ob ein
+**echter** Schnitt geladen ist. Ist er es, benutzen ihn Bildschirm und PDF;
+ist er es nicht, ahmen ihn beide nach (Umriss für fett, Scherung für kursiv).
+Ohne diese eine Quelle könnte der Bildschirm einen echten Schnitt zeigen, den
+das PDF nachahmt — oder umgekehrt.
+
+| Schrift | Fett/Kursiv |
+|---|---|
+| System-Schriften (Arial, Calibri, Georgia …) | echte Schnitte (`arialbd.ttf` usw.), auf dem Desktop |
+| Eingebettete Schriften (Inter, Lora, Pacifico …) | nur Regular in der Binary → nachgeahmt |
+| Standardschrift | egui liefert keinen Fettschnitt → nachgeahmt |
+| Browser (WASM) | nur eingebettete Schriften → immer nachgeahmt |
+
+Drei Fallen, die frühere Fassungen nicht kannten:
+
+1. **Der Schnitt fiel beim Layout unter den Tisch.** `font_id_for` wertete
+   `bold`/`italic` nur für die Standardschrift aus. Fettes Arial stand auf dem
+   Bildschirm mager, im PDF fett — und brach an verschiedenen Stellen um.
+2. **Die Alias-Familien „Bold"/„Italics" waren leer.** Sie enthielten
+   denselben mageren Schnitt wie `Proportional`; fett gesetzter Text in der
+   Standardschrift maß auf den Punkt genau so breit wie magerer. `has_style`
+   meldet für sie deshalb `false`, damit die Nachahmung greift.
+3. **Der Unterstrich riss den Grafikzustand mit.** Er setzte die Strichstärke
+   auf seinen eigenen Wert, mitten in der Zeilenschleife — ab der zweiten
+   Zeile trug der nachgeahmte Fettdruck damit um ein Vielfaches zu dick auf.
+   Glyphen und Linien laufen jetzt in getrennten Durchgängen.
+
+**Grenze:** Kursiv kann der Canvas nicht nachahmen — egui kann eine Galley
+nicht scheren. Bei Schriften ohne echten Kursivschnitt steht der Text auf dem
+Bildschirm also aufrecht, im PDF geschert. Fett wird auf beiden Seiten
+nachgeahmt und stimmt überein.
 
 ### 7c. Formen-Geometrie (`src/geometry.rs`)
 

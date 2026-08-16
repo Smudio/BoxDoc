@@ -26,6 +26,7 @@ fn fully_populated_element() -> Element {
     el.bold = true;
     el.italic = true;
     el.underline = true;
+    el.strikethrough = true;
     el.align = TextAlign::Right;
     el.valign = VAlign::Bottom;
     el.indent = 7.25;
@@ -112,6 +113,8 @@ fn alte_dateien_ohne_auto_height_laden_weiterhin() {
     assert!(el.auto_height, "auto_height muss auf true defaulten");
     assert_eq!(el.font, "default");
     assert!(!el.bold);
+    // Ebenso die spaeter hinzugekommene Durchstreichung.
+    assert!(!el.strikethrough, "strikethrough muss auf false defaulten");
     // Auch die später hinzugekommenen Pfad-Felder müssen fehlen dürfen.
     assert!(el.points.is_empty());
     assert!(!el.path_closed);

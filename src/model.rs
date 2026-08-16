@@ -243,6 +243,65 @@ pub fn default_font_key() -> String {
     String::from("default")
 }
 
+/// Schnitt einer Schrift — die vier Kombinationen aus fett und kursiv.
+///
+/// Eigener Typ statt zweier `bool`, weil der Schnitt durch drei Module
+/// gereicht wird (Registrierung in `fonts`, Layout in `text_layout`, Einbetten
+/// in `printing`). Ein Paar aus zwei gleichnamigen Wahrheitswerten lässt sich
+/// beim Durchreichen lautlos vertauschen; ein benannter Wert nicht.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FontStyle {
+    Regular,
+    Bold,
+    Italic,
+    BoldItalic,
+}
+
+impl FontStyle {
+    pub fn new(bold: bool, italic: bool) -> Self {
+        match (bold, italic) {
+            (false, false) => FontStyle::Regular,
+            (true, false) => FontStyle::Bold,
+            (false, true) => FontStyle::Italic,
+            (true, true) => FontStyle::BoldItalic,
+        }
+    }
+
+    /// Der Schnitt eines Textelements.
+    pub fn of(el: &Element) -> Self {
+        FontStyle::new(el.bold, el.italic)
+    }
+
+    /// Suffix des egui-Familiennamens. Der Regular-Schnitt bekommt keines,
+    /// damit bestehende Dokumente und der `family_for`-Pfad unverändert
+    /// weiterlaufen.
+    pub fn suffix(self) -> &'static str {
+        match self {
+            FontStyle::Regular => "",
+            FontStyle::Bold => ":b",
+            FontStyle::Italic => ":i",
+            FontStyle::BoldItalic => ":bi",
+        }
+    }
+
+    pub fn bold(self) -> bool {
+        matches!(self, FontStyle::Bold | FontStyle::BoldItalic)
+    }
+
+    pub fn italic(self) -> bool {
+        matches!(self, FontStyle::Italic | FontStyle::BoldItalic)
+    }
+
+    pub fn all() -> [FontStyle; 4] {
+        [
+            FontStyle::Regular,
+            FontStyle::Bold,
+            FontStyle::Italic,
+            FontStyle::BoldItalic,
+        ]
+    }
+}
+
 /// Ein kuratierter Satz schöner Schriften. Der Name dient als Schlüssel in
 /// egui und als Anzeige im UI; `key` ist der technische Bezeichner, der im
 /// Element gespeichert wird. So bleibt das Dokument portabel, auch wenn eine
@@ -254,16 +313,45 @@ pub struct FontDef {
     /// Kandidaten-Pfade (betriebssystemspezifisch); der erste Treffer wird
     /// geladen. Bleibt die Liste leer, fällt egui auf seinen Default zurück.
     pub paths: &'static [&'static str],
+    /// Kandidaten-Pfade der **echten** Fett-, Kursiv- und Fett-Kursiv-Schnitte.
+    ///
+    /// Ein echter Schnitt ist einem nachgeahmten immer vorzuziehen: Er hat
+    /// eigene Glyphenformen und eigene Breiten. Fehlt er, wird fett über einen
+    /// Umriss und kursiv über eine Scherung angenähert — was anders aussieht
+    /// und, schlimmer, anders breit ist. Leere Liste = kein echter Schnitt.
+    pub bold_paths: &'static [&'static str],
+    pub italic_paths: &'static [&'static str],
+    pub bold_italic_paths: &'static [&'static str],
     /// Eingebettet via include_bytes! (funktioniert auch im Browser).
     pub bundled: bool,
 }
 
+impl FontDef {
+    /// Kandidaten-Pfade für einen Schnitt.
+    pub fn paths_for(&self, style: FontStyle) -> &'static [&'static str] {
+        match style {
+            FontStyle::Regular => self.paths,
+            FontStyle::Bold => self.bold_paths,
+            FontStyle::Italic => self.italic_paths,
+            FontStyle::BoldItalic => self.bold_italic_paths,
+        }
+    }
+}
+
 /// Kuratierte Auswahl. Index 0 ist die Standard-Schrift.
+///
+/// Die eingebetteten Schriften liegen nur als Regular-Schnitt in der Binary —
+/// je vier Schnitte würden sie vervierfachen, und im Browser zählt jedes
+/// Kilobyte. Fett und kursiv werden dort nachgeahmt. Die System-Schriften
+/// bringen ihre echten Schnitte mit.
 pub const FONT_CHOICES: &[FontDef] = &[
     FontDef {
         key: "default",
         display: "Standard",
         paths: &[],
+        bold_paths: &[],
+        italic_paths: &[],
+        bold_italic_paths: &[],
         bundled: false,
     },
     // --- Eingebettete Schriften (Web + Desktop) ---
@@ -271,30 +359,45 @@ pub const FONT_CHOICES: &[FontDef] = &[
         key: "inter",
         display: "Inter",
         paths: &[],
+        bold_paths: &[],
+        italic_paths: &[],
+        bold_italic_paths: &[],
         bundled: true,
     },
     FontDef {
         key: "roboto",
         display: "Roboto",
         paths: &[],
+        bold_paths: &[],
+        italic_paths: &[],
+        bold_italic_paths: &[],
         bundled: true,
     },
     FontDef {
         key: "lora",
         display: "Lora",
         paths: &[],
+        bold_paths: &[],
+        italic_paths: &[],
+        bold_italic_paths: &[],
         bundled: true,
     },
     FontDef {
         key: "jetbrains",
         display: "JetBrains Mono",
         paths: &[],
+        bold_paths: &[],
+        italic_paths: &[],
+        bold_italic_paths: &[],
         bundled: true,
     },
     FontDef {
         key: "pacifico",
         display: "Pacifico",
         paths: &[],
+        bold_paths: &[],
+        italic_paths: &[],
+        bold_italic_paths: &[],
         bundled: true,
     },
     // --- System-Schriften (nur Desktop) ---
@@ -307,6 +410,21 @@ pub const FONT_CHOICES: &[FontDef] = &[
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/System/Library/Fonts/Helvetica.ttc",
         ],
+        bold_paths: &[
+            "C:\\Windows\\Fonts\\arialbd.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        ],
+        italic_paths: &[
+            "C:\\Windows\\Fonts\\ariali.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf",
+        ],
+        bold_italic_paths: &[
+            "C:\\Windows\\Fonts\\arialbi.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-BoldOblique.ttf",
+        ],
         bundled: false,
     },
     FontDef {
@@ -316,6 +434,9 @@ pub const FONT_CHOICES: &[FontDef] = &[
             "C:\\Windows\\Fonts\\calibri.ttf",
             "/usr/share/fonts/truetype/calibri/Calibri-Regular.ttf",
         ],
+        bold_paths: &["C:\\Windows\\Fonts\\calibrib.ttf"],
+        italic_paths: &["C:\\Windows\\Fonts\\calibrii.ttf"],
+        bold_italic_paths: &["C:\\Windows\\Fonts\\calibriz.ttf"],
         bundled: false,
     },
     FontDef {
@@ -325,6 +446,9 @@ pub const FONT_CHOICES: &[FontDef] = &[
             "C:\\Windows\\Fonts\\cambria.ttc",
             "/usr/share/fonts/truetype/cambria/Cambria.ttf",
         ],
+        bold_paths: &["C:\\Windows\\Fonts\\cambriab.ttf"],
+        italic_paths: &["C:\\Windows\\Fonts\\cambriai.ttf"],
+        bold_italic_paths: &["C:\\Windows\\Fonts\\cambriaz.ttf"],
         bundled: false,
     },
     FontDef {
@@ -334,36 +458,55 @@ pub const FONT_CHOICES: &[FontDef] = &[
             "C:\\Windows\\Fonts\\georgia.ttf",
             "/usr/share/fonts/truetype/georgia/Georgia.ttf",
         ],
+        bold_paths: &["C:\\Windows\\Fonts\\georgiab.ttf"],
+        italic_paths: &["C:\\Windows\\Fonts\\georgiai.ttf"],
+        bold_italic_paths: &["C:\\Windows\\Fonts\\georgiaz.ttf"],
         bundled: false,
     },
     FontDef {
         key: "verdana",
         display: "Verdana",
         paths: &["C:\\Windows\\Fonts\\verdana.ttf"],
+        bold_paths: &["C:\\Windows\\Fonts\\verdanab.ttf"],
+        italic_paths: &["C:\\Windows\\Fonts\\verdanai.ttf"],
+        bold_italic_paths: &["C:\\Windows\\Fonts\\verdanaz.ttf"],
         bundled: false,
     },
     FontDef {
         key: "tahoma",
         display: "Tahoma",
         paths: &["C:\\Windows\\Fonts\\tahoma.ttf"],
+        // Tahoma liefert nur einen Fett-Schnitt mit; kursiv wird geschert.
+        bold_paths: &["C:\\Windows\\Fonts\\tahomabd.ttf"],
+        italic_paths: &[],
+        bold_italic_paths: &[],
         bundled: false,
     },
     FontDef {
         key: "trebuc",
         display: "Trebuchet MS",
         paths: &["C:\\Windows\\Fonts\\trebuc.ttf"],
+        bold_paths: &["C:\\Windows\\Fonts\\trebucbd.ttf"],
+        italic_paths: &["C:\\Windows\\Fonts\\trebucit.ttf"],
+        bold_italic_paths: &["C:\\Windows\\Fonts\\trebucbi.ttf"],
         bundled: false,
     },
     FontDef {
         key: "palatino",
         display: "Palatino Linotype",
         paths: &["C:\\Windows\\Fonts\\pala.ttf"],
+        bold_paths: &["C:\\Windows\\Fonts\\palab.ttf"],
+        italic_paths: &["C:\\Windows\\Fonts\\palai.ttf"],
+        bold_italic_paths: &["C:\\Windows\\Fonts\\palabi.ttf"],
         bundled: false,
     },
     FontDef {
         key: "segoeui",
         display: "Segoe UI",
         paths: &["C:\\Windows\\Fonts\\segoeui.ttf"],
+        bold_paths: &["C:\\Windows\\Fonts\\segoeuib.ttf"],
+        italic_paths: &["C:\\Windows\\Fonts\\segoeuii.ttf"],
+        bold_italic_paths: &["C:\\Windows\\Fonts\\segoeuiz.ttf"],
         bundled: false,
     },
     FontDef {
@@ -373,36 +516,65 @@ pub const FONT_CHOICES: &[FontDef] = &[
             "C:\\Windows\\Fonts\\consola.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
         ],
+        bold_paths: &[
+            "C:\\Windows\\Fonts\\consolab.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+        ],
+        italic_paths: &[
+            "C:\\Windows\\Fonts\\consolai.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Oblique.ttf",
+        ],
+        bold_italic_paths: &[
+            "C:\\Windows\\Fonts\\consolaz.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-BoldOblique.ttf",
+        ],
         bundled: false,
     },
     FontDef {
         key: "gabriola",
         display: "Gabriola",
+        // Zierschrift, nur ein Schnitt.
         paths: &["C:\\Windows\\Fonts\\Gabriola.ttf"],
+        bold_paths: &[],
+        italic_paths: &[],
+        bold_italic_paths: &[],
         bundled: false,
     },
     FontDef {
         key: "inkfree",
         display: "Ink Free",
         paths: &["C:\\Windows\\Fonts\\Inkfree.ttf"],
+        bold_paths: &[],
+        italic_paths: &[],
+        bold_italic_paths: &[],
         bundled: false,
     },
     FontDef {
         key: "comic",
         display: "Comic Sans MS",
         paths: &["C:\\Windows\\Fonts\\comic.ttf"],
+        bold_paths: &["C:\\Windows\\Fonts\\comicbd.ttf"],
+        italic_paths: &["C:\\Windows\\Fonts\\comici.ttf"],
+        bold_italic_paths: &["C:\\Windows\\Fonts\\comicz.ttf"],
         bundled: false,
     },
     FontDef {
         key: "impact",
         display: "Impact",
+        // Impact ist bereits ein fetter Schnitt und hat keine weiteren.
         paths: &["C:\\Windows\\Fonts\\impact.ttf"],
+        bold_paths: &[],
+        italic_paths: &[],
+        bold_italic_paths: &[],
         bundled: false,
     },
     FontDef {
         key: "candara",
         display: "Candara",
         paths: &["C:\\Windows\\Fonts\\Candara.ttf"],
+        bold_paths: &["C:\\Windows\\Fonts\\Candarab.ttf"],
+        italic_paths: &["C:\\Windows\\Fonts\\Candarai.ttf"],
+        bold_italic_paths: &["C:\\Windows\\Fonts\\Candaraz.ttf"],
         bundled: false,
     },
 ];
@@ -509,6 +681,10 @@ pub struct Element {
     pub italic: bool,
     #[serde(default)]
     pub underline: bool,
+    /// Durchgestrichen. Wie `underline` eine gezeichnete Linie, kein
+    /// Schriftschnitt — sie liegt auf halber x-Höhe über der Grundlinie.
+    #[serde(default)]
+    pub strikethrough: bool,
     pub align: TextAlign,
     #[serde(default)]
     pub valign: VAlign,
@@ -621,6 +797,7 @@ impl Element {
             bold: false,
             italic: false,
             underline: false,
+            strikethrough: false,
             align: TextAlign::Left,
             valign: VAlign::default(),
             indent: 0.0,
@@ -659,6 +836,7 @@ impl Element {
             bold: false,
             italic: false,
             underline: false,
+            strikethrough: false,
             align: TextAlign::Left,
             valign: VAlign::default(),
             indent: 0.0,
@@ -692,6 +870,7 @@ impl Element {
             bold: false,
             italic: false,
             underline: false,
+            strikethrough: false,
             align: TextAlign::Left,
             valign: VAlign::default(),
             indent: 0.0,
@@ -725,6 +904,7 @@ impl Element {
             bold: false,
             italic: false,
             underline: false,
+            strikethrough: false,
             align: TextAlign::Left,
             valign: VAlign::default(),
             indent: 0.0,
@@ -758,6 +938,7 @@ impl Element {
             bold: false,
             italic: false,
             underline: false,
+            strikethrough: false,
             align: TextAlign::Left,
             valign: VAlign::default(),
             indent: 0.0,
