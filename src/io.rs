@@ -78,6 +78,7 @@ ELEMENT (je nach "kind" sind verschiedene Felder relevant)
   "stroke_color": [r,g,b,a],         // Shape
   "corner_radius": <pt>,             // Rectangle
   "points": [[0.0,0.0], [1.0,0.5]],  // Path; auf die Box normalisiert (0..1)
+  "handles": [[ix,iy, ox,oy], ...],  // Path; Kurvengriffe, leer/fehlend = Strecken
   "path_closed": <bool>              // Path; offen = nie gefuellt
 }
 
@@ -88,11 +89,35 @@ Text       : text, font_size, font, color, bold, italic, underline, align, valig
 Rectangle  : fill_color, stroke_width, stroke_color, corner_radius
 Line       : stroke_width, stroke_color (Linie = Box mit h=0 + rotation)
 Ellipse    : fill_color, stroke_width, stroke_color (Kreis = w==h; corner_radius ignoriert)
-Path       : points, path_closed, fill_color, stroke_width, stroke_color
-             (freier Streckenzug, z. B. aus einem PDF-Import; die Stuetzpunkte
-             liegen normalisiert in der Box, Verschieben/Skalieren/Drehen
-             laeuft ueber x/y/w/h/rotation wie bei jeder anderen Form)
+Path       : points, handles, path_closed, fill_color, stroke_width, stroke_color
 Image      : id (verweist auf images[].id), crop, image_w, image_h
+
+PFADE UND KURVEN
+----------------
+"points[i]" = [nx, ny] mit 0,0 = linke obere und 1,1 = rechte untere Ecke der
+Box. Der Punkt auf der Seite ist also x + nx*w bzw. y + ny*h (danach um die
+Boxmitte um "rotation" gedreht). Verschieben, Skalieren und Drehen laufen
+damit ueber x/y/w/h/rotation wie bei jeder anderen Form — zum Verschieben
+aenderst du x/y, NICHT die Punkte.
+
+"handles[i]" = [in_x, in_y, out_x, out_y] sind die beiden kubischen
+Bezier-Kontrollpunkte des Knotens i, im SELBEN normalisierten Raum wie
+"points" — also Positionen, keine Abstaende zum Stuetzpunkt. "in" gilt fuer
+das Segment vor dem Knoten, "out" fuer das danach.
+
+  - Eckknoten: beide Griffe liegen auf ihrem Stuetzpunkt, also
+    [nx, ny, nx, ny]. Beide Nachbarsegmente werden dann Geraden.
+  - Glatter Uebergang: in, Stuetzpunkt und out liegen auf einer Geraden,
+    ueblich als in = p - t und out = p + t.
+  - Zwischen zwei Knoten liegt eine Gerade, wenn out des einen und in des
+    anderen jeweils auf ihrem Stuetzpunkt liegen — sonst eine kubische Kurve
+    mit genau diesen beiden Kontrollpunkten.
+  - Bei "path_closed": true gibt es zusaetzlich das Segment vom letzten
+    zurueck zum ersten Knoten. Ein offener Pfad wird nie gefuellt.
+
+REGEL: "handles" ist entweder leer/weggelassen (reiner Streckenzug — der
+Normalfall fuer Vielecke) oder GENAU so lang wie "points". Andere Laengen
+repariert BoxDoc beim Laden, indem es die fehlenden Knoten zu Ecken macht.
 
 TEXT-HOEHE UND UMBRUCH
 ----------------------
@@ -488,6 +513,74 @@ mod native {
         match crate::printing::export_pdf(&path, &app.doc, &app.images, &layouts) {
             Ok(()) => app.set_status(format!("PDF exportiert: {}", path.display())),
             Err(e) => app.set_status(format!("PDF-Export fehlgeschlagen: {e}")),
+        }
+    }
+
+    /// SVG-Export. `selection_only` exportiert nur die ausgewählten Objekte,
+    /// sonst die aktuelle Seite.
+    ///
+    /// Warum die **aktuelle** Seite und nicht das ganze Dokument: SVG hat kein
+    /// Seitenkonzept. Alle Seiten in eine Datei zu legen hieße, sie
+    /// übereinanderzustapeln — das will niemand. Mehrere Dateien stillschweigend
+    /// anzulegen wäre eine Überraschung. Also genau das, was auf dem Schirm ist.
+    pub fn export_svg_dialog(
+        app: &mut crate::app::EditorApp,
+        ctx: &egui::Context,
+        selection_only: bool,
+    ) {
+        let scope = if selection_only {
+            if app.selection.is_empty() {
+                app.set_status("Nichts ausgewählt — es gibt nichts zu exportieren.");
+                return;
+            }
+            crate::svg::Scope::Selection {
+                page: app.page_index,
+                ids: app.selection.clone(),
+            }
+        } else {
+            crate::svg::Scope::Page(app.page_index)
+        };
+
+        let title = if selection_only {
+            "Auswahl als SVG exportieren"
+        } else {
+            "Seite als SVG exportieren"
+        };
+        let mut dlg = rfd::FileDialog::new()
+            .add_filter("SVG", &["svg"])
+            .set_title(title);
+        if let Some(stem) = app
+            .file_path
+            .as_ref()
+            .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
+        {
+            // Seitennummer bzw. „auswahl" mit in den Namen: Sonst überschreibt
+            // der zweite Export stillschweigend den ersten.
+            let suffix = if selection_only {
+                String::from("auswahl")
+            } else {
+                format!("seite{}", app.page_index + 1)
+            };
+            dlg = dlg.set_file_name(format!("{stem}_{suffix}.svg"));
+        }
+        let Some(path) = dlg.save_file() else { return };
+        let path = if path.extension().and_then(|e| e.to_str()) == Some("svg") {
+            path
+        } else {
+            path.with_extension("svg")
+        };
+
+        let layouts = crate::printing::collect_layouts(ctx, &app.doc);
+        match crate::svg::export_svg(&path, &app.doc, &app.images, &layouts, &scope) {
+            Ok(()) => {
+                let what = if selection_only {
+                    format!("{} Objekt(e)", app.selection.len())
+                } else {
+                    format!("Seite {}", app.page_index + 1)
+                };
+                app.set_status(format!("SVG exportiert ({what}): {}", path.display()));
+            }
+            Err(e) => app.set_status(format!("SVG-Export fehlgeschlagen: {e}")),
         }
     }
 

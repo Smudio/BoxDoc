@@ -70,7 +70,7 @@ curl -X PUT --data-binary '{"doc":{"format":"A4","orientation":"Portrait","pages
 ```json
 {
   "id": 1,
-  "kind": "Text | Image | Rectangle | Line",
+  "kind": "Text | Image | Rectangle | Line | Ellipse | Path",
   "x": 0.0, "y": 0.0, "w": 100.0, "h": 50.0, "rotation": 0.0,
   "text": "Inhalt",
   "font_size": 14.0,
@@ -85,9 +85,21 @@ curl -X PUT --data-binary '{"doc":{"format":"A4","orientation":"Portrait","pages
   "fill_color": [80, 140, 220, 60],
   "stroke_width": 2.0,
   "stroke_color": [40, 100, 180, 255],
-  "corner_radius": 0.0
+  "corner_radius": 0.0,
+
+  "points":  [[0.0, 1.0], [0.5, 0.0], [1.0, 1.0]],
+  "handles": [[0.0, 1.0, 0.2, 0.4], [0.3, 0.0, 0.7, 0.0], [0.8, 0.4, 1.0, 1.0]],
+  "path_closed": false
 }
 ```
+
+Die letzten drei Felder gelten nur für `kind: "Path"`: `points` sind die
+Stützpunkte, **auf die Box normalisiert** (`0,0` = links oben, `1,1` = rechts
+unten), `handles` die kubischen Bézier-Griffe `[in_x, in_y, out_x, out_y]` im
+selben Raum. `handles` ist entweder leer/weggelassen (dann ist der Pfad ein
+Streckenzug) oder genau so lang wie `points`. Ein Knoten, dessen Griffe auf
+seinem Stützpunkt liegen, ist eine Ecke. Volle Erklärung in
+[llms-full.txt](https://boxdoc.at/llms-full.txt).
 
 ### Koordinatensystem
 
@@ -110,4 +122,4 @@ Design-Leitfaden und HTTP-API-Details.
 ## Beispiel-Dokument
 
 **https://boxdoc.at/sample.boxdoc** — ein vollständiges, gültiges `.boxdoc`-Dokument
-mit allen Element-Typen (Text, Rectangle, Line).
+mit allen Element-Typen (Text, Rectangle, Line, Ellipse, Path).

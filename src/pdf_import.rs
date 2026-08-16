@@ -39,6 +39,7 @@
 use crate::model::{
     mm_to_pt, Document, Element, ElementKind, Orientation, Page, PaperFormat, TextAlign, VAlign,
 };
+use crate::geometry::PathNode;
 use crate::store::ImageStore;
 use egui::Pos2;
 use pdfium_render::prelude::{PdfPageTextRenderMode, PdfPathFillMode, PdfPathSegmentType};
@@ -690,8 +691,12 @@ pub struct SubPath {
     /// nicht enthalten. Grundlage der Formerkennung (Rechteck, Linie).
     pub pts: Vec<Pos2>,
     /// Derselbe Zug als **Streckenzug**: Kurven sind in kurze Geraden
-    /// aufgelöst. Grundlage für freie Pfade und die Ellipsen-Prüfung.
+    /// aufgelöst. Grundlage der Ellipsen-Prüfung und der Größenabschätzung.
     pub outline: Vec<Pos2>,
+    /// Derselbe Zug als **Knotenfolge mit Kurvengriffen** — die Form, in der
+    /// BoxDoc einen freien Pfad speichert. Hier bleiben die Bézier-Daten des
+    /// PDFs erhalten, statt in Strecken zerlegt zu werden.
+    pub nodes: Vec<PathNode>,
     /// Wurde der Teilpfad mit `closepath` geschlossen?
     pub closed: bool,
     /// Anzahl gerader Strecken (LineTo).
@@ -717,8 +722,12 @@ pub enum PathShape {
     },
     /// Achsparallele Ellipse über ihre Hüllbox.
     Ellipse { x: f32, y: f32, w: f32, h: f32 },
-    /// Alles, was keiner Grundform entspricht: der Streckenzug selbst.
-    Free { pts: Vec<Pos2>, closed: bool },
+    /// Alles, was keiner Grundform entspricht: der Zug selbst, mit seinen
+    /// Kurvengriffen.
+    Free {
+        nodes: Vec<PathNode>,
+        closed: bool,
+    },
 }
 
 /// Kürzeste Strecke, die noch als Linie übernommen wird (pt).
@@ -836,14 +845,15 @@ fn path_elements(
                     el.fill_color = fill_color;
                     el
                 }
-                PathShape::Free { pts, closed } => {
+                PathShape::Free { nodes, closed } => {
                     // Ein offener Zug ohne Kontur wäre unsichtbar.
                     if !closed && !has_stroke {
                         continue;
                     }
-                    let abs: Vec<(f32, f32)> =
-                        decimate(&pts).iter().map(|p| (p.x, p.y)).collect();
-                    let mut el = Element::new_path(id, &abs, closed);
+                    if nodes.len() < 2 {
+                        continue;
+                    }
+                    let mut el = crate::geometry::path_from_nodes(id, &nodes, closed);
                     el.fill_color = if closed { fill_color } else { [0, 0, 0, 0] };
                     el
                 }
@@ -865,22 +875,25 @@ fn path_elements(
 ///
 /// Ein Pfad wird gefüllt, solange das Dokument offen ist, und ein konkaver
 /// Umriss kostet dabei quadratisch viel (Ear Clipping). Diese Grenze hält den
-/// Aufwand im Rahmen; sichtbar ist der Unterschied nicht, weil die Punkte aus
-/// unserer eigenen Kurvenauflösung stammen und ohnehin dichter liegen als
-/// jedes Pixel.
+/// Aufwand im Rahmen.
+///
+/// Seit Kurven als Kurven ankommen, greift sie deutlich seltener: Ein Bogen
+/// braucht jetzt zwei Knoten statt der bis zu 24 Punkte seiner Auflösung.
+/// Was hier noch anschlägt, sind echte Punktwolken — nachgezeichnete
+/// Landkarten, Schriftzüge in Umrissen.
 const MAX_PATH_POINTS: usize = 256;
 
-/// Dünnt einen Streckenzug gleichmäßig aus, falls er zu viele Punkte hat.
-/// Der letzte Punkt bleibt immer erhalten, damit die Form nicht am Ende
+/// Dünnt eine Knotenfolge gleichmäßig aus, falls sie zu lang ist.
+/// Der letzte Knoten bleibt immer erhalten, damit die Form nicht am Ende
 /// abgeschnitten wirkt.
-fn decimate(pts: &[Pos2]) -> Vec<Pos2> {
-    if pts.len() <= MAX_PATH_POINTS {
-        return pts.to_vec();
+fn decimate_nodes(nodes: &[PathNode]) -> Vec<PathNode> {
+    if nodes.len() <= MAX_PATH_POINTS {
+        return nodes.to_vec();
     }
-    let step = pts.len().div_ceil(MAX_PATH_POINTS);
-    let mut out: Vec<Pos2> = pts.iter().step_by(step).copied().collect();
-    if let Some(last) = pts.last() {
-        if out.last() != Some(last) {
+    let step = nodes.len().div_ceil(MAX_PATH_POINTS);
+    let mut out: Vec<PathNode> = nodes.iter().step_by(step).copied().collect();
+    if let Some(last) = nodes.last() {
+        if out.last().map(|n| n.anchor) != Some(last.anchor) {
             out.push(*last);
         }
     }
@@ -932,12 +945,14 @@ fn collect_subpaths(path: &PdfPagePathObject, page_h: f32, matrix: Mat) -> Vec<S
                 flush(&mut current, &mut out);
                 current.pts.push(p);
                 current.outline.push(p);
+                current.nodes.push(PathNode::corner(p));
             }
             PdfPathSegmentType::LineTo => {
                 ctrl.clear();
                 current.lines += 1;
                 current.pts.push(p);
                 current.outline.push(p);
+                current.nodes.push(PathNode::corner(p));
             }
             PdfPathSegmentType::BezierTo => {
                 ctrl.push(p);
@@ -946,6 +961,17 @@ fn collect_subpaths(path: &PdfPagePathObject, page_h: f32, matrix: Mat) -> Vec<S
                     let start = *current.outline.last().unwrap_or(&ctrl[0]);
                     flatten_bezier(start, ctrl[0], ctrl[1], ctrl[2], &mut current.outline);
                     current.pts.push(ctrl[2]);
+                    // Die Kurve als Kurve behalten: Der erste Kontrollpunkt
+                    // gehört als Ausgangsgriff an den vorigen Knoten, der
+                    // zweite als Eingangsgriff an den neuen.
+                    if let Some(last) = current.nodes.last_mut() {
+                        last.out_h = ctrl[0];
+                    }
+                    current.nodes.push(PathNode {
+                        anchor: ctrl[2],
+                        in_h: ctrl[1],
+                        out_h: ctrl[2],
+                    });
                     ctrl.clear();
                 }
             }
@@ -956,6 +982,36 @@ fn collect_subpaths(path: &PdfPagePathObject, page_h: f32, matrix: Mat) -> Vec<S
         }
     }
     flush(&mut current, &mut out);
+    out
+}
+
+/// Entfernt aus einer Knotenfolge, was der Formerkennung im Weg steht:
+/// Wiederholungen desselben Stützpunkts und — bei geschlossenen Zügen — einen
+/// Endknoten, der wieder auf dem Startpunkt liegt.
+///
+/// Das Gegenstück zu [`dedup_points`], nur dass hier die Griffe mitwandern
+/// müssen: Wird der letzte Knoten mit dem ersten verschmolzen, gehört sein
+/// Eingangsgriff an den ersten Knoten — sonst verlöre der Abschluss einer
+/// geschlossenen Kurve seine Rundung.
+fn dedup_nodes(nodes: &[PathNode], closed: bool) -> Vec<PathNode> {
+    let mut out: Vec<PathNode> = Vec::with_capacity(nodes.len());
+    for n in nodes {
+        match out.last_mut() {
+            Some(last) if (n.anchor - last.anchor).length() < MIN_SEGMENT_LEN => {
+                // Derselbe Punkt zweimal: Griffe zusammenführen, statt einen
+                // Knoten mit Länge null stehen zu lassen.
+                last.out_h = n.out_h;
+            }
+            _ => out.push(*n),
+        }
+    }
+    if closed && out.len() > 2 {
+        let (first, last) = (out[0], out[out.len() - 1]);
+        if (last.anchor - first.anchor).length() < MIN_SEGMENT_LEN {
+            out[0].in_h = last.in_h;
+            out.pop();
+        }
+    }
     out
 }
 
@@ -992,6 +1048,7 @@ fn flatten_bezier(p0: Pos2, p1: Pos2, p2: Pos2, p3: Pos2, out: &mut Vec<Pos2>) {
 pub fn classify_subpath(sub: &SubPath) -> Vec<PathShape> {
     let corners = dedup_points(&sub.pts, sub.closed);
     let outline = dedup_points(&sub.outline, sub.closed);
+    let nodes = decimate_nodes(&dedup_nodes(&sub.nodes, sub.closed));
     if outline.len() < 2 {
         return Vec::new();
     }
@@ -1005,7 +1062,7 @@ pub fn classify_subpath(sub: &SubPath) -> Vec<PathShape> {
                 .collect();
         }
         return vec![PathShape::Free {
-            pts: outline,
+            nodes,
             closed: false,
         }];
     }
@@ -1026,10 +1083,7 @@ pub fn classify_subpath(sub: &SubPath) -> Vec<PathShape> {
     if outline.len() < 3 {
         return Vec::new();
     }
-    vec![PathShape::Free {
-        pts: outline,
-        closed: true,
-    }]
+    vec![PathShape::Free { nodes, closed: true }]
 }
 
 /// Prüft, ob ein geschlossener Streckenzug eine achsparallele Ellipse ist, und

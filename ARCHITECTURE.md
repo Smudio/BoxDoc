@@ -52,7 +52,7 @@ pub enum ElementKind {
     Rectangle,
     Line,
     Ellipse,
-    Path,       // freier Streckenzug (points[] normalisiert auf die Box)
+    Path,       // freier Pfad (points[] + optionale handles[], auf die Box normalisiert)
 }
 
 pub struct Element {
@@ -91,8 +91,23 @@ pub enum Interaction {
     Crop { id, edge, start_crop },
     SelectionBox { start },
     LineEndpoint { id, is_start },
+    PathNode { id, index },                  // Pfad-Stützpunkt ziehen
+    PathHandle { id, index, outgoing },      // Bézier-Griff ziehen
 }
 ```
+
+#### Werkzeuge
+
+```rust
+pub enum Tool { Select, Line, Pen, Freehand }
+```
+
+Genau **ein** Feld (`EditorApp::tool`) hält den Werkzeugzustand. Zwei
+Zeichenvorgänge können damit nicht gleichzeitig laufen. Was ein Werkzeug an
+halbfertiger Arbeit hält, steckt daneben in `path_draft` (Pfad-Entwurf, noch
+ohne ID und noch nicht im Dokument) bzw. `line_drawing` (gesetzter
+Linien-Startpunkt). `path_edit` sagt, welcher **fertige** Pfad gerade auf
+Knotenebene bearbeitet wird.
 
 ### 3. Rendering (`src/canvas.rs`)
 
@@ -121,7 +136,7 @@ pub enum Interaction {
 |--------|-----------|------|----------|-----------|
 | BoxDoc | `.boxdoc` | ✅ | ✅ pretty JSON | Natives Format |
 | ODT | `.odt` | ✅ nativ | ✅ nativ | OpenDocument |
-| PDF | `.pdf` | ✅ pdfium | ✅ Text (umgebrochen), Bild, alle Shapes | printpdf |
+| PDF | `.pdf` | ✅ pdfium, Kurven bleiben Kurven | ✅ Text (umgebrochen), Bild, alle Shapes, echte Bézier-Kurven | printpdf |
 
 Projektstruktur:
 
@@ -201,6 +216,39 @@ gesnapshottet (nur IDs), um Speicher zu sparen.
   Aufrufen (SW-001 gefixt, siehe `SECURITY.md`).
 - **WASM:** Status-Text "nicht unterstützt".
 
+### 7b. SVG-Export (`src/svg.rs`)
+
+- **Ohne Fremdbibliothek** — das Modul baut eine Zeichenkette. Dadurch hat es
+  keine UI- und keine Plattform-Abhängigkeit und ist vollständig testbar
+  (`tests/svg_export.rs`, 25 Tests, darunter eine XML-Prüfung mit echtem
+  Parser).
+- **Zwei Bereiche** (`Scope`): eine ganze Seite (Seitenformat als Leinwand,
+  weißer Grund) oder eine **Auswahl** (Leinwand = gemeinsame Hüllbox der
+  gewählten Objekte plus 8 pt Rand, Grund durchsichtig). Eine exportierte
+  Auswahl soll sich in ein anderes Dokument legen lassen, ohne einen weißen
+  Kasten mitzubringen.
+- **Jedes Objekt bleibt sein eigenes Primitiv:** `<rect>`, `<ellipse>`,
+  `<line>`, `<path>` mit kubischen Bézier-Segmenten, `<text>` mit einem
+  `<tspan>` je Zeile. Nichts wird zu einem Vieleck aufgelöst — eine
+  importierte Rundung taucht in Illustrator oder Inkscape mit ihren vier
+  Griffen wieder auf.
+- **Transparenz ist echt.** Der PDF-Export muss halbdurchsichtige Farben über
+  Weiß mischen (printpdf 0.7 gibt keinen Zugriff auf `ExtGState`, siehe
+  `blend_over_white`). SVG kennt `fill-opacity`; überlappende Formen scheinen
+  hier durcheinander durch, genau wie auf dem Bildschirm.
+- **Bilder** werden als data-URI eingebettet (nie verlinkt — eine verlinkte
+  Datei wäre beim Weitergeben sofort kaputt). Der Crop entsteht über
+  `<clipPath>` plus Versatz statt durch Neuberechnung der Pixel: Die
+  Bilddaten bleiben unangetastet und der Ausschnitt im SVG verschiebbar.
+- **Textlayout** kommt wie beim PDF aus `text_layout.rs`. Fehlt der Eintrag zu
+  einem Textelement, wird es übersprungen statt mit geratenem Umbruch falsch
+  gesetzt.
+- **Leinwand aus der Kontur, nicht aus der Box:** `geometry::element_bounds`
+  rechnet über die gedrehten Ecken bzw. die abgetastete Kurve. Eine um 45°
+  gedrehte Form ragt über `x/y/w/h` hinaus; eine Linie hat `h == 0`.
+- **Nur die aktuelle Seite.** SVG hat kein Seitenkonzept; alle Seiten in eine
+  Datei zu legen hieße, sie übereinanderzustapeln.
+
 ### 7a. Textlayout (`src/text_layout.rs`)
 
 Die **einzige** Quelle der Wahrheit für Zeilenumbruch, Ausrichtung und
@@ -230,10 +278,42 @@ im Uhrzeigersinn).
 pub fn line_endpoints(el)   -> (Pos2, Pos2)
 pub fn rect_outline(el)     -> Vec<Pos2>   // inkl. corner_radius
 pub fn ellipse_outline(el)  -> Vec<Pos2>
-pub fn path_outline(el)     -> Vec<Pos2>   // freier Pfad
+pub fn path_outline(el)     -> Vec<Pos2>   // freier Pfad, Kurven aufgelöst
 pub fn quad_corners(el)     -> [Pos2; 4]   // Bilder, Auswahlrahmen
 pub fn triangulate(&[Pos2]) -> Vec<[u32; 3]>   // Füllung, auch konkav
 ```
+
+#### Pfade und Kurven
+
+Ein Pfad ist eine Folge von `PathNode { anchor, in_h, out_h }` — Stützpunkt
+plus die beiden kubischen Kontrollpunkte. Im Modell stehen sie **auf die Box
+normalisiert** (`points[]` + `handles[]`), hier kommen sie in
+Seitenkoordinaten heraus:
+
+```rust
+pub fn path_nodes(el)            -> Vec<PathNode>
+pub fn set_path_nodes(el, nodes)               // einziger Schreibweg
+pub fn path_segments(el)         -> Option<(Pos2, Vec<PathSeg>)>  // für PDF
+pub fn path_nearest(el, p)       -> Option<PathHit>               // Hit-Test, Einfügen
+pub fn insert_node / remove_node / move_node / move_handle
+pub fn smooth_path / sharpen_path / toggle_node_smooth
+pub fn simplify_polyline / nodes_from_polyline // Freihand
+```
+
+`set_path_nodes` ist der **einzige** Weg, Stützpunkte zu ändern, und hält dabei
+die Invariante, an der alles andere hängt: *die Box umschließt den Pfad*.
+Hit-Test, Auswahl-Rechteck, Snapping und Ausrichtung lesen ausschließlich
+`x`/`y`/`w`/`h` — zöge ein Knoten aus der Box heraus, wäre der Pfad dort weder
+anklickbar noch ausrichtbar. Die Box wird über die **gezeichnete Kurve** gelegt,
+nicht über die Stützpunkte (eine Kurve beult dazwischen aus) und nicht über die
+Griffe (die liegen oft weit außerhalb der Form). Gerechnet wird im unrotierten
+Rahmen, damit die Drehung erhalten bleibt.
+
+**Bildschirm löst auf, PDF nicht:** `path_outline` zerlegt Kurven in Strecken
+(≤ 24 je Kurve, Fehler ≪ 1 Bildpunkt), weil egui füllen und triangulieren
+muss. Der PDF-Export nimmt dagegen `path_segments` und schreibt echte
+Bézier-Operatoren. Nur so kommt eine importierte Rundung auch wieder als
+Rundung heraus statt als Vieleck mit zweihundert Ecken.
 
 `triangulate` ist Ear Clipping. Der Canvas füllte Formen vorher als
 Dreiecksfächer um den ersten Punkt — richtig für konvexe Umrisse, und mehr gab
@@ -280,6 +360,14 @@ ist achsparallel und kennt weder Richtung noch Drehung:
 | Text | jede Beschriftung waagrecht | Zeichenmatrix (`a`,`b`) |
 | Bild | flach in zu großer Box | Bildmatrix (Einheitsquadrat → Ecken) |
 | Rechteck | gedrehte werden zur größeren Hüllbox | vier Eckpunkte |
+
+**Kurven bleiben Kurven.** `collect_subpaths` sammelt neben dem aufgelösten
+Streckenzug (den die Ellipsen-Erkennung braucht) auch die Knotenfolge mit
+ihren Griffen: Der erste Kontrollpunkt eines `c`-Operators wird zum
+Ausgangsgriff des vorigen Knotens, der zweite zum Eingangsgriff des neuen.
+Vorher wurde jede Kurve in bis zu 24 Strecken zerlegt und anschließend auf
+256 Punkte heruntergedünnt — aus einem Bogen wurde ein Vieleck, das sich nicht
+mehr sinnvoll bearbeiten und beim Export nicht wiederherstellen ließ.
 
 Bei gedrehtem Text liefert pdfium nur die achsparallele Hüllbox. Die gesuchte
 Box folgt daraus durch Auflösen von
@@ -377,20 +465,25 @@ Zusammenspiel mit dem Server (`src/web_sync.rs`):
 ```
 BoxDoc/
 ├── src/
-│   ├── main.rs              # Entry points (nativ + WASM, ~78 Zeilen)
-│   ├── model.rs             # Datenmodell + Serde (~700 Zeilen)
-│   ├── io.rs                # File-I/O, native + web_impl Submodule (~630 Zeilen)
+│   ├── main.rs              # Entry points (nativ + WASM, ~90 Zeilen)
+│   ├── model.rs             # Datenmodell + Serde (~920 Zeilen)
+│   ├── io.rs                # File-I/O, native + web_impl Submodule (~880 Zeilen)
 │   ├── history.rs           # Undo/Redo (~90 Zeilen)
-│   ├── store.rs             # Bildspeicher + Texture-Cache (~40 Zeilen)
-│   ├── geometry.rs          # Geometrie-Helfer (~50 Zeilen)
-│   ├── themes.rs            # Farb-Themes (~180 Zeilen)
-│   ├── fonts.rs             # Font-Loading (~105 Zeilen)
+│   ├── store.rs             # Bildspeicher + Texture-Cache (~75 Zeilen)
+│   ├── geometry.rs          # Formen-Umrisse, Pfade & Kurven (~1475 Zeilen inkl. Tests)
+│   ├── text_layout.rs       # Ein Layout-Pfad für Canvas und PDF (~290 Zeilen)
+│   ├── merge.rs             # Drei-Wege-Merge (~670 Zeilen inkl. Tests)
+│   ├── themes.rs            # Farb-Themes (~190 Zeilen)
+│   ├── fonts.rs             # Font-Loading (~140 Zeilen)
 │   ├── settings_io.rs       # Settings-Persistenz (~115 Zeilen)
 │   ├── file_watch.rs        # File-Watcher (nativ) (~68 Zeilen)
-│   ├── app.rs               # App-State + UI-Logik (~2050 Zeilen, Refactor offen)
-│   ├── canvas.rs            # Canvas-Rendering + Interaktion (~1430 Zeilen, Refactor offen)
-│   ├── odt.rs               # ODT-Import/-Export (~330 Zeilen)
-│   └── printing.rs          # PDF-Export (~265 Zeilen)
+│   ├── web_sync.rs          # Server-Sync (WASM) (~625 Zeilen)
+│   ├── app.rs               # App-State + UI-Logik (~3620 Zeilen, Refactor offen)
+│   ├── canvas.rs            # Canvas-Rendering + Interaktion (~2530 Zeilen, Refactor offen)
+│   ├── pdf_import.rs        # PDF-Import via pdfium (~1230 Zeilen)
+│   ├── odt.rs               # ODT-Import/-Export (~400 Zeilen)
+│   ├── printing.rs          # PDF-Export (~600 Zeilen)
+│   └── svg.rs               # SVG-Export, Seite oder Auswahl (~440 Zeilen)
 ├── assets/
 │   └── fonts/               # Inter, Roboto, Lora, JetBrains, Pacifico (TTF)
 ├── Cargo.toml              # Dependencies + Profile

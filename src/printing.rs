@@ -420,18 +420,70 @@ fn draw_ellipse(layer: &PdfLayerReference, el: &Element, page_h_mm: f32) {
     draw_outline(layer, el, page_h_mm, crate::geometry::ellipse_outline(el));
 }
 
-/// Zeichnet einen freien Pfad.
+/// Wandelt einen Pfad in die Punktfolge, die printpdf erwartet.
+///
+/// printpdf markiert Kurven nicht als eigene Segmente, sondern über ein
+/// `bool` je Punkt. Der Leser (`Line::into_stream_op`) schaut auf **zwei
+/// aufeinanderfolgende** gesetzte Flags und verbraucht dann vier Punkte als
+/// kubische Kurve. Für eine Kurve von `A` nach `D` über `B`,`C` muss deshalb
+/// **`A` und `B`** markiert sein — nicht etwa nur die Kontrollpunkte. Genau
+/// das macht diese Funktion; ein gerades Segment bleibt ein einzelner Punkt
+/// ohne Flag.
+fn path_points(el: &Element, page_h_mm: f32) -> Vec<(Point, bool)> {
+    let Some((start, segs)) = crate::geometry::path_segments(el) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(Point, bool)> = vec![(to_pdf(start, page_h_mm), false)];
+    for seg in segs {
+        match seg {
+            crate::geometry::PathSeg::Line(p) => out.push((to_pdf(p, page_h_mm), false)),
+            crate::geometry::PathSeg::Cubic(c1, c2, p) => {
+                // printpdf verwechselt zwei **gleiche** Kontrollpunkte mit dem
+                // Sonderfall „zweiter Kontrollpunkt = Endpunkt" und schreibt
+                // dann die falsche Kurve. Ein unmerklicher Versatz umgeht das.
+                let c2 = if (c2 - c1).length() < 1e-4 {
+                    c2 + egui::Vec2::new(1e-3, 0.0)
+                } else {
+                    c2
+                };
+                // Der vorangehende Punkt eröffnet die Kurve und wird markiert.
+                if let Some(last) = out.last_mut() {
+                    last.1 = true;
+                }
+                out.push((to_pdf(c1, page_h_mm), true));
+                out.push((to_pdf(c2, page_h_mm), false));
+                out.push((to_pdf(p, page_h_mm), false));
+            }
+        }
+    }
+    out
+}
+
+/// Zeichnet einen freien Pfad — mit echten Kurven.
 ///
 /// Geschlossen wird er wie jede andere Fläche behandelt; offen als Linienzug,
 /// denn ein `Polygon` würde ihn stillschweigend schließen und damit eine Kante
 /// erfinden, die auf dem Bildschirm nicht zu sehen ist.
+///
+/// Anders als Rechteck und Ellipse geht der Pfad **nicht** über
+/// [`draw_outline`]: Der Bildschirm zeichnet die Kurve aufgelöst, das PDF
+/// bekommt sie als Kurve. Nur so kommt eine aus einem PDF importierte Rundung
+/// beim Export auch wieder als Rundung heraus statt als Vieleck mit
+/// zweihundert Ecken.
 fn draw_path(layer: &PdfLayerReference, el: &Element, page_h_mm: f32) {
-    let outline = crate::geometry::path_outline(el);
-    if outline.len() < 2 {
+    let points = path_points(el, page_h_mm);
+    if points.len() < 2 {
         return;
     }
     if el.path_closed {
-        draw_outline(layer, el, page_h_mm, outline);
+        let Some(mode) = apply_shape_paint(layer, el) else {
+            return;
+        };
+        layer.add_polygon(Polygon {
+            rings: vec![points],
+            mode,
+            winding_order: WindingOrder::NonZero,
+        });
         return;
     }
     if el.stroke_width <= 0.0 || el.stroke_color[3] == 0 {
@@ -440,10 +492,7 @@ fn draw_path(layer: &PdfLayerReference, el: &Element, page_h_mm: f32) {
     layer.set_outline_color(Color::Rgb(blend_over_white(el.stroke_color)));
     layer.set_outline_thickness(el.stroke_width);
     layer.add_line(Line {
-        points: outline
-            .into_iter()
-            .map(|p| (to_pdf(p, page_h_mm), false))
-            .collect(),
+        points,
         is_closed: false,
     });
 }

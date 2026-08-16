@@ -128,6 +128,103 @@ pub enum Interaction {
         id: u64,
         is_start: bool,
     },
+    /// Stützpunkt eines Pfads ziehen (samt seiner Griffe).
+    PathNode {
+        id: u64,
+        index: usize,
+    },
+    /// Kurvengriff eines Pfad-Knotens ziehen.
+    PathHandle {
+        id: u64,
+        index: usize,
+        /// `true` = Ausgangsgriff (in Zeichenrichtung), `false` = Eingangsgriff.
+        outgoing: bool,
+    },
+}
+
+/// Das aktive Werkzeug.
+///
+/// Alles außer [`Tool::Select`] fängt Klicks auf der Zeichenfläche ab, statt
+/// Objekte auszuwählen. Genau **ein** Feld hält diesen Zustand — vorher war
+/// der Linienmodus ein eigenes `Option`-Feld, und ein zweites Werkzeug daneben
+/// hätte zwei Modi gleichzeitig aktiv sein lassen können.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Tool {
+    /// Auswählen und Bearbeiten (Standard).
+    Select,
+    /// Linie aus zwei Klicks.
+    Line,
+    /// Pfad aus gesetzten Knoten; Ziehen beim Klick erzeugt Kurvengriffe.
+    Pen,
+    /// Freihand-Zug, der beim Loslassen ausgedünnt und geglättet wird.
+    Freehand,
+}
+
+impl Tool {
+    pub fn label(self) -> &'static str {
+        match self {
+            Tool::Select => "Auswahl",
+            Tool::Line => "Linie",
+            Tool::Pen => "Pfad",
+            Tool::Freehand => "Freihand",
+        }
+    }
+
+    /// Hinweistext für die Statuszeile beim Wechsel auf das Werkzeug.
+    pub fn hint(self) -> &'static str {
+        match self {
+            Tool::Select => "Auswahl-Werkzeug.",
+            Tool::Line => "Linie: Klicke den Startpunkt (Shift = 45°-Raster).",
+            Tool::Pen => {
+                "Pfad: Klicken setzt eine Ecke, Ziehen eine Kurve. \
+                 Klick auf den Startpunkt schließt, Enter beendet, Esc bricht ab."
+            }
+            Tool::Freehand => "Freihand: Ziehen zum Zeichnen. Esc beendet das Werkzeug.",
+        }
+    }
+}
+
+/// Ein Pfad, der gerade gezeichnet wird — noch kein Element im Dokument.
+///
+/// Bewusst getrennt von [`Interaction`]: Der Entwurf gehört zu keinem
+/// Element, hat keine ID und darf beim Abbrechen spurlos verschwinden.
+#[derive(Default)]
+pub struct PathDraft {
+    /// Die bereits gesetzten Knoten, in Seitenkoordinaten (pt).
+    pub nodes: Vec<crate::geometry::PathNode>,
+    /// Zieht der Nutzer gerade die Griffe des zuletzt gesetzten Knotens
+    /// heraus? (Maustaste seit dem Setzen noch nicht losgelassen.)
+    pub dragging: bool,
+    /// Rohspur des Freihand-Werkzeugs, ein Punkt je Frame.
+    pub trace: Vec<egui::Pos2>,
+}
+
+/// Eine Pfad-Aktion aus dem Eigenschaften-Panel.
+///
+/// Wird dort nur vermerkt, weil das Panel bereits eine Ausleihe auf das
+/// Element hält, die Aktion aber `&mut self` braucht.
+#[derive(Clone, Copy, PartialEq)]
+enum PathAction {
+    /// Knotenbearbeitung ein-/ausschalten.
+    ToggleEdit,
+    /// Alle Knoten glätten.
+    Smooth,
+    /// Alle Kurven in Strecken zurückverwandeln.
+    Sharpen,
+    /// Pfad schließen oder öffnen.
+    SetClosed(bool),
+    /// Den Knoten mit diesem Index entfernen.
+    RemoveNode(usize),
+    /// Den Knoten mit diesem Index zwischen Ecke und Kurve umschalten.
+    ToggleNode(usize),
+}
+
+/// Welcher Pfad gerade auf Knotenebene bearbeitet wird.
+#[derive(Clone, Copy)]
+pub struct PathEdit {
+    pub id: u64,
+    /// Zuletzt angefasster Knoten — Ziel von Entf und „Ecke/Kurve".
+    pub node: Option<usize>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -270,8 +367,15 @@ pub struct EditorApp {
     /// gezogenen Objekts gerade andockt. Wert = Seitenkoordinate in pt;
     /// `None` = keine aktive Linie auf der jeweiligen Achse.
     pub snap_lines: SnapLines,
-    /// Linien-Zeichenmodus: None oder Some(start_point) wenn erster Punkt gesetzt.
+    /// Das aktive Werkzeug.
+    pub tool: Tool,
+    /// Startpunkt der Linie, sobald der erste Klick gesetzt ist.
+    /// Nur beim Werkzeug [`Tool::Line`] belegt.
     pub line_drawing: Option<(f32, f32)>,
+    /// Der Pfad, der gerade gezeichnet wird (Werkzeug Pfad/Freihand).
+    pub path_draft: Option<PathDraft>,
+    /// Welcher Pfad gerade auf Knotenebene bearbeitet wird.
+    pub path_edit: Option<PathEdit>,
     /// Theme-Fade: Quell-Thema.
     pub theme_from: crate::model::Theme,
     /// Theme-Fade: Ziel-Thema (= settings.theme).
@@ -422,7 +526,10 @@ impl Default for EditorApp {
             clip_origins: Vec::new(),
             pasting: false,
             snap_lines: SnapLines::default(),
+            tool: Tool::Select,
             line_drawing: None,
+            path_draft: None,
+            path_edit: None,
             theme_from: theme,
             theme_target: theme,
             theme_anim: 1.0,
@@ -599,6 +706,74 @@ impl EditorApp {
         self.status = String::from("Ellipse hinzugefügt.");
     }
 
+    /// Fügt einen fertigen Pfad ein — den Weg ohne Zeichnen.
+    ///
+    /// Das Pen-Werkzeug verlangt, dass man den Pfad erst aufzieht. Wer nur
+    /// schnell eine bearbeitbare Kurve auf der Seite braucht, bekommt sie
+    /// hier: eine flache Welle aus drei Knoten, mittig platziert wie jede
+    /// andere eingefügte Form.
+    ///
+    /// Die Knotenbearbeitung wird gleich mit eingeschaltet. Ein frisch
+    /// eingefügter Pfad ohne sichtbare Knoten sähe aus wie ein Strich, den
+    /// man nur als Ganzes schieben kann — dabei ist genau das Gegenteil der
+    /// Punkt an einem Pfad.
+    pub fn add_path(&mut self, at: Option<(f32, f32)>) {
+        use crate::geometry::PathNode;
+
+        /// Größe des eingefügten Pfads in pt.
+        const W: f32 = 240.0;
+        const H: f32 = 80.0;
+
+        self.push_history();
+        let id = self.next_id();
+        let (cx, cy) = match at {
+            Some((x, y)) => (x, y),
+            None => {
+                let (w, h) = page_size_pt(self.doc.format, self.doc.orientation);
+                (w / 2.0, h / 2.0)
+            }
+        };
+
+        // Eine Welle: zwei Ecken als Enden, ein glatter Knoten in der Mitte.
+        // Die waagrechten Griffe machen den mittleren Knoten knickfrei.
+        let (l, r) = (cx - W / 2.0, cx + W / 2.0);
+        let (top, bot) = (cy - H / 2.0, cy + H / 2.0);
+        let nodes = vec![
+            PathNode::corner(egui::Pos2::new(l, bot)),
+            PathNode {
+                anchor: egui::Pos2::new(cx, top),
+                in_h: egui::Pos2::new(cx - W / 4.0, top),
+                out_h: egui::Pos2::new(cx + W / 4.0, top),
+            },
+            PathNode::corner(egui::Pos2::new(r, bot)),
+        ];
+
+        // Aussehen wie jede andere eingefügte Form. `path_from_nodes` liefert
+        // die dünne, dunkle Kontur des PDF-Imports — passend zum Nachbilden
+        // einer Vorlage, aber nicht zu einer Form, die der Nutzer eben selbst
+        // eingefügt hat.
+        let mut el = crate::geometry::path_from_nodes(id, &nodes, false);
+        el.stroke_width = crate::model::default_stroke_width();
+        el.stroke_color = crate::model::default_stroke_color();
+        // Offen heißt: nie gefüllt. Die Füllfarbe steht trotzdem schon auf dem
+        // üblichen Wert, damit „Geschlossen" im Panel sofort etwas zeigt.
+        el.fill_color = crate::model::default_fill_color();
+
+        if let Some(page) = self.doc.current_page_mut(self.page_index) {
+            page.elements.push(el);
+        }
+        self.select_only(id);
+        self.crop_mode = false;
+        self.tool = Tool::Select;
+        self.cancel_draw();
+        self.path_edit = Some(PathEdit { id, node: None });
+        self.modified = true;
+        self.status = String::from(
+            "Pfad eingefügt. Knoten ziehen zum Verformen, Doppelklick auf ein Segment fügt \
+             einen Knoten ein, Alt+Klick schaltet Ecke/Kurve um, N beendet.",
+        );
+    }
+
     /// Erstellt eine Linie zwischen zwei Punkten (start, end).
     pub fn add_line_between(&mut self, start: (f32, f32), end: (f32, f32)) {
         self.push_history();
@@ -620,8 +795,157 @@ impl EditorApp {
         self.select_only(id);
         self.modified = true;
         self.status = String::from("Linie gezeichnet.");
-        // Modus aktiv lassen für weitere Linien (AutoCAD-Verhalten).
-        self.line_drawing = Some((f32::NAN, f32::NAN));
+        // Werkzeug aktiv lassen für weitere Linien (AutoCAD-Verhalten); nur
+        // der gesetzte Startpunkt wird zurückgenommen.
+        self.line_drawing = None;
+    }
+
+    /// Wechselt das Werkzeug und räumt dabei auf, was zum alten gehörte.
+    ///
+    /// Ein halb gezeichneter Pfad oder eine angefangene Linie überleben den
+    /// Wechsel nicht — sonst läge beim Zurückschalten ein Entwurf herum, an
+    /// den sich niemand mehr erinnert.
+    pub fn set_tool(&mut self, tool: Tool) {
+        if self.tool == tool && tool != Tool::Select {
+            // Dasselbe Werkzeug erneut → zurück zur Auswahl (Umschalter).
+            self.set_tool(Tool::Select);
+            return;
+        }
+        self.cancel_draw();
+        self.tool = tool;
+        if tool != Tool::Select {
+            self.path_edit = None;
+        }
+        self.status = String::from(tool.hint());
+    }
+
+    /// Bricht jeden laufenden Zeichenvorgang ab, ohne das Werkzeug zu wechseln.
+    pub fn cancel_draw(&mut self) {
+        self.line_drawing = None;
+        self.path_draft = None;
+    }
+
+    /// Macht aus dem aktuellen Entwurf ein Pfad-Element.
+    ///
+    /// Weniger als zwei Knoten ergeben keinen Pfad — der Entwurf wird dann
+    /// verworfen statt ein unsichtbares Element zu hinterlassen.
+    pub fn finish_path(&mut self, closed: bool) {
+        let Some(draft) = self.path_draft.take() else {
+            return;
+        };
+        if draft.nodes.len() < 2 {
+            self.status = String::from("Pfad verworfen: zu wenige Punkte.");
+            return;
+        }
+        self.push_history();
+        let id = self.next_id();
+        let el = crate::geometry::path_from_nodes(id, &draft.nodes, closed);
+        if let Some(page) = self.doc.current_page_mut(self.page_index) {
+            page.elements.push(el);
+        }
+        self.select_only(id);
+        self.modified = true;
+        self.status = format!(
+            "Pfad mit {} Knoten erstellt ({}).",
+            draft.nodes.len(),
+            if closed { "geschlossen" } else { "offen" }
+        );
+    }
+
+    /// Die ID des ausgewählten Pfads, falls genau einer ausgewählt ist.
+    pub fn selected_path(&self) -> Option<u64> {
+        if self.selection.len() != 1 {
+            return None;
+        }
+        let id = self.selection[0];
+        self.doc
+            .current_page(self.page_index)?
+            .elements
+            .iter()
+            .find(|e| e.id == id && e.kind == ElementKind::Path)
+            .map(|e| e.id)
+    }
+
+    /// Führt eine im Eigenschaften-Panel angestoßene Pfad-Aktion aus.
+    ///
+    /// Alle Zweige nehmen zuerst einen Undo-Schnappschuss: „Glätten" verändert
+    /// jeden Knoten des Pfads auf einmal — das muss sich mit einem Strg+Z
+    /// zurückholen lassen.
+    fn apply_path_action(&mut self, page_idx: usize, el_idx: usize, action: PathAction) {
+        if action == PathAction::ToggleEdit {
+            self.toggle_path_edit();
+            return;
+        }
+        self.push_history();
+        let Some(el) = self
+            .doc
+            .pages
+            .get_mut(page_idx)
+            .and_then(|p| p.elements.get_mut(el_idx))
+        else {
+            return;
+        };
+        match action {
+            PathAction::Smooth => {
+                crate::geometry::smooth_path(el);
+                self.status = String::from("Pfad geglättet.");
+            }
+            PathAction::Sharpen => {
+                crate::geometry::sharpen_path(el);
+                self.status = String::from("Kurven in Strecken umgewandelt.");
+            }
+            PathAction::SetClosed(closed) => {
+                el.path_closed = closed;
+                // Die Box muss neu gelegt werden: Der Abschluss fügt ein
+                // Segment hinzu, das über die bisherige Hülle hinausbeulen
+                // kann — und beim Öffnen umgekehrt eines weg.
+                let nodes = crate::geometry::path_nodes(el);
+                crate::geometry::set_path_nodes(el, &nodes);
+                self.status = String::from(if closed {
+                    "Pfad geschlossen."
+                } else {
+                    "Pfad geöffnet."
+                });
+            }
+            PathAction::RemoveNode(i) => {
+                if crate::geometry::remove_node(el, i) {
+                    // Der gelöschte Index zeigt jetzt auf einen anderen Knoten
+                    // — die Auswahl aufheben, statt sie stillschweigend
+                    // weiterwandern zu lassen.
+                    self.path_edit = self.path_edit.map(|e| PathEdit { id: e.id, node: None });
+                    self.status = String::from("Knoten gelöscht.");
+                } else {
+                    self.status = String::from("Ein Pfad braucht mindestens diese Knoten.");
+                }
+            }
+            PathAction::ToggleNode(i) => {
+                crate::geometry::toggle_node_smooth(el, i);
+                self.status = String::from("Knoten umgeschaltet.");
+            }
+            PathAction::ToggleEdit => unreachable!("oben behandelt"),
+        }
+        self.touch();
+    }
+
+    /// Schaltet die Knotenbearbeitung des ausgewählten Pfads um.
+    pub fn toggle_path_edit(&mut self) {
+        if self.path_edit.is_some() {
+            self.path_edit = None;
+            self.status = String::from("Knotenbearbeitung beendet.");
+            return;
+        }
+        if let Some(id) = self.selected_path() {
+            self.tool = Tool::Select;
+            self.cancel_draw();
+            self.crop_mode = false;
+            self.path_edit = Some(PathEdit { id, node: None });
+            self.status = String::from(
+                "Knoten: ziehen zum Verschieben, Doppelklick auf ein Segment fügt ein, \
+                 Entf löscht, Alt+Klick schaltet Ecke/Kurve um.",
+            );
+        } else {
+            self.status = String::from("Kein Pfad ausgewählt.");
+        }
     }
 
     pub fn add_image_from_bytes(&mut self, bytes: Vec<u8>, at: Option<(f32, f32)>) {
@@ -1691,6 +2015,25 @@ impl EditorApp {
                             crate::io::import_pdf_dialog(self, ctx);
                             ui.close_menu();
                         }
+                        ui.separator();
+                        if ui.button("Seite als SVG exportieren…").clicked() {
+                            crate::io::export_svg_dialog(self, ctx, false);
+                            ui.close_menu();
+                        }
+                        // Ausgegraut statt versteckt: Wer den Eintrag sucht,
+                        // soll sehen, dass es ihn gibt — und woran es hakt.
+                        let has_sel = !self.selection.is_empty();
+                        let label = if has_sel {
+                            format!("Auswahl als SVG exportieren… ({})", self.selection.len())
+                        } else {
+                            String::from("Auswahl als SVG exportieren…")
+                        };
+                        let btn = ui.add_enabled(has_sel, egui::Button::new(label));
+                        if btn.on_disabled_hover_text("Erst Objekte auswählen").clicked() {
+                            crate::io::export_svg_dialog(self, ctx, true);
+                            ui.close_menu();
+                        }
+                        ui.separator();
                         if menu_entry(ui, "Drucken…", "Strg+P").clicked() {
                             crate::io::print_dialog(self, ctx);
                             ui.close_menu();
@@ -1824,6 +2167,30 @@ impl EditorApp {
                         self.add_line(None);
                         ui.close_menu();
                     }
+                    if ui
+                        .button("Pfad")
+                        .on_hover_text(
+                            "Fügt eine bearbeitbare Kurve ein und öffnet die Knotenbearbeitung.",
+                        )
+                        .clicked()
+                    {
+                        self.add_path(None);
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    ui.label("Zeichnen:");
+                    if menu_entry(ui, "Linie zeichnen", "L").clicked() {
+                        self.set_tool(Tool::Line);
+                        ui.close_menu();
+                    }
+                    if menu_entry(ui, "Pfad zeichnen", "P").clicked() {
+                        self.set_tool(Tool::Pen);
+                        ui.close_menu();
+                    }
+                    if menu_entry(ui, "Freihand", "F").clicked() {
+                        self.set_tool(Tool::Freehand);
+                        ui.close_menu();
+                    }
                     ui.separator();
                     if ui.button("Seite").clicked() {
                         self.add_page();
@@ -1954,6 +2321,17 @@ impl EditorApp {
                     });
                     ui.separator();
 
+                    // --- Werkzeuge ---
+                    ui.label("Werkzeug:");
+                    ui.horizontal_wrapped(|ui| {
+                        for t in [Tool::Select, Tool::Line, Tool::Pen, Tool::Freehand] {
+                            if ui.selectable_label(app.tool == t, t.label()).clicked() {
+                                app.set_tool(t);
+                            }
+                        }
+                    });
+                    ui.separator();
+
                     let Some(sel) = app.primary() else {
                         ui.label(
                             "Kein Objekt ausgewählt.\nKlicke oder ziehe ein Auswahl-Rechteck.",
@@ -1972,6 +2350,14 @@ impl EditorApp {
                         if ui.button("Alle löschen").clicked() {
                             app.delete_selected();
                         }
+                    }
+
+                    // Für beide Fälle — ein einzelnes Objekt zu exportieren
+                    // ist genauso sinnvoll wie eine Gruppe.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        ui.separator();
+                        app.export_section(ui, ctx);
                     }
                 });
 
@@ -2078,6 +2464,13 @@ impl EditorApp {
         }
 
         // --- Element-spezifische Eigenschaften ---
+        //
+        // Pfad-Aktionen brauchen `&mut self` (Undo-Schnappschuss, Statuszeile),
+        // `el` hält aber bereits eine Ausleihe darauf. Deshalb wird die Aktion
+        // hier nur vermerkt und unten ausgeführt.
+        let path_edit_id = self.path_edit.map(|e| e.id);
+        let path_edit_node = self.path_edit.and_then(|e| e.node);
+        let mut path_action: Option<PathAction> = None;
         let el = &mut self.doc.pages[page_idx].elements[el_idx];
         ui.separator();
 
@@ -2211,15 +2604,94 @@ impl EditorApp {
                     _ => "",
                 });
                 if el.kind == ElementKind::Path {
+                    let curved = el.path_is_curved();
                     ui.label(format!(
-                        "{} Stützpunkte, {}",
+                        "{} Knoten · {} · {}",
                         el.points.len(),
                         if el.path_closed {
                             "geschlossen"
                         } else {
                             "offen"
-                        }
+                        },
+                        if curved { "Kurven" } else { "Strecken" }
                     ));
+                    let editing = path_edit_id == Some(el.id);
+                    if ui
+                        .selectable_label(editing, "Knoten bearbeiten (N)")
+                        .on_hover_text("Oder Doppelklick auf den Pfad.")
+                        .clicked()
+                    {
+                        path_action = Some(PathAction::ToggleEdit);
+                    }
+                    if editing {
+                        // Alles, was die Knotenbearbeitung kann, auch ohne
+                        // Tastatur und ohne Alt-Klick erreichbar machen — sonst
+                        // ist „Punkt löschen" eine Funktion, die nur kennt, wer
+                        // die Doku gelesen hat.
+                        ui.group(|ui| {
+                            match path_edit_node {
+                                Some(i) => {
+                                    ui.label(format!("Knoten {} von {}", i + 1, el.points.len()));
+                                    ui.horizontal(|ui| {
+                                        let min = if el.path_closed { 3 } else { 2 };
+                                        let removable = el.points.len() > min;
+                                        if ui
+                                            .add_enabled(
+                                                removable,
+                                                egui::Button::new("Knoten löschen"),
+                                            )
+                                            .on_hover_text(if removable {
+                                                "Entfernt den ausgewählten Knoten (Taste: Entf)."
+                                            } else {
+                                                "Ein Pfad braucht mindestens diese Knoten."
+                                            })
+                                            .clicked()
+                                        {
+                                            path_action = Some(PathAction::RemoveNode(i));
+                                        }
+                                        if ui
+                                            .button("Ecke / Kurve")
+                                            .on_hover_text(
+                                                "Schaltet den Knoten um (Alt+Klick auf den Knoten).",
+                                            )
+                                            .clicked()
+                                        {
+                                            path_action = Some(PathAction::ToggleNode(i));
+                                        }
+                                    });
+                                }
+                                None => {
+                                    ui.label("Klicke einen Knoten an, um ihn zu löschen oder umzuschalten.");
+                                }
+                            }
+                            ui.label(
+                                egui::RichText::new(
+                                    "Ziehen verschiebt · Doppelklick auf ein Segment fügt einen \
+                                     Knoten ein · Alt+Griff macht eine Spitze",
+                                )
+                                .weak()
+                                .small(),
+                            );
+                        });
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("Glätten").on_hover_text(
+                            "Legt durch alle Knoten eine weiche Kurve.").clicked()
+                        {
+                            path_action = Some(PathAction::Smooth);
+                        }
+                        if ui
+                            .add_enabled(curved, egui::Button::new("Ecken"))
+                            .on_hover_text("Macht aus allen Kurven wieder Strecken.")
+                            .clicked()
+                        {
+                            path_action = Some(PathAction::Sharpen);
+                        }
+                    });
+                    let mut closed = el.path_closed;
+                    if ui.checkbox(&mut closed, "Geschlossen").changed() {
+                        path_action = Some(PathAction::SetClosed(closed));
+                    }
                 }
                 ui.horizontal(|ui| {
                     ui.label("Drehung:");
@@ -2292,6 +2764,11 @@ impl EditorApp {
                     el.rotation += 90.0;
                 }
             }
+        }
+
+        // Die oben vermerkte Pfad-Aktion ausführen, jetzt ohne Ausleihe.
+        if let Some(action) = path_action {
+            self.apply_path_action(page_idx, el_idx, action);
         }
 
         // --- Z-Order (Anordnung) ---
@@ -2520,6 +2997,35 @@ impl EditorApp {
             // Keine Nutzereingabe → Puffer an Live-Position anpassen.
             self.pos_x = anchor_x;
             self.pos_y = anchor_y;
+        }
+    }
+
+    /// Export-Knopf für die aktuelle Auswahl.
+    ///
+    /// Doppelt zum Datei-Menü, und das mit Absicht: Eine Auswahl zu
+    /// exportieren ist eine Aktion **auf der Auswahl**. Sie gehört dorthin, wo
+    /// man die Auswahl gerade in der Hand hat, nicht zwei Menüebenen entfernt
+    /// zwischen Öffnen und Drucken.
+    ///
+    /// Wird nur aufgerufen, wenn etwas ausgewählt ist — deshalb kein
+    /// ausgegrauter Zustand.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn export_section(&mut self, ui: &mut egui::Ui, ctx: &Context) {
+        let n = self.selection.len();
+        let label = if n == 1 {
+            String::from("Auswahl als SVG…")
+        } else {
+            format!("Auswahl als SVG… ({n})")
+        };
+        if ui
+            .button(label)
+            .on_hover_text(
+                "Exportiert nur die ausgewählten Objekte als Vektorgrafik — \
+                 auf ihre Hüllbox beschnitten, mit durchsichtigem Hintergrund.",
+            )
+            .clicked()
+        {
+            crate::io::export_svg_dialog(self, ctx, true);
         }
     }
 

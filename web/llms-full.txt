@@ -84,7 +84,7 @@ Jedes Element hat zwingend einen `"kind"` und eine `"id"` (`u64`). Je nach
 ```json
 {
   "id": <u64>,
-  "kind": "Text" | "Image" | "Rectangle" | "Line",
+  "kind": "Text" | "Image" | "Rectangle" | "Line" | "Ellipse" | "Path",
 
   "x": <f32 pt>,
   "y": <f32 pt>,
@@ -110,7 +110,11 @@ Jedes Element hat zwingend einen `"kind"` und eine `"id"` (`u64`). Je nach
   "fill_color": [r, g, b, a],
   "stroke_width": <pt>,
   "stroke_color": [r, g, b, a],
-  "corner_radius": <pt>
+  "corner_radius": <pt>,
+
+  "points":  [[nx, ny], ...],           // Path; auf die Box normalisiert 0..1
+  "handles": [[ix, iy, ox, oy], ...],   // Path; Kurvengriffe, leer = Strecken
+  "path_closed": <bool>                 // Path; offen = nie gefüllt
 }
 ```
 
@@ -119,7 +123,7 @@ Jedes Element hat zwingend einen `"kind"` und eine `"id"` (`u64`). Je nach
 | Feld         | Typ          | Bereich / Werte                                  |
 |--------------|--------------|--------------------------------------------------|
 | `id`         | u64          | eindeutig, stabil                                |
-| `kind`       | string       | Text, Image, Rectangle, Line                     |
+| `kind`       | string       | Text, Image, Rectangle, Line, Ellipse, Path      |
 | `x`, `y`     | f32 (pt)     | Position der linken oberen Ecke (unrotiert)      |
 | `w`, `h`     | f32 (pt)     | Breite / Höhe (Line: h = 0)                     |
 | `rotation`   | f32 (Grad)   | gegen Uhrzeigersinn                              |
@@ -149,11 +153,58 @@ gezeichnet). Das letzte Element verdeckt frühere bei Überlappung.
 | `Text`      | text, font_size, font, color, bold, italic, underline, align, valign |
 | `Rectangle` | fill_color, stroke_width, stroke_color, corner_radius          |
 | `Line`      | stroke_width, stroke_color (Linie = horizontale Box mit h=0 + rotation) |
+| `Ellipse`   | fill_color, stroke_width, stroke_color (Kreis = w == h; `corner_radius` wird ignoriert) |
+| `Path`      | points, handles, path_closed, fill_color, stroke_width, stroke_color |
 | `Image`     | id (verweist auf `images[].id`), crop, image_w, image_h        |
 
 **Linien zeichnen:** Eine Linie ist ein Element mit `kind: "Line"`, `h: 0`,
 `fill_color` transparent, `stroke_color` = Linienfarbe, `stroke_width` = Dicke.
 Position über `x,y` + `w` + `rotation` (Winkel gegen Uhrzeigersinn).
+
+---
+
+## Pfade und Kurven (`kind: "Path"`)
+
+Ein Zug aus Stützpunkten, wahlweise mit kubischen Bézier-Kurven dazwischen,
+offen (Linienzug) oder geschlossen (Fläche).
+
+```json
+{
+  "id": 7, "kind": "Path",
+  "x": 100.0, "y": 200.0, "w": 200.0, "h": 80.0, "rotation": 0.0,
+  "points":  [[0.0, 1.0], [0.5, 0.0], [1.0, 1.0]],
+  "handles": [[0.0, 1.0, 0.2, 0.4],
+              [0.3, 0.0, 0.7, 0.0],
+              [0.8, 0.4, 1.0, 1.0]],
+  "path_closed": false,
+  "stroke_width": 2.0, "stroke_color": [40, 40, 40, 255],
+  "fill_color": [0, 0, 0, 0]
+}
+```
+
+**Normalisiert auf die Box.** `points[i] = [nx, ny]` mit `0,0` = linke obere,
+`1,1` = rechte untere Ecke. Auf der Seite liegt der Punkt bei `x + nx*w` bzw.
+`y + ny*h` (danach um die Boxmitte um `rotation` gedreht). Verschieben,
+Skalieren und Drehen laufen damit über `x`/`y`/`w`/`h`/`rotation` wie bei jeder
+anderen Form — zum Verschieben änderst du `x`/`y`, **nicht** die Punkte.
+
+**`handles[i] = [in_x, in_y, out_x, out_y]`** sind die beiden Kontrollpunkte des
+Knotens `i`, im selben normalisierten Raum wie `points` — also Positionen, keine
+Abstände. `in` gilt für das Segment vor dem Knoten, `out` für das danach.
+
+- **Eckknoten:** beide Griffe auf dem Stützpunkt, `[nx, ny, nx, ny]`. Beide
+  Nachbarsegmente werden dann Geraden.
+- **Glatter Übergang:** `in`, Stützpunkt und `out` liegen auf einer Geraden,
+  üblich als `in = p - t` und `out = p + t`.
+- Zwischen zwei Knoten liegt eine **Gerade**, wenn `out` des einen und `in` des
+  anderen jeweils auf ihrem Stützpunkt liegen — sonst eine kubische Kurve mit
+  genau diesen beiden Kontrollpunkten.
+- Bei `"path_closed": true` gibt es zusätzlich das Segment vom letzten zurück
+  zum ersten Knoten. Ein offener Pfad wird **nie** gefüllt.
+
+**Regel:** `handles` ist entweder leer/weggelassen (reiner Streckenzug — der
+Normalfall für Vielecke) oder **genau so lang wie `points`**. Andere Längen
+repariert BoxDoc beim Laden, indem es die fehlenden Knoten zu Ecken macht.
 
 ---
 

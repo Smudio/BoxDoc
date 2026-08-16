@@ -400,7 +400,20 @@ fn abgerundetes_rechteck_wird_keine_ellipse() {
     );
     let path = only(&els, ElementKind::Path);
     assert!(path.path_closed);
-    assert!(path.points.len() > 8, "Rundungen müssen erhalten bleiben");
+    // Die Rundungen bleiben als **Kurven** erhalten, nicht als Punktwolke:
+    // Vier Bögen und vier Geraden ergeben acht Knoten, und mindestens einer
+    // von ihnen trägt Griffe.
+    assert!(
+        path.path_is_curved(),
+        "Rundungen müssen als Kurven erhalten bleiben: {} Knoten, {} Griffe",
+        path.points.len(),
+        path.handles.len()
+    );
+    assert!(
+        path.points.len() >= 8 && path.points.len() <= 12,
+        "erwartet acht Knoten, waren {}",
+        path.points.len()
+    );
     assert!(
         (path.x - 60.0).abs() < 0.1
             && (path.y - (PAGE_H - 270.0)).abs() < 0.1

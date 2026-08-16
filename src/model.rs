@@ -555,10 +555,29 @@ pub struct Element {
     /// bleiben unangetastet. Absolute Punkte müssten bei jedem Ziehen
     /// mitgeführt werden, und jeder vergessene Pfad wäre ein stiller Fehler.
     ///
-    /// Nur für `ElementKind::Path` belegt; Kurven werden beim Import in
-    /// Strecken aufgelöst.
+    /// Nur für `ElementKind::Path` belegt.
     #[serde(default)]
     pub points: Vec<[f32; 2]>,
+    /// Kubische Bézier-Griffe je Stützpunkt: `[in_x, in_y, out_x, out_y]`.
+    ///
+    /// Die Werte sind **absolute Positionen im selben normalisierten Box-Raum
+    /// wie `points`** — nicht Abstände zum Stützpunkt. Damit gilt für Griffe
+    /// exakt dieselbe Abbildung auf die Box wie für die Stützpunkte selbst;
+    /// Verschieben, Skalieren und Drehen brauchen keinen Sonderfall.
+    ///
+    /// Zwei Invarianten:
+    /// * `handles` ist **leer** (= reiner Streckenzug) oder **genau so lang
+    ///   wie `points`**. Ein halb gefüllter Vektor ist ein kaputter Pfad;
+    ///   [`Element::path_handles_valid`] prüft das beim Laden.
+    /// * Ein **Eckknoten** hat beide Griffe auf dem Stützpunkt liegen
+    ///   (`in == out == point`). Genau so entsteht aus einem Kurvenzug wieder
+    ///   eine Gerade.
+    ///
+    /// Das Feld fehlt in der Datei, solange es leer ist — ein Rechteck oder
+    /// ein importierter Streckenzug bleibt in der `.boxdoc`-Datei damit exakt
+    /// so kurz wie bisher.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handles: Vec<[f32; 4]>,
     /// Ist der Streckenzug geschlossen (Fläche) oder offen (Linienzug)?
     /// Ein offener Pfad wird nie gefüllt.
     #[serde(default)]
@@ -568,13 +587,16 @@ pub struct Element {
 fn default_true() -> bool {
     true
 }
-fn default_fill_color() -> [u8; 4] {
+// Die Standardwerte für Formen sind öffentlich, damit eingefügte Elemente
+// überall gleich aussehen — sonst driften Rechteck, Ellipse und Pfad über
+// kopierte Zahlenliterale langsam auseinander.
+pub fn default_fill_color() -> [u8; 4] {
     [80, 140, 220, 60]
 }
-fn default_stroke_width() -> f32 {
+pub fn default_stroke_width() -> f32 {
     2.0
 }
-fn default_stroke_color() -> [u8; 4] {
+pub fn default_stroke_color() -> [u8; 4] {
     [40, 100, 180, 255]
 }
 
@@ -611,6 +633,7 @@ impl Element {
             stroke_color: default_stroke_color(),
             corner_radius: 0.0,
             points: Vec::new(),
+            handles: Vec::new(),
             path_closed: false,
         }
     }
@@ -648,6 +671,7 @@ impl Element {
             stroke_color: default_stroke_color(),
             corner_radius: 0.0,
             points: Vec::new(),
+            handles: Vec::new(),
             path_closed: false,
         }
     }
@@ -680,6 +704,7 @@ impl Element {
             stroke_color: default_stroke_color(),
             corner_radius: 0.0,
             points: Vec::new(),
+            handles: Vec::new(),
             path_closed: false,
         }
     }
@@ -712,6 +737,7 @@ impl Element {
             stroke_color: [40, 40, 40, 255],
             corner_radius: 0.0,
             points: Vec::new(),
+            handles: Vec::new(),
             path_closed: false,
         }
     }
@@ -744,6 +770,7 @@ impl Element {
             stroke_color: default_stroke_color(),
             corner_radius: 0.0,
             points: Vec::new(),
+            handles: Vec::new(),
             path_closed: false,
         }
     }
@@ -793,11 +820,77 @@ impl Element {
             .collect();
         el
     }
+
+    /// Hat der Pfad überhaupt Kurven, oder ist er ein reiner Streckenzug?
+    ///
+    /// Gefragt wird nach der **Wirkung**, nicht nach dem Vorhandensein des
+    /// Feldes: Ein Pfad, dessen Griffe alle auf ihren Stützpunkten liegen, ist
+    /// eine Kette von Geraden und darf überall den billigeren Weg nehmen.
+    pub fn path_is_curved(&self) -> bool {
+        if self.handles.len() != self.points.len() {
+            return false;
+        }
+        self.points
+            .iter()
+            .zip(self.handles.iter())
+            .any(|(p, h)| {
+                (h[0] - p[0]).abs() > 1e-6
+                    || (h[1] - p[1]).abs() > 1e-6
+                    || (h[2] - p[0]).abs() > 1e-6
+                    || (h[3] - p[1]).abs() > 1e-6
+            })
+    }
+
+    /// Stimmen Stützpunkte und Griffe überein?
+    ///
+    /// Die Griffe kommen aus der `.boxdoc`-Datei und damit potenziell von
+    /// Hand oder von einer KI. Ein Vektor mit der falschen Länge würde sonst
+    /// still zu einem Pfad führen, dessen zweite Hälfte gerade ist.
+    pub fn path_handles_valid(&self) -> bool {
+        self.handles.is_empty() || self.handles.len() == self.points.len()
+    }
+
+    /// Bringt kaputte Griff-Daten in einen brauchbaren Zustand: Zu kurze
+    /// Vektoren werden mit Eckknoten aufgefüllt, zu lange abgeschnitten.
+    ///
+    /// Wird beim Laden aufgerufen, damit eine fehlerhaft bearbeitete Datei
+    /// nicht die Bearbeitung blockiert, sondern nur den fehlenden Teil als
+    /// Gerade zeigt.
+    pub fn repair_path_handles(&mut self) {
+        if self.path_handles_valid() {
+            return;
+        }
+        self.handles.truncate(self.points.len());
+        while self.handles.len() < self.points.len() {
+            let p = self.points[self.handles.len()];
+            self.handles.push([p[0], p[1], p[0], p[1]]);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Page {
+    #[serde(deserialize_with = "deserialize_elements")]
     pub elements: Vec<Element>,
+}
+
+/// Liest die Elemente einer Seite und bringt sie in einen benutzbaren Zustand.
+///
+/// Der Haken sitzt bewusst **hier** und nicht in den einzelnen Ladefunktionen:
+/// Ein Dokument kommt aus einer Datei, aus dem JSON-Editor, vom Web-Sync und
+/// aus dem Konflikt-Merge — jeder dieser Wege ginge irgendwann vergessen.
+/// An der Deserialisierung kommt keiner von ihnen vorbei.
+fn deserialize_elements<'de, D>(d: D) -> Result<Vec<Element>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mut elements = Vec::<Element>::deserialize(d)?;
+    for el in &mut elements {
+        // Von Hand oder von einer KI geschriebene Pfade dürfen die
+        // Bearbeitung nicht blockieren, wenn die Griffe nicht passen.
+        el.repair_path_handles();
+    }
+    Ok(elements)
 }
 
 impl Default for Page {

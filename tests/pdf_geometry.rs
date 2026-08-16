@@ -208,6 +208,7 @@ fn open_path(pts: &[(f32, f32)]) -> SubPath {
     SubPath {
         lines: pts.len().saturating_sub(1),
         outline: pts.clone(),
+        nodes: pts.iter().map(|p| geometry::PathNode::corner(*p)).collect(),
         pts,
         closed: false,
         curves: 0,
@@ -329,11 +330,13 @@ fn geschlossenes_dreieck_bleibt_ein_dreieck() {
     let sub = closed_path(&[(0.0, 0.0), (100.0, 0.0), (50.0, 80.0)]);
     let shapes = classify_subpath(&sub);
     assert_eq!(shapes.len(), 1);
-    let PathShape::Free { ref pts, closed } = shapes[0] else {
+    let PathShape::Free { ref nodes, closed } = shapes[0] else {
         panic!("kein freier Pfad: {:?}", shapes[0]);
     };
     assert!(closed);
-    assert_eq!(pts.len(), 3);
+    assert_eq!(nodes.len(), 3);
+    // Ohne Kurvensegmente bleibt jeder Knoten eine Ecke.
+    assert!(nodes.iter().all(|n| n.is_corner()));
 }
 
 #[test]
@@ -407,6 +410,86 @@ fn linien_ueberstehen_den_pdf_rundlauf() {
             "Linie {i} (rot={}): {a:?}→{b:?} statt {ea:?}→{eb:?}",
             winkel[i]
         );
+    }
+}
+
+#[test]
+fn kurven_ueberstehen_den_pdf_rundlauf_als_kurven() {
+    // Der Kern der PDF-Integration: Ein Pfad mit Kurven muss als Pfad **mit
+    // Kurven** zurückkommen — nicht als Vieleck aus aufgelösten Strecken.
+    //
+    // Geprüft wird beides, weil beides schiefgehen kann: die Kodierung der
+    // Kontrollpunkte beim Schreiben (printpdf markiert Kurven über ein Flag
+    // je Punkt, nicht über eigene Segmente) und ihre Rückgewinnung beim Lesen.
+    let nodes = vec![
+        geometry::PathNode::corner(Pos2::new(100.0, 400.0)),
+        geometry::PathNode {
+            anchor: Pos2::new(250.0, 300.0),
+            in_h: Pos2::new(180.0, 300.0),
+            out_h: Pos2::new(320.0, 300.0),
+        },
+        geometry::PathNode {
+            anchor: Pos2::new(400.0, 450.0),
+            in_h: Pos2::new(360.0, 420.0),
+            out_h: Pos2::new(440.0, 480.0),
+        },
+        geometry::PathNode::corner(Pos2::new(480.0, 400.0)),
+    ];
+    let mut el = geometry::path_from_nodes(1, &nodes, false);
+    el.stroke_width = 2.0;
+    el.stroke_color = [20, 20, 20, 255];
+    el.fill_color = [0, 0, 0, 0];
+    let erwartet = geometry::path_outline(&el);
+
+    let doc = Document {
+        pages: vec![Page {
+            elements: vec![el],
+        }],
+        ..Document::default()
+    };
+    let dir = std::env::temp_dir().join("boxdoc_tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("kurven_rundlauf.pdf");
+    let layouts = std::collections::HashMap::new();
+    boxdoc::printing::export_pdf(&path, &doc, &ImageStore::default(), &layouts).unwrap();
+
+    let Ok((back, _, _)) = boxdoc::pdf_import::import_pdf(&path) else {
+        eprintln!("pdfium nicht verfügbar, Test übersprungen");
+        return;
+    };
+
+    let pfade: Vec<_> = back.pages[0]
+        .elements
+        .iter()
+        .filter(|e| e.kind == ElementKind::Path)
+        .collect();
+    assert_eq!(pfade.len(), 1, "Pfade zurückgelesen: {}", pfade.len());
+    let zurueck = pfade[0];
+
+    // Als Kurve zurückgekommen — nicht als aufgelöster Streckenzug.
+    assert!(
+        zurueck.path_is_curved(),
+        "Pfad kam ohne Kurvengriffe zurück"
+    );
+    // Und mit derselben Handvoll Knoten, nicht mit hundert.
+    assert!(
+        zurueck.points.len() <= 6,
+        "{} Knoten statt vier — die Kurve wurde aufgelöst",
+        zurueck.points.len()
+    );
+
+    // Die Form selbst: Jeder Punkt des zurückgelesenen Umrisses muss auf dem
+    // ursprünglichen liegen.
+    for p in geometry::path_outline(zurueck) {
+        let d = erwartet
+            .windows(2)
+            .map(|w| {
+                let ab = w[1] - w[0];
+                let t = ((p - w[0]).dot(ab) / ab.dot(ab).max(1e-9)).clamp(0.0, 1.0);
+                (p - (w[0] + ab * t)).length()
+            })
+            .fold(f32::MAX, f32::min);
+        assert!(d < 1.0, "Punkt {p:?} weicht um {d} pt von der Kurve ab");
     }
 }
 

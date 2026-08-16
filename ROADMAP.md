@@ -3,27 +3,32 @@
 BoxDoc ist ein nativer, KI-freundlicher Dokumenten-Editor (Rust + egui).
 Diese Datei ist die einzige verbindliche Quelle für Status und Planung.
 
-> Letztes Update: 14. August 2026 · Aktuelle Version: **v0.6.0** (Cargo.toml)
+> Letztes Update: 16. August 2026 · Aktuelle Version: **v0.7.0** (Cargo.toml)
 
 ---
 
-## Status Quo (IST, v0.4.2-dev)
+## Status Quo (IST, v0.7.0)
 
 | Bereich | Stand | Wo |
 |---|---|---|
-| Elemente | `Text`, `Image`, `Rectangle`, `Line` | `src/model.rs` |
-| Editor | Multi-Select, Copy/Paste-Ghost, Crop, Rotation, Resize | `src/canvas.rs` |
+| Elemente | `Text`, `Image`, `Rectangle`, `Line`, `Ellipse`, `Path` (mit Bézier-Kurven) | `src/model.rs` |
+| Editor | Multi-Select, Copy/Paste-Ghost, Crop, Rotation, Resize, Snapping | `src/canvas.rs` |
+| Zeichnen | Auswahl · Linie · Pfad (Pen) · Freihand, dazu Knotenbearbeitung | `src/canvas.rs`, `src/geometry.rs` |
 | Undo/Redo | Snapshot-basiert, max. 200 Einträge | `src/history.rs` |
-| AI-Sync | Native `notify`-File-Watcher, Reload als Undo-Schritt | `src/file_watch.rs`, `src/app.rs:642` |
-| ODT | Import + Export (nativ) mit ZIP-Limit | `src/odt.rs` |
-| PDF | Export (nativ), **nur Text + Bilder, keine Shapes** | `src/printing.rs:104` |
-| Sicherheit | Shell-Args separiert, Pfad-Checks, ZIP-Limit (Phase 0 erledigt) | `SECURITY.md` |
-| WASM | Gerüst: `main.rs:46-77`, `index.html`, `Trunk.toml`, 18 `cfg`-Attribute; File-I/O via Browser-API | `src/io.rs:361` (`web_impl`) |
+| AI-Sync | Native `notify`-File-Watcher, Reload als Undo-Schritt | `src/file_watch.rs` |
+| Multiuser | Drei-Wege-Merge, optimistische Nebenläufigkeit über `version` | `src/merge.rs`, `src/web_sync.rs` |
+| ODT | Import + Export (nativ) mit ZIP-Limit, **ohne Shapes** | `src/odt.rs` |
+| PDF | Import (pdfium) + Export (printpdf), alle Shapes, echte Kurven | `src/pdf_import.rs`, `src/printing.rs` |
+| SVG | Export: ganze Seite **oder Auswahl**, echte Primitive und Transparenz | `src/svg.rs` |
+| Sicherheit | Shell-Args separiert, Pfad-Checks, ZIP-Limit, Backend-Token | `SECURITY.md` |
+| WASM | Lauffähig inkl. File-I/O über Browser-API und Server-Sync | `src/io.rs` (`web_impl`) |
 | Papier | A3, A4, A5, Letter, Legal · Portrait/Landscape · Mehrere Seiten | `src/model.rs` |
+| Tests | 227 bestanden, `cargo test` | `src/`, `tests/` |
 
-**Offen (bekannt):** kein responsives Mobile, keine CI, ODT-Export ohne Shapes/Textformatierung,
-Text-Rotation wird nicht gerendert, keine Toolbar, WYSIWYG-Textbearbeitung fehlt.
-Bestandsaufnahme: [`REVIEW.md`](REVIEW.md).
+**Offen (bekannt):** kein responsives Mobile, keine CI, ODT-Export ohne
+Shapes/Textformatierung, Text-Rotation wird nicht gerendert, keine eigene
+Toolbar (Werkzeugwahl liegt im Eigenschaften-Panel), WYSIWYG-Textbearbeitung
+fehlt. Bestandsaufnahme: [`REVIEW.md`](REVIEW.md).
 
 ---
 
@@ -187,17 +192,24 @@ Später, nicht zeitkritisch:
 
 ## Versionstabelle
 
-| Version | Fokus | Status |
-|---|---|---|
-| v0.4.1 | Vor-Phase-0-Stand | ⚠️ 3 Security-Fixes fehlen |
-| v0.4.2 | Sicherheits-Stabilisierung | ✅ Phase 0 erledigt |
-| v0.5.0 | Ellipse-Shape | ⬜ Phase 1 |
-| v0.6.0 | PDF-Roundtrip | ⬜ Phase 2 |
-| v0.7.0 | Mobile WASM | ⬜ Phase 3 |
-| v0.8.0 | PHP-Server | ⬜ Phase 4 |
-| v0.9.0 | Native Mobile | ⬜ Phase 5 |
-| v1.0.0 | SSE-Multiuser (optional) | ⬜ Phase 6 |
-| v1.0+ | Weitere Shapes, Polish | ⬜ Phase 7 |
+| Version | Fokus | Phase | Status |
+|---|---|---|---|
+| v0.4.1 | Vor-Phase-0-Stand | — | ⚠️ 3 Security-Fixes fehlten |
+| v0.4.2 | Sicherheits-Stabilisierung | 0 | ✅ erledigt |
+| v0.4.x | Ellipse-Shape | 1 | ✅ erledigt |
+| v0.5.0 | Web-Sync (PHP-Backend), JSON-Editor, Datei-Browser | 4 | ✅ erledigt |
+| v0.5.x | PDF-Roundtrip (Import + vollständiger Export) | 2 | ✅ erledigt |
+| v0.6.0 | Zuverlässigkeit & Multiuser-Merge | 8 | ✅ erledigt |
+| v0.7.0 | Pfade, Kurven & PDF-Kurven-Rundlauf | 10 | ✅ erledigt |
+| — | Mobile & Responsive WASM | 3 | ⬜ offen |
+| — | Bedienung (Toolbar, WYSIWYG-Text, ODT-Shapes) | 9 | ⬜ offen |
+| — | Native Mobile Apps | 5 | ⬜ offen |
+| — | SSE-Multiuser-Echtzeit (optional) | 6 | ⬜ offen |
+| v1.0+ | Weitere Shapes, Polish, CI | 7 | ⬜ offen |
+
+> Die Versionsspalte folgt der `Cargo.toml`-Historie, nicht der ursprünglich
+> geplanten Nummerierung — die Phasen wurden in anderer Reihenfolge umgesetzt
+> als 2026 angenommen.
 
 ---
 
@@ -275,9 +287,142 @@ gleichzeitiges Bearbeiten korrekt lösen.
 
 ---
 
+## Phase 10 — Pfade, Kurven & PDF-Rundlauf · v0.7.0 ✅ erledigt
+
+**Ziel:** Freie Pfade zeichnen und bearbeiten; Kurven überstehen den Weg durch
+ein PDF unbeschadet.
+
+### Datenmodell
+- [x] `Element::handles` — kubische Bézier-Griffe je Stützpunkt, auf die Box
+      normalisiert wie `points`. Leer = reiner Streckenzug, dann fehlt das
+      Feld in der Datei ganz (`skip_serializing_if`)
+- [x] Reparatur falsch langer Griff-Vektoren an **einer** Stelle: der
+      Deserialisierung von `Page::elements` — kein Ladepfad kann sie umgehen
+- [x] `merge.rs`: `points` und `handles` als **ein** Feld mergen, sonst
+      landeten die Griffe der einen Seite an den Stützpunkten der anderen
+
+### Geometrie (`geometry.rs`)
+- [x] `PathNode` + `path_nodes` / `set_path_nodes` als einziger Schreibweg,
+      hält die Invariante „Box umschließt den Pfad" (über die gezeichnete
+      Kurve, nicht über Stützpunkte oder Griffe), Drehung bleibt erhalten
+- [x] `path_segments` (echte Kurven fürs PDF) vs. `path_outline` (aufgelöst
+      für den Bildschirm)
+- [x] Bearbeitung: `insert_node` (De Casteljau, formtreu), `remove_node`,
+      `move_node`, `move_handle` (gespiegelt oder frei), `toggle_node_smooth`,
+      `smooth_path`, `sharpen_path`
+- [x] Freihand: `simplify_polyline` (Ramer-Douglas-Peucker) +
+      `nodes_from_polyline` (Catmull-Rom-Tangenten)
+
+### Werkzeuge & Bearbeitung
+- [x] `Tool { Select, Line, Pen, Freehand }` — **ein** Feld für den
+      Werkzeugzustand; der frühere Linienmodus als eigenes `Option`-Feld ließ
+      zwei Modi gleichzeitig zu
+- [x] Pen (P): Klick = Ecke, Klick+Ziehen = Kurvengriffe, Klick auf den
+      Startknoten schließt, Enter/Doppelklick beendet, Rücktaste nimmt zurück
+- [x] Freihand (F): Spur wird beim Loslassen ausgedünnt und geglättet,
+      schließt sich selbst, wenn sie am Startpunkt endet
+- [x] „Einfügen → Pfad": fertige Kurve mittig auf der Seite, wie Rechteck und
+      Ellipse — mit sofort geöffneter Knotenbearbeitung, weil ein Pfad ohne
+      sichtbare Knoten wie ein bloßer Strich wirkt
+- [x] Knotenbearbeitung: Knoten und Griffe ziehen, Doppelklick auf ein
+      Segment fügt ein, Entf löscht, Alt+Klick schaltet Ecke/Kurve um
+- [x] Drei Wege hinein, weil eine Funktion, die man nicht findet, keine ist:
+      **Doppelklick auf den Pfad**, Taste `N`, Panel-Schalter. Der Doppelklick
+      legte vorher ein Textfeld über den Pfad — die Suche im Doppelklick-Zweig
+      kannte nur Text-Elemente, alles andere galt als leere Fläche
+- [x] Löschen und Ecke/Kurve auch als Panel-Schalter, samt Anzeige des
+      ausgewählten Knotens — vorher nur über Entf und Alt+Klick erreichbar
+- [x] Statuszeile weist beim Auswählen eines Pfads auf die Bearbeitung hin
+- [x] Ecken als Quadrat, weiche Knoten als Kreis
+- [x] Eigenschaften-Panel: Knotenzahl, Glätten/Ecken, Geschlossen
+- [x] Werkzeugleiste im Panel; Werkzeugtasten nur ohne Strg (vorher hätte
+      Strg+P neben dem Drucken auch das Werkzeug gewechselt)
+
+### PDF
+- [x] Import: Bézier-Segmente werden zu Knoten mit Griffen, statt in bis zu
+      24 Strecken zerlegt und auf 256 Punkte gedünnt zu werden
+- [x] Export: echte Kurven-Operatoren über printpdfs Kontrollpunkt-Flags
+- [x] Ende-zu-Ende-Test: Kurve → PDF → Import → immer noch eine Kurve mit
+      vier Knoten an derselben Stelle
+
+### Nebenbei behoben
+- [x] Hit-Test für Pfade prüfte die Hüllbox statt der Kontur — ein offenes
+      Häkchen fing Klicks über seine gesamte Box ab
+
+### Tests
+- [x] `cargo test` meldet 165 bestandene Tests (vorher 126); neu sind 22
+      eigene: Kurven-Rundlauf durch PDF und JSON, Box-Invariante, formtreues
+      Einfügen, Reparatur kaputter Griffe, Spiegeln von Griffen, Ausdünnen
+- [x] Das Pfad-Beispiel aus `AGENTS.md` wird als Test ausgeführt — die
+      KI-Schnittstelle kann nicht mehr unbemerkt von der Implementierung
+      abdriften
+
+**Nicht enthalten:** ODT-Export von Pfaden (ODT kennt bis heute überhaupt
+keine Shapes, siehe Phase 9), zusammengesetzte Pfade mit Löchern,
+gestrichelte Linien.
+
+---
+
+## Phase 11 — SVG-Export & Zeiger-Rückmeldung · v0.7.0 ✅ erledigt
+
+**Ziel:** Was auf der Seite steht, soll sich als Vektor herausholen lassen —
+besonders eine **Auswahl**. Und der Zeiger soll vorher sagen, was ein Klick tut.
+
+### SVG (`src/svg.rs`)
+- [x] `Scope::Page` (Seitenformat, weißer Grund) und `Scope::Selection`
+      (Hüllbox der gewählten Objekte + 8 pt Rand, **durchsichtig** — eine
+      Auswahl soll sich woanders einfügen lassen, ohne weißen Kasten)
+- [x] Jedes Objekt bleibt sein Primitiv: `<rect>`, `<ellipse>`, `<line>`,
+      `<path>` mit kubischen Bézier-Segmenten, `<text>` mit `<tspan>` je Zeile.
+      Nichts wird zu einem Vieleck aufgelöst
+- [x] Echte Transparenz über `fill-opacity` — der PDF-Export muss über Weiß
+      mischen, weil printpdf 0.7 kein `ExtGState` freigibt
+- [x] Bilder als data-URI eingebettet; Crop über `<clipPath>` + Versatz statt
+      über neu berechnete Pixel, damit der Ausschnitt verschiebbar bleibt
+- [x] `geometry::element_bounds` / `elements_bounds` — Leinwand aus der
+      Kontur, nicht aus `x/y/w/h`: Gedrehtes ragt hinaus, eine Linie hat
+      `h == 0`
+- [x] Modul ohne UI- und Plattform-Abhängigkeit (erzeugt nur eine
+      Zeichenkette), deshalb vollständig testbar
+- [x] Menü: „Seite als SVG exportieren…" und „Auswahl als SVG exportieren…"
+      (ausgegraut mit Grund statt versteckt)
+- [x] Knopf „Auswahl als SVG…" **im Eigenschaften-Panel**, für Einzel- und
+      Mehrfachauswahl. Eine Auswahl zu exportieren ist eine Aktion auf der
+      Auswahl — sie gehört dorthin, wo man sie gerade in der Hand hat, nicht
+      zwei Menüebenen entfernt zwischen Öffnen und Drucken
+
+### Zeiger-Rückmeldung (`canvas.rs`)
+- [x] Hand über Auswählbarem, Verschieben-Kreuz über Ausgewähltem,
+      Größenpfeile über den Griffen (per Winkel, also drehungsrichtig),
+      Greifhand über Drehgriff/Endpunkt/Knoten, Fadenkreuz beim Zeichnen
+- [x] `topmost_at` als **eine** Trefferauflösung für Klick und Cursor — getrennt
+      gerechnet wären sie irgendwann auseinandergelaufen, und ein Cursor, der
+      etwas anderes verspricht als der Klick tut, ist schlimmer als keiner
+
+### Nebenbei behoben
+- [x] Pfad-Trefferprüfung lief **nach** einer randlosen Hüllbox-Prüfung. Die
+      Box eines flachen Pfads ist `PATH_MIN_EXTENT` (0,5 pt) hoch — die
+      Toleranz kam damit nie an, ein waagerechter Zug war auf ein Viertelpixel
+      genau zu treffen. Daher „passiert nichts" und „ständig Textfelder"
+- [x] Klick-Radius 8 px, Doppelklick 16 px, Doppelklick auf einen bereits
+      ausgewählten Pfad 40 px
+
+### Tests
+- [x] `cargo test` meldet 227 bestandene Tests (vorher 165); neu sind u. a.
+      25 zum SVG-Export, darunter eine **XML-Prüfung mit echtem Parser**
+      (`quick-xml`, nur `dev-dependency`) samt Gegenprobe, dass sie bei
+      kaputtem SVG auch wirklich anschlägt
+
+**Nicht enthalten:** SVG-**Import**, mehrseitige SVG-Ausgabe, Einbetten der
+Schriften in die SVG-Datei (sie werden nur benannt, mit generischer
+Rückfallebene).
+
+---
+
 ## Phase 9 — Bedienung (offen)
 
-- [ ] Toolbar mit den sechs Kernwerkzeugen
+- [ ] Toolbar mit den sechs Kernwerkzeugen (Werkzeugwahl liegt derzeit im
+      Eigenschaften-Panel, siehe Phase 10)
 - [ ] WYSIWYG-Textbearbeitung (Font/Größe/Farbe/Ausrichtung im Overlay)
 - [ ] Text-Rotation rendern + Rotationsgriff für alle Element-Typen
 - [ ] ODT-Export: Rechteck/Linie und Textformatierung

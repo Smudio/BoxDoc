@@ -23,7 +23,33 @@ enum Active {
     SelectionBox(Pos2),
     /// Linien-Endpunkt ziehen (id, is_start).
     LineEndpoint(u64, bool),
+    /// Pfad-Stützpunkt ziehen (id, Knotenindex).
+    PathNode(u64, usize),
+    /// Pfad-Kurvengriff ziehen (id, Knotenindex, Ausgangsgriff?).
+    PathHandle(u64, usize, bool),
 }
+
+/// Farbe der Pfad-Werkzeuge und der Knotenbearbeitung.
+const PATH_ACCENT: Color32 = Color32::from_rgb(230, 120, 40);
+/// Anfassradius für Knoten und Griffe, in Bildschirmpixeln.
+const NODE_GRAB: f32 = 9.0;
+
+/// Trefferradius eines Pfads beim **Klick**, in Bildschirmpixeln.
+///
+/// Gleich großzügig wie bei der Linie: Eine 0,5-pt-Kontur ist sonst ein
+/// Ziel von zwei Pixeln Breite.
+const PATH_CLICK_TOL: f32 = 8.0;
+/// Trefferradius beim **Doppelklick**, in Bildschirmpixeln.
+///
+/// Deutlich größer als beim Klick. Ein Doppelklick verlangt zwei Treffer
+/// derselben Stelle in kurzer Folge — wer dabei die Kontur um ein paar Pixel
+/// verfehlt, will trotzdem den Pfad und nicht ein Textfeld darüber.
+const PATH_DBLCLICK_TOL: f32 = 16.0;
+/// Trefferradius beim Doppelklick auf einen **bereits ausgewählten** Pfad.
+///
+/// Wer den Pfad angeklickt hat und dann doppelklickt, meint diesen Pfad. Die
+/// Absicht ist eindeutig, also darf der Radius grob sein.
+const PATH_DBLCLICK_TOL_SELECTED: f32 = 40.0;
 
 pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) {
     let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
@@ -162,17 +188,36 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
     let selection: Vec<u64> = app.selection.clone();
     let crop_mode = app.crop_mode;
     let page_idx = app.page_index;
+    // In der Knotenbearbeitung tritt der Auswahlrahmen zurück: Er läge sonst
+    // über den Knoten, die gerade angefasst werden sollen.
+    let node_edit = app.path_edit.filter(|e| selection.contains(&e.id));
     if let Some(page) = app.doc.pages.get_mut(page_idx) {
         for el in page.elements.iter_mut() {
             draw_element(el, &mut app.images, ctx, &painter, &to_screen, zoom);
-            if selection.contains(&el.id) {
+            let editing_nodes = node_edit.map(|e| e.id) == Some(el.id);
+            if selection.contains(&el.id) && !editing_nodes {
                 if selection.len() == 1 {
                     draw_selection(el, &painter, &to_screen, zoom, crop_mode);
                 } else {
                     draw_multi_selection_box(el, &painter, &to_screen, zoom);
                 }
             }
+            if editing_nodes {
+                draw_path_nodes(
+                    &painter,
+                    el,
+                    node_edit.and_then(|e| e.node),
+                    pointer.map(|p| to_page(p).to_pos2()),
+                    zoom,
+                    &to_screen,
+                );
+            }
         }
+    }
+    // Ein Pfad, der nicht mehr ausgewählt ist, wird auch nicht mehr auf
+    // Knotenebene bearbeitet.
+    if app.path_edit.is_some() && node_edit.is_none() {
+        app.path_edit = None;
     }
 
     // --- Textbearbeitung (Overlay) ---
@@ -376,7 +421,9 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
             | Interaction::ResizeEdge { .. }
             | Interaction::Rotate { .. }
             | Interaction::Crop { .. }
-            | Interaction::LineEndpoint { .. } => {
+            | Interaction::LineEndpoint { .. }
+            | Interaction::PathNode { .. }
+            | Interaction::PathHandle { .. } => {
                 app.interaction = Interaction::None;
                 app.snap_lines = crate::app::SnapLines::default();
             }
@@ -410,6 +457,12 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
         } => Some(Active::Crop(*id, *edge, *start_crop)),
         Interaction::SelectionBox { start } => Some(Active::SelectionBox(*start)),
         Interaction::LineEndpoint { id, is_start } => Some(Active::LineEndpoint(*id, *is_start)),
+        Interaction::PathNode { id, index } => Some(Active::PathNode(*id, *index)),
+        Interaction::PathHandle {
+            id,
+            index,
+            outgoing,
+        } => Some(Active::PathHandle(*id, *index, *outgoing)),
         _ => None,
     };
     if let (Some(a), Some(pointer)) = (active, pointer) {
@@ -623,6 +676,38 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                     app.touch();
                 }
             }
+            Active::PathNode(id, index) => {
+                let mut target = to_page(pointer).to_pos2();
+                if ui.input(|i| i.modifiers.shift) {
+                    // Shift: waagrecht/senkrecht/diagonal zum Vorgängerknoten.
+                    // Beim ersten Knoten eines geschlossenen Pfads ist das der
+                    // letzte — sonst wirkte Shift ausgerechnet dort nicht.
+                    if let Some(prev) = element(app, page_idx, id).and_then(|el| {
+                        let nodes = crate::geometry::path_nodes(el);
+                        let prev_idx = match index.checked_sub(1) {
+                            Some(i) => Some(i),
+                            None if el.path_closed => nodes.len().checked_sub(1),
+                            None => None,
+                        };
+                        prev_idx.and_then(|i| nodes.get(i).map(|n| n.anchor))
+                    }) {
+                        target = snap_angle_45(prev, target);
+                    }
+                }
+                if let Some(el) = element_mut(app, page_idx, id) {
+                    crate::geometry::move_node(el, index, target);
+                    app.touch();
+                }
+            }
+            Active::PathHandle(id, index, outgoing) => {
+                // Alt bricht die Symmetrie auf — für Spitzen und Knicke.
+                let mirror = !ui.input(|i| i.modifiers.alt);
+                let target = to_page(pointer).to_pos2();
+                if let Some(el) = element_mut(app, page_idx, id) {
+                    crate::geometry::move_handle(el, index, outgoing, target, mirror);
+                    app.touch();
+                }
+            }
         }
     }
 
@@ -645,12 +730,12 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
         }
     }
 
-    // --- Linien-Zeichenmodus ---
-    let drawing_line = app.line_drawing.is_some();
-    if drawing_line {
+    // --- Linien-Werkzeug ---
+    let drawing = app.tool != crate::app::Tool::Select;
+    if app.tool == crate::app::Tool::Line {
         let shift = ui.input(|i| i.modifiers.shift);
         // Vorschau rendern wenn Startpunkt gesetzt.
-        let has_start = app.line_drawing.map(|(x, _)| !x.is_nan()).unwrap_or(false);
+        let has_start = app.line_drawing.is_some();
         if has_start {
             if let (Some(start), Some(pt)) = (app.line_drawing, pointer) {
                 let start_pos = Pos2::new(start.0, start.1);
@@ -686,30 +771,53 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
         if primary_pressed && pointer_in_canvas && !click_on_ui {
             if let Some(pt) = pointer {
                 let p = to_page(pt);
-                let current = app.line_drawing.unwrap();
-                if current.0.is_nan() {
-                    // Erster Klick → Startpunkt setzen.
-                    app.line_drawing = Some((p.x, p.y));
-                    app.status = String::from("Linie: Klicke den Endpunkt (Shift = 45°-Raster).");
-                } else {
-                    // Zweiter Klick → Linie erstellen (mit Snap wenn Shift).
-                    let start_pos = Pos2::new(current.0, current.1);
-                    let end_pos = if shift {
-                        snap_angle_45(start_pos, p.to_pos2())
-                    } else {
-                        p.to_pos2()
-                    };
-                    app.add_line_between((start_pos.x, start_pos.y), (end_pos.x, end_pos.y));
-                    app.status =
-                        String::from("Linie: Klicke den nächsten Startpunkt (Esc zum Beenden).");
+                match app.line_drawing {
+                    None => {
+                        // Erster Klick → Startpunkt setzen.
+                        app.line_drawing = Some((p.x, p.y));
+                        app.status =
+                            String::from("Linie: Klicke den Endpunkt (Shift = 45°-Raster).");
+                    }
+                    Some(current) => {
+                        // Zweiter Klick → Linie erstellen (mit Snap wenn Shift).
+                        let start_pos = Pos2::new(current.0, current.1);
+                        let end_pos = if shift {
+                            snap_angle_45(start_pos, p.to_pos2())
+                        } else {
+                            p.to_pos2()
+                        };
+                        app.add_line_between((start_pos.x, start_pos.y), (end_pos.x, end_pos.y));
+                        app.status = String::from(
+                            "Linie: Klicke den nächsten Startpunkt (Esc zum Beenden).",
+                        );
+                    }
                 }
             }
         }
     }
 
-    // --- Neue Interaktion starten (nur wenn nicht am Pasten/Linien-Zeichnen) ---
+    // --- Pfad- und Freihand-Werkzeug ---
+    if matches!(
+        app.tool,
+        crate::app::Tool::Pen | crate::app::Tool::Freehand
+    ) {
+        path_tool(
+            app,
+            ui,
+            &painter,
+            pointer,
+            &to_screen,
+            &to_page,
+            primary_pressed,
+            primary_released,
+            double_clicked,
+            pointer_in_canvas && !click_on_ui,
+        );
+    }
+
+    // --- Neue Interaktion starten (nur wenn nicht am Pasten/Zeichnen) ---
     if !app.pasting
-        && !drawing_line
+        && !drawing
         && matches!(app.interaction, Interaction::None)
         && primary_pressed
         && !editing_active
@@ -732,8 +840,67 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
         }
     }
 
+    // --- Hover-Cursor: zeigen, was ein Klick hier täte ---
+    //
+    // Ohne Rückmeldung ist jedes Objekt ein Ratespiel — eine dünne Kontur
+    // sowieso, aber auch ein ungefüllter Rahmen oder ein Text mit viel Luft
+    // in der Box. Der Cursor sagt vorher, ob man trifft, und was passiert.
+    if !app.pasting && pointer_in_canvas && !click_on_ui {
+        if let Some(pt) = pointer {
+            if app.tool == crate::app::Tool::Select {
+                if let Some(icon) = hover_cursor(app, page_idx, pt, &to_screen, zoom, ctx) {
+                    ctx.set_cursor_icon(icon);
+                }
+            } else {
+                // Zeichenwerkzeug aktiv: Das Fadenkreuz sagt, dass hier gesetzt
+                // und nicht ausgewählt wird.
+                ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+            }
+        }
+    }
+
+    // --- Doppelklick in der Knotenbearbeitung → Knoten einfügen ---
+    //
+    // Muss vor der Textbearbeitung stehen: Sonst legte ein Doppelklick neben
+    // die Linie ein Textfeld an, statt den Pfad zu ergänzen.
+    let mut node_inserted = false;
+    if !app.pasting && !drawing && double_clicked && pointer_in_canvas && !click_on_ui {
+        if let (Some(edit), Some(pt)) = (app.path_edit, pointer) {
+            let p = to_page(pt).to_pos2();
+            // Toleranz in Seitenkoordinaten: am Bildschirm konstant, egal
+            // wie weit hinein- oder herausgezoomt ist. Großzügig sein kostet
+            // nichts — eingefügt wird ohnehin auf der Kontur, nicht dort, wo
+            // der Zeiger stand.
+            let tol = PATH_DBLCLICK_TOL / zoom;
+            let hit = element(app, page_idx, edit.id)
+                .and_then(|el| crate::geometry::path_nearest(el, p))
+                .filter(|h| h.dist <= tol);
+            if let Some(hit) = hit {
+                app.push_history();
+                let inserted = element_mut(app, page_idx, edit.id)
+                    .and_then(|el| crate::geometry::insert_node(el, &hit));
+                if let Some(index) = inserted {
+                    app.path_edit = Some(crate::app::PathEdit {
+                        id: edit.id,
+                        node: Some(index),
+                    });
+                    app.status = String::from("Knoten eingefügt.");
+                    app.touch();
+                    node_inserted = true;
+                }
+            }
+        }
+    }
+
     // --- Doppelklick → Text bearbeiten (nur wenn nicht am Pasten) ---
-    if !app.pasting && double_clicked && !editing_active && pointer_in_canvas && !click_on_ui {
+    if !app.pasting
+        && !drawing
+        && !node_inserted
+        && double_clicked
+        && !editing_active
+        && pointer_in_canvas
+        && !click_on_ui
+    {
         if let Some(pointer) = pointer {
             // Wenn ein bestehendes Text-Objekt getroffen wird → bearbeiten.
             // Nur Klicks auf den tatsächlichen Text-Glyphen zählen (starker
@@ -752,6 +919,42 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                     _ => {}
                 }
             }
+            // Doppelklick auf einen Pfad → Knoten bearbeiten.
+            //
+            // Das ist die Geste, die man an einer Kurve zuerst probiert. Sie
+            // muss großzügig treffen: Danebengehen kostet hier nicht nichts,
+            // sondern legt ein Textfeld über den Pfad — genau das, was man am
+            // wenigsten wollte. Deshalb ein spürbar größerer Radius als beim
+            // einfachen Klick, und für den bereits ausgewählten Pfad ein noch
+            // größerer: Wer ihn angeklickt hat und dann doppelklickt, meint
+            // ihn.
+            let hit_path = if hit_text.is_none() {
+                let selected = app.selected_path();
+                let near_selected = selected.filter(|&id| {
+                    element(app, page_idx, id).is_some_and(|el| {
+                        path_hit_within(
+                            el,
+                            pointer,
+                            &to_screen,
+                            zoom,
+                            PATH_DBLCLICK_TOL_SELECTED,
+                        )
+                    })
+                });
+                near_selected.or_else(|| {
+                    app.doc.pages[page_idx]
+                        .elements
+                        .iter()
+                        .rev()
+                        .find(|el| {
+                            path_hit_within(el, pointer, &to_screen, zoom, PATH_DBLCLICK_TOL)
+                        })
+                        .map(|el| el.id)
+                })
+            } else {
+                None
+            };
+
             if let Some(id) = hit_text {
                 let text = app.doc.pages[page_idx]
                     .elements
@@ -762,6 +965,23 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                 app.editing = Some((id, text));
                 app.edit_focus = true;
                 app.select_only(id);
+            } else if let Some(id) = hit_path {
+                // Wird dieser Pfad schon bearbeitet, war der Doppelklick nur
+                // knapp neben einem Segment. Dann nichts anfassen — sonst
+                // verlöre man die Knotenauswahl für eine Geste, die gar keine
+                // Wirkung haben sollte.
+                let already = app.path_edit.is_some_and(|e| e.id == id);
+                if !already {
+                    app.select_only(id);
+                    app.crop_mode = false;
+                    app.interaction = Interaction::None;
+                    app.path_edit = Some(crate::app::PathEdit { id, node: None });
+                    app.status = String::from(
+                        "Knoten bearbeiten: ziehen zum Verschieben · Doppelklick auf ein Segment \
+                         fügt einen Knoten ein · Knoten anklicken und Entf löscht ihn · \
+                         Alt+Klick schaltet Ecke/Kurve um · N oder Esc beendet.",
+                    );
+                }
             } else {
                 // Leere Fläche → neues Textfeld, linke-obere Ecke an der Cursor-Position.
                 let p = to_page(pointer);
@@ -875,15 +1095,59 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
     // z. B. Entf im JSON-Editor das ausgewählte Objekt löschen.
     ctx.input(|i| {
         if i.key_pressed(egui::Key::Delete) && !typing && !app.pasting {
-            app.delete_selected();
+            // In der Knotenbearbeitung löscht Entf den Knoten, nicht den
+            // ganzen Pfad — sonst wäre ein Vertipper der Verlust der Arbeit.
+            let node_deleted = match app.path_edit {
+                Some(crate::app::PathEdit {
+                    id,
+                    node: Some(index),
+                }) => {
+                    // Erst prüfen, dann den Schnappschuss nehmen: Ein
+                    // Undo-Schritt, der nichts rückgängig macht, ist nur ein
+                    // Strg+Z, das scheinbar nicht wirkt.
+                    let removable = element(app, page_idx, id)
+                        .map(|el| {
+                            let min = if el.path_closed { 3 } else { 2 };
+                            el.points.len() > min && index < el.points.len()
+                        })
+                        .unwrap_or(false);
+                    if removable {
+                        app.push_history();
+                        if let Some(el) = element_mut(app, page_idx, id) {
+                            crate::geometry::remove_node(el, index);
+                        }
+                        app.path_edit = Some(crate::app::PathEdit { id, node: None });
+                        app.status = String::from("Knoten gelöscht.");
+                        app.touch();
+                    } else {
+                        app.status =
+                            String::from("Der letzte Knoten eines Pfads lässt sich nicht löschen.");
+                    }
+                    true
+                }
+                _ => false,
+            };
+            if !node_deleted {
+                app.delete_selected();
+            }
         }
         if i.key_pressed(egui::Key::Escape) {
+            // Von innen nach außen abbrechen: erst der laufende Vorgang,
+            // dann das Werkzeug, dann die Auswahl.
             if app.pasting {
                 app.pasting = false;
                 app.status = String::from("Einfügen abgebrochen.");
+            } else if app.path_draft.is_some() {
+                app.path_draft = None;
+                app.status = String::from("Pfad abgebrochen.");
             } else if app.line_drawing.is_some() {
                 app.line_drawing = None;
                 app.status = String::from("Linie abgebrochen.");
+            } else if app.tool != crate::app::Tool::Select {
+                app.set_tool(crate::app::Tool::Select);
+            } else if app.path_edit.is_some() {
+                app.path_edit = None;
+                app.status = String::from("Knotenbearbeitung beendet.");
             } else {
                 app.crop_mode = false;
                 app.editing = None;
@@ -891,14 +1155,41 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                 app.interaction = Interaction::None;
             }
         }
-        // L = Linien-Zeichenmodus starten/abbrechen.
-        if i.key_pressed(egui::Key::L) && !typing && !app.pasting {
-            if app.line_drawing.is_some() {
-                app.line_drawing = None;
-                app.status = String::from("Linien-Modus beendet.");
-            } else {
-                app.line_drawing = Some((f32::NAN, f32::NAN)); // Marker: Modus aktiv, wartet auf ersten Klick.
-                app.status = String::from("Linie: Klicke den Startpunkt.");
+        // Enter beendet einen offenen Pfad, ohne ihn zu schließen.
+        if i.key_pressed(egui::Key::Enter) && !typing && app.path_draft.is_some() {
+            app.finish_path(false);
+        }
+        // Rücktaste nimmt den zuletzt gesetzten Knoten zurück.
+        if i.key_pressed(egui::Key::Backspace) && !typing {
+            if let Some(draft) = app.path_draft.as_mut() {
+                draft.nodes.pop();
+                if draft.nodes.is_empty() {
+                    app.path_draft = None;
+                    app.status = String::from("Pfad abgebrochen.");
+                }
+            }
+        }
+
+        // Werkzeugwahl — nur ohne Strg/Cmd. Sonst würde Strg+P neben dem
+        // Drucken auch das Pfad-Werkzeug aktivieren, Strg+N neben dem neuen
+        // Dokument die Knotenbearbeitung, Strg+V neben dem Einfügen das
+        // Auswahl-Werkzeug.
+        if !typing && !app.pasting && !i.modifiers.command && !i.modifiers.alt {
+            if i.key_pressed(egui::Key::L) {
+                app.set_tool(crate::app::Tool::Line);
+            }
+            if i.key_pressed(egui::Key::P) {
+                app.set_tool(crate::app::Tool::Pen);
+            }
+            if i.key_pressed(egui::Key::F) {
+                app.set_tool(crate::app::Tool::Freehand);
+            }
+            if i.key_pressed(egui::Key::V) {
+                app.set_tool(crate::app::Tool::Select);
+            }
+            // N schaltet die Knotenbearbeitung des ausgewählten Pfads um.
+            if i.key_pressed(egui::Key::N) {
+                app.toggle_path_edit();
             }
         }
 
@@ -959,6 +1250,25 @@ fn element_mut<'a>(app: &'a mut EditorApp, page_idx: usize, id: u64) -> Option<&
         .get_mut(page_idx)?
         .elements
         .iter_mut()
+        .find(|e| e.id == id)
+}
+
+/// Kehrt `to_screen` um: Bildschirm- zurück in Seitenkoordinaten.
+///
+/// `element_hit_strength` bekommt nur die Hinrichtung übergeben. Die Abbildung
+/// ist eine Verschiebung mit gleichmäßiger Skalierung — ihr Bild des Ursprungs
+/// genügt daher, um sie exakt zu invertieren.
+fn screen_to_page(to_screen: &impl Fn(Pos2) -> Pos2, zoom: f32, p: Pos2) -> Pos2 {
+    let origin = to_screen(Pos2::ZERO);
+    Pos2::new((p.x - origin.x) / zoom, (p.y - origin.y) / zoom)
+}
+
+fn element<'a>(app: &'a EditorApp, page_idx: usize, id: u64) -> Option<&'a Element> {
+    app.doc
+        .pages
+        .get(page_idx)?
+        .elements
+        .iter()
         .find(|e| e.id == id)
 }
 
@@ -1296,6 +1606,52 @@ fn crop_edge_handles(el: &Element, center: Pos2, zoom: f32) -> [Pos2; 4] {
 /// Bei überlappenden Objekten gewinnt das oberste Element mit der höchsten
 /// Stärke — so lässt sich z. B. Text durch Klick auf die Glyphen auswählen,
 /// selbst wenn ein ungefüllter Rahmen darüber liegt.
+/// Liegt der Zeiger höchstens `tol_screen` Pixel von der Pfadkontur entfernt?
+///
+/// Bei einem geschlossenen Pfad mit Füllung zählt auch das Innere.
+///
+/// `tol_screen` ist ein Bildschirmmaß und kommt **zusätzlich** zur halben
+/// Strichstärke — die Toleranz bleibt beim Zoomen also gefühlt gleich, eine
+/// dicke Kontur ist aber trotzdem großzügiger als eine dünne.
+fn path_hit_within(
+    el: &Element,
+    pointer_screen: Pos2,
+    to_screen: &impl Fn(Pos2) -> Pos2,
+    zoom: f32,
+    tol_screen: f32,
+) -> bool {
+    if el.kind != ElementKind::Path {
+        return false;
+    }
+    let outline = crate::geometry::path_outline(el);
+    if outline.len() < 2 {
+        return false;
+    }
+    let page = screen_to_page(to_screen, zoom, pointer_screen);
+    if el.path_closed && el.fill_color[3] > 0 && crate::geometry::point_in_polygon(&outline, page) {
+        return true;
+    }
+    let tol = (el.stroke_width * zoom / 2.0).max(0.0) + tol_screen;
+    crate::geometry::path_nearest(el, page).is_some_and(|h| h.dist * zoom <= tol)
+}
+
+/// Liegt der Zeiger in der um `tol_screen` aufgeweiteten Hüllbox des Pfads?
+///
+/// Grobfilter für den schwachen Treffer: nah genug, dass der Pfad überhaupt
+/// gemeint sein könnte, aber nicht auf der Kontur.
+fn path_near_box(
+    el: &Element,
+    pointer_screen: Pos2,
+    to_screen: &impl Fn(Pos2) -> Pos2,
+    zoom: f32,
+    tol_screen: f32,
+) -> bool {
+    let center = to_screen(Pos2::new(el.x + el.w / 2.0, el.y + el.h / 2.0));
+    let local = world_to_local(center, el.rotation, pointer_screen);
+    let margin = (el.stroke_width * zoom / 2.0).max(0.0) + tol_screen;
+    local.x.abs() <= el.w * zoom / 2.0 + margin && local.y.abs() <= el.h * zoom / 2.0 + margin
+}
+
 fn element_hit_strength(
     el: &Element,
     pointer_screen: Pos2,
@@ -1316,6 +1672,27 @@ fn element_hit_strength(
         let tol = 8.0_f32.max(stroke_half + 3.0);
         return if pointer_screen.distance(closest) < tol {
             Some(1)
+        } else {
+            None
+        };
+    }
+
+    // Pfad: gegen die Kontur prüfen, nicht gegen die Box.
+    //
+    // Muss **vor** der Hüllbox-Prüfung weiter unten stehen. Die verwirft
+    // randlos alles außerhalb von w×h — und die Box eines flachen Pfads ist
+    // nur Bruchteile eines Punktes hoch (`PATH_MIN_EXTENT`). Die Toleranz
+    // hier kam damit früher nie an: Ein waagerechter Zug war auf ein
+    // Viertelpixel genau zu treffen.
+    if el.kind == ElementKind::Path {
+        let hit = path_hit_within(el, pointer_screen, to_screen, zoom, PATH_CLICK_TOL);
+        // Nahe an der Form, aber daneben: schwacher Treffer, damit ein
+        // darunter liegendes Objekt gewinnen kann.
+        if hit {
+            return Some(1);
+        }
+        return if path_near_box(el, pointer_screen, to_screen, zoom, PATH_CLICK_TOL) {
+            Some(0)
         } else {
             None
         };
@@ -1446,6 +1823,150 @@ fn edge_mid_positions(el: &Element, to_screen: &impl Fn(Pos2) -> Pos2, zoom: f32
     out
 }
 
+/// Passendes Resize-Symbol für einen Griff, der vom Mittelpunkt aus in
+/// Richtung `dir` (Bildschirmkoordinaten, y nach unten) liegt.
+///
+/// Über den Winkel statt über die Griff-Nummer, damit gedrehte Objekte
+/// stimmen: Die untere Kante eines um 90° gedrehten Bildes zieht waagerecht.
+fn resize_icon(dir: Vec2) -> egui::CursorIcon {
+    let a = dir.y.atan2(dir.x).to_degrees().rem_euclid(180.0);
+    if !(22.5..157.5).contains(&a) {
+        egui::CursorIcon::ResizeHorizontal
+    } else if a < 67.5 {
+        egui::CursorIcon::ResizeNwSe
+    } else if a < 112.5 {
+        egui::CursorIcon::ResizeVertical
+    } else {
+        egui::CursorIcon::ResizeNeSw
+    }
+}
+
+/// Welches Cursor-Symbol gehört an diese Stelle?
+///
+/// Spiegelt die Reihenfolge von [`start_interaction`]: erst Knoten, dann
+/// Griffe, zuletzt der Körper. Was der Cursor zeigt, ist damit genau das, was
+/// ein Klick hier auslöst.
+///
+/// `None` heißt „nichts Besonderes" — der Standardzeiger bleibt stehen.
+fn hover_cursor(
+    app: &EditorApp,
+    page_idx: usize,
+    pointer: Pos2,
+    to_screen: &impl Fn(Pos2) -> Pos2,
+    zoom: f32,
+    ctx: &egui::Context,
+) -> Option<egui::CursorIcon> {
+    let sel = app.primary();
+
+    // 0) Knoten und Kurvengriffe der Knotenbearbeitung.
+    if let Some(edit) = app.path_edit {
+        if let Some(el) = element(app, page_idx, edit.id) {
+            if path_node_at(el, pointer, to_screen).is_some() {
+                return Some(egui::CursorIcon::Grab);
+            }
+        }
+    }
+
+    if let Some(id) = sel {
+        if let Some(el) = element(app, page_idx, id) {
+            let center = to_screen(Pos2::new(el.x + el.w / 2.0, el.y + el.h / 2.0));
+
+            // 1) Crop-Kanten
+            if app.crop_mode && el.kind == ElementKind::Image {
+                for hp in crop_edge_handles(el, center, zoom).iter() {
+                    if hp.distance(pointer) < 9.0 {
+                        return Some(resize_icon(*hp - center));
+                    }
+                }
+            }
+
+            // 2) Linien-Endpunkte
+            if el.kind == ElementKind::Line {
+                let lc = to_screen(Pos2::new(el.x + el.w / 2.0, el.y));
+                for s in [-1.0_f32, 1.0] {
+                    let end = local_to_world(lc, el.rotation, Vec2::new(s * el.w * zoom / 2.0, 0.0));
+                    if end.distance(pointer) < 9.0 {
+                        return Some(egui::CursorIcon::Grab);
+                    }
+                }
+            }
+
+            // 3) Drehgriff
+            if el.kind == ElementKind::Image && !app.crop_mode {
+                let grip = local_to_world(
+                    center,
+                    el.rotation,
+                    Vec2::new(0.0, -el.h * zoom / 2.0 - 24.0),
+                );
+                if grip.distance(pointer) < 9.0 {
+                    return Some(egui::CursorIcon::Grab);
+                }
+            }
+
+            // 4+5) Kanten- und Eckgriffe
+            let boxed = el.kind != ElementKind::Line
+                && !(app.crop_mode && el.kind == ElementKind::Image);
+            if boxed {
+                for gp in edge_mid_positions(el, to_screen, zoom)
+                    .iter()
+                    .chain(corner_positions(el, to_screen, zoom).iter())
+                {
+                    if gp.distance(pointer) < 9.0 {
+                        return Some(resize_icon(*gp - center));
+                    }
+                }
+            }
+        }
+    }
+
+    // 6) Körper. Ausgewählt heißt: Ziehen verschiebt. Noch nicht ausgewählt
+    //    heißt: Klicken wählt aus.
+    let id = topmost_at(app, page_idx, pointer, to_screen, zoom, ctx)?;
+    Some(if app.is_selected(id) {
+        egui::CursorIcon::Move
+    } else {
+        egui::CursorIcon::PointingHand
+    })
+}
+
+/// Oberstes Objekt unter dem Zeiger — dasjenige, das ein Klick auswählen würde.
+///
+/// Stärke: 1 = sichtbarer Inhalt (Glyphen, Füllung, Rahmen, Bild, Linie),
+///         0 = nur Bounding-Box (z. B. Inneres eines ungefüllten Rahmens).
+/// Bei Überlappung gewinnt das oberste Element mit der höchsten Stärke — so
+/// lässt sich z. B. Text unter einem ungefüllten Rahmen durch Klick auf die
+/// Glyphen auswählen, der Rahmen selbst durch Klick auf seine Kontur.
+///
+/// Klick **und** Hover-Cursor gehen durch diese eine Funktion. Getrennt
+/// gerechnet würde der Cursor irgendwann etwas anderes versprechen, als der
+/// Klick dann tut — und ein Cursor, der lügt, ist schlimmer als keiner.
+fn topmost_at(
+    app: &EditorApp,
+    page_idx: usize,
+    pointer: Pos2,
+    to_screen: &impl Fn(Pos2) -> Pos2,
+    zoom: f32,
+    ctx: &egui::Context,
+) -> Option<u64> {
+    let mut best_strength: i32 = -1;
+    let mut best_id: Option<u64> = None;
+    for el in app.doc.pages.get(page_idx)?.elements.iter().rev() {
+        if let Some(s) = element_hit_strength(el, pointer, to_screen, zoom, ctx) {
+            let s = s as i32;
+            if s > best_strength {
+                best_strength = s;
+                best_id = Some(el.id);
+            }
+            // Sobald wir einen starken Treffer (s == 1) gefunden haben,
+            // kann kein späteres (tiefer liegendes) Element mehr gewinnen.
+            if best_strength >= 1 {
+                break;
+            }
+        }
+    }
+    best_id
+}
+
 #[allow(clippy::too_many_arguments)]
 fn start_interaction(
     app: &mut EditorApp,
@@ -1459,6 +1980,45 @@ fn start_interaction(
 ) {
     let sel = app.primary();
     let crop_mode = app.crop_mode;
+
+    // 0) Knotenbearbeitung — vor allem anderen.
+    //
+    // Die Knoten liegen auf der Kontur des Pfads und damit oft unter dessen
+    // Auswahlrahmen. Käme der Rahmen zuerst dran, würde ein Klick auf einen
+    // Knoten das Objekt verschieben statt den Knoten.
+    if let Some(edit) = app.path_edit {
+        let hit = element(app, page_idx, edit.id)
+            .and_then(|el| path_node_at(el, pointer, &to_screen));
+        if let Some((index, handle)) = hit {
+            app.path_edit = Some(crate::app::PathEdit {
+                id: edit.id,
+                node: Some(index),
+            });
+            // Alt+Klick schaltet zwischen Ecke und glattem Übergang um,
+            // statt zu ziehen.
+            if ctx.input(|i| i.modifiers.alt) && handle.is_none() {
+                app.push_history();
+                if let Some(el) = element_mut(app, page_idx, edit.id) {
+                    crate::geometry::toggle_node_smooth(el, index);
+                }
+                app.touch();
+                return;
+            }
+            app.push_history();
+            app.interaction = match handle {
+                Some(outgoing) => Interaction::PathHandle {
+                    id: edit.id,
+                    index,
+                    outgoing,
+                },
+                None => Interaction::PathNode {
+                    id: edit.id,
+                    index,
+                },
+            };
+            return;
+        }
+    }
 
     // 1) Crop-Kanten
     if crop_mode {
@@ -1596,27 +2156,7 @@ fn start_interaction(
     // so lässt sich z. B. Text unter einem ungefüllten Rahmen durch Klick
     // auf die Glyphen auswählen, der Rahmen selbst durch Klick auf seine
     // Kontur.
-    let mut best_strength: i32 = -1;
-    let mut best_id: Option<u64> = None;
-    for el in app.doc.pages[page_idx].elements.iter().rev() {
-        let to_scr = &to_screen;
-        match element_hit_strength(el, pointer, to_scr, zoom, ctx) {
-            None => {}
-            Some(s) => {
-                let s = s as i32;
-                if s > best_strength {
-                    best_strength = s;
-                    best_id = Some(el.id);
-                }
-                // Sobald wir einen starken Treffer (s == 1) gefunden haben,
-                // kann kein späteres (tiefer liegendes) Element mehr gewinnen.
-                if best_strength >= 1 {
-                    break;
-                }
-            }
-        }
-    }
-    let hit = best_id;
+    let hit = topmost_at(app, page_idx, pointer, &to_screen, zoom, ctx);
 
     let shift_held = shift;
 
@@ -1641,14 +2181,23 @@ fn start_interaction(
                 app.crop_mode = false;
             } else {
                 // Einzelnes Objekt auswählen und verschieben.
-                let xy = app.doc.pages[page_idx]
+                let el = app.doc.pages[page_idx]
                     .elements
                     .iter()
                     .find(|e| e.id == id)
-                    .map(|e| (e.x, e.y))
                     .unwrap();
+                let xy = (el.x, el.y);
+                let is_path = el.kind == ElementKind::Path;
                 app.select_only(id);
                 app.crop_mode = false;
+                // Ein ausgewählter Pfad sieht aus wie jede andere Form. Ohne
+                // diesen Hinweis findet niemand, dass an ihm die einzelnen
+                // Punkte veränderbar sind.
+                if is_path && app.path_edit.is_none() {
+                    app.status = String::from(
+                        "Pfad ausgewählt — Doppelklick oder N, um die Punkte zu bearbeiten.",
+                    );
+                }
                 app.push_history();
                 app.interaction = Interaction::DragBodies {
                     start_pointer: pointer,
@@ -1873,4 +2422,651 @@ fn crop_to_pointer(
         }
     }
     el.crop = crop.clamp();
+}
+
+// ===========================================================================
+// Pfad-Werkzeuge: zeichnen (Pen, Freihand) und Knoten bearbeiten
+// ===========================================================================
+
+/// Zeichenwerkzeuge für freie Pfade.
+///
+/// Beide Werkzeuge füllen denselben Entwurf (`app.path_draft`) und übergeben
+/// ihn am Ende an `EditorApp::finish_path`. Der Unterschied liegt nur darin,
+/// **wie** die Knoten entstehen: beim Pen einzeln durch Klicks, beim Freihand
+/// aus einer aufgezeichneten Spur, die erst beim Loslassen ausgedünnt wird.
+#[allow(clippy::too_many_arguments)]
+fn path_tool(
+    app: &mut EditorApp,
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    pointer: Option<Pos2>,
+    to_screen: &impl Fn(Pos2) -> Pos2,
+    to_page: &impl Fn(Pos2) -> Vec2,
+    primary_pressed: bool,
+    primary_released: bool,
+    double_clicked: bool,
+    in_canvas: bool,
+) {
+    let zoom = app.view.zoom;
+    let shift = ui.input(|i| i.modifiers.shift);
+    let primary_down = ui.input(|i| i.pointer.primary_down());
+    let page_pos = pointer.map(|p| to_page(p).to_pos2());
+
+    match app.tool {
+        crate::app::Tool::Pen => pen_tool(
+            app,
+            painter,
+            pointer,
+            page_pos,
+            to_screen,
+            zoom,
+            shift,
+            primary_pressed,
+            primary_released,
+            double_clicked,
+            primary_down,
+            in_canvas,
+        ),
+        crate::app::Tool::Freehand => freehand_tool(
+            app,
+            painter,
+            page_pos,
+            to_screen,
+            primary_pressed,
+            primary_released,
+            primary_down,
+            in_canvas,
+        ),
+        _ => {}
+    }
+}
+
+/// Das Pen-Werkzeug: Klicken setzt eine Ecke, Ziehen zieht die Kurvengriffe
+/// heraus.
+///
+/// Die Griffe werden **symmetrisch** gesetzt: Der Ausgangsgriff folgt dem
+/// Cursor, der Eingangsgriff spiegelt ihn. Damit läuft die Kurve ohne Knick
+/// durch den Knoten — das ist die Erwartung an ein Pen-Werkzeug, und wer eine
+/// Spitze braucht, bricht sie hinterher in der Knotenbearbeitung auf.
+#[allow(clippy::too_many_arguments)]
+fn pen_tool(
+    app: &mut EditorApp,
+    painter: &egui::Painter,
+    pointer: Option<Pos2>,
+    page_pos: Option<Pos2>,
+    to_screen: &impl Fn(Pos2) -> Pos2,
+    zoom: f32,
+    shift: bool,
+    primary_pressed: bool,
+    primary_released: bool,
+    double_clicked: bool,
+    primary_down: bool,
+    in_canvas: bool,
+) {
+    use crate::geometry::PathNode;
+
+    // --- Doppelklick beendet den offenen Pfad ---
+    //
+    // Der zweite Klick hat schon einen Knoten gesetzt, bevor der Doppelklick
+    // gemeldet wird — der wird hier wieder zurückgenommen. Ohne das säße am
+    // Ende jedes so beendeten Pfads ein doppelter Knoten.
+    if double_clicked {
+        if let Some(draft) = app.path_draft.as_mut() {
+            if draft.nodes.len() > 2 {
+                draft.nodes.pop();
+                app.finish_path(false);
+                return;
+            }
+        }
+    }
+
+    // --- Klick: Knoten setzen oder Pfad schließen ---
+    if primary_pressed && in_canvas {
+        if let Some(mut p) = page_pos {
+            let close_tol = 10.0 / zoom;
+            let closing = app
+                .path_draft
+                .as_ref()
+                .filter(|d| d.nodes.len() >= 2)
+                .map(|d| (p - d.nodes[0].anchor).length() <= close_tol)
+                .unwrap_or(false);
+            if closing {
+                app.finish_path(true);
+                return;
+            }
+            // Shift: den neuen Knoten auf ein 45°-Raster zum letzten legen.
+            if shift {
+                if let Some(last) = app.path_draft.as_ref().and_then(|d| d.nodes.last()) {
+                    p = snap_angle_45(last.anchor, p);
+                }
+            }
+            let draft = app.path_draft.get_or_insert_with(Default::default);
+            draft.nodes.push(PathNode::corner(p));
+            draft.dragging = true;
+        }
+    }
+
+    // --- Ziehen: Griffe aus dem zuletzt gesetzten Knoten herausziehen ---
+    if primary_down {
+        if let (Some(p), Some(draft)) = (page_pos, app.path_draft.as_mut()) {
+            if draft.dragging {
+                if let Some(last) = draft.nodes.last_mut() {
+                    let anchor = last.anchor;
+                    // Erst ab einer spürbaren Bewegung; sonst erzeugte jeder
+                    // Klick mit ruhiger Hand einen winzigen Griff.
+                    if (p - anchor).length() * zoom >= 3.0 {
+                        last.out_h = p;
+                        last.in_h = anchor - (p - anchor);
+                    }
+                }
+            }
+        }
+    }
+    if primary_released {
+        if let Some(draft) = app.path_draft.as_mut() {
+            draft.dragging = false;
+        }
+    }
+
+    // --- Vorschau ---
+    let Some(draft) = app.path_draft.as_ref() else {
+        // Noch kein Knoten gesetzt: nur ein Punkt am Cursor.
+        if let Some(pt) = pointer {
+            painter.circle_stroke(pt, 5.0, Stroke::new(1.5_f32, PATH_ACCENT));
+        }
+        return;
+    };
+
+    let mut preview: Vec<PathNode> = draft.nodes.clone();
+    // Gummiband zum Cursor — als eigener Eckknoten, damit die Vorschau exakt
+    // dem entspricht, was ein Klick an dieser Stelle ergäbe.
+    if !draft.dragging {
+        if let Some(p) = page_pos {
+            let p = if shift {
+                draft
+                    .nodes
+                    .last()
+                    .map(|l| snap_angle_45(l.anchor, p))
+                    .unwrap_or(p)
+            } else {
+                p
+            };
+            preview.push(PathNode::corner(p));
+        }
+    }
+    draw_node_preview(painter, &preview, draft.nodes.len(), to_screen);
+
+    // Der Startknoten wird hervorgehoben, sobald ein Klick den Pfad schließen
+    // würde — sonst rät man, wie nah „nah genug" ist.
+    if draft.nodes.len() >= 2 {
+        if let Some(p) = page_pos {
+            let start = draft.nodes[0].anchor;
+            if (p - start).length() <= 10.0 / zoom {
+                painter.circle_stroke(
+                    to_screen(start),
+                    8.0,
+                    Stroke::new(2.0_f32, PATH_ACCENT),
+                );
+            }
+        }
+    }
+}
+
+/// Das Freihand-Werkzeug: Spur aufzeichnen, beim Loslassen ausdünnen und
+/// glätten.
+#[allow(clippy::too_many_arguments)]
+fn freehand_tool(
+    app: &mut EditorApp,
+    painter: &egui::Painter,
+    page_pos: Option<Pos2>,
+    to_screen: &impl Fn(Pos2) -> Pos2,
+    primary_pressed: bool,
+    primary_released: bool,
+    primary_down: bool,
+    in_canvas: bool,
+) {
+    /// Mindestabstand zweier aufgezeichneter Punkte (pt). Alles darunter ist
+    /// Zittern und blähte die Spur nur auf.
+    const MIN_STEP: f32 = 1.0;
+    /// Toleranz beim Ausdünnen (pt). Größer = weniger Knoten, kantiger.
+    const SIMPLIFY_EPS: f32 = 1.5;
+    /// Abstand, unter dem ein Zug als geschlossen gilt (pt).
+    const CLOSE_TOL: f32 = 12.0;
+
+    if primary_pressed && in_canvas {
+        if let Some(p) = page_pos {
+            let draft = app.path_draft.get_or_insert_with(Default::default);
+            draft.trace.clear();
+            draft.trace.push(p);
+        }
+    }
+
+    if primary_down {
+        if let (Some(p), Some(draft)) = (page_pos, app.path_draft.as_mut()) {
+            if draft
+                .trace
+                .last()
+                .is_none_or(|last| (p - *last).length() >= MIN_STEP)
+            {
+                draft.trace.push(p);
+            }
+        }
+    }
+
+    if primary_released {
+        if let Some(draft) = app.path_draft.as_mut() {
+            let trace = std::mem::take(&mut draft.trace);
+            if trace.len() < 2 {
+                app.path_draft = None;
+                return;
+            }
+            let simple = crate::geometry::simplify_polyline(&trace, SIMPLIFY_EPS);
+            // Ein Zug, der ungefähr dort endet, wo er begann, war als Umriss
+            // gemeint — dann wird er geschlossen und der doppelte Endpunkt
+            // fällt weg.
+            let closed =
+                simple.len() > 3 && (simple[simple.len() - 1] - simple[0]).length() <= CLOSE_TOL;
+            let pts = if closed {
+                &simple[..simple.len() - 1]
+            } else {
+                &simple[..]
+            };
+            let nodes = crate::geometry::nodes_from_polyline(pts, closed);
+            app.path_draft = Some(crate::app::PathDraft {
+                nodes,
+                dragging: false,
+                trace: Vec::new(),
+            });
+            app.finish_path(closed);
+        }
+    }
+
+    // Vorschau: die Rohspur, damit der Strich dem Stift folgt.
+    if let Some(draft) = app.path_draft.as_ref() {
+        if draft.trace.len() >= 2 {
+            let pts: Vec<Pos2> = draft.trace.iter().map(|p| to_screen(*p)).collect();
+            painter.add(Shape::line(pts, Stroke::new(2.0_f32, PATH_ACCENT)));
+        }
+    }
+}
+
+/// Zeichnet die Vorschau eines Pfad-Entwurfs: Kurve, Stützpunkte und Griffe.
+///
+/// `committed` ist die Zahl der wirklich gesetzten Knoten — alles darüber ist
+/// das Gummiband zum Cursor und wird blasser gezeichnet.
+fn draw_node_preview(
+    painter: &egui::Painter,
+    nodes: &[crate::geometry::PathNode],
+    committed: usize,
+    to_screen: &impl Fn(Pos2) -> Pos2,
+) {
+    if nodes.is_empty() {
+        return;
+    }
+    // Die Kurve selbst — über ein Wegwerf-Element, damit exakt dieselbe
+    // Auflösung greift wie beim fertigen Pfad.
+    if nodes.len() >= 2 {
+        let el = crate::geometry::path_from_nodes(0, nodes, false);
+        let pts: Vec<Pos2> = crate::geometry::path_outline(&el)
+            .iter()
+            .map(|p| to_screen(*p))
+            .collect();
+        if pts.len() >= 2 {
+            painter.add(Shape::line(pts, Stroke::new(2.0_f32, PATH_ACCENT)));
+        }
+    }
+
+    for (i, n) in nodes.iter().enumerate() {
+        let s = to_screen(n.anchor);
+        let color = if i >= committed {
+            PATH_ACCENT.gamma_multiply(0.5)
+        } else {
+            PATH_ACCENT
+        };
+        // Griffe zeigen, solange sie nicht auf dem Stützpunkt liegen.
+        if !n.is_corner() {
+            for h in [n.in_h, n.out_h] {
+                let hs = to_screen(h);
+                painter.line_segment([s, hs], Stroke::new(1.0_f32, color));
+                painter.circle_filled(hs, 3.5, color);
+            }
+        }
+        let r = if i == 0 { 5.0 } else { 4.0 };
+        painter.circle_filled(s, r, Color32::WHITE);
+        painter.circle_stroke(s, r, Stroke::new(1.5_f32, color));
+    }
+}
+
+/// Zeichnet die Knotenbearbeitung eines Pfads: Stützpunkte, Griffe, den
+/// gerade ausgewählten Knoten und die Einfügestelle unter dem Cursor.
+///
+/// Die Knotenform sagt, was der Knoten mit der Kurve macht:
+///
+/// * **Quadrat** — Ecke, beide Griffe liegen auf dem Stützpunkt.
+/// * **Kreis** — glatter Übergang, die Kurve läuft ohne Knick hindurch.
+/// * **Raute** — Spitze: Der Knoten hat Griffe, aber sie liegen nicht auf
+///   einer Geraden, die Kurve knickt also.
+///
+/// Ohne diesen Unterschied müsste man jeden Knoten anfassen, um zu sehen,
+/// woher ein unerwarteter Knick kommt.
+fn draw_path_nodes(
+    painter: &egui::Painter,
+    el: &Element,
+    selected: Option<usize>,
+    pointer_page: Option<Pos2>,
+    zoom: f32,
+    to_screen: &impl Fn(Pos2) -> Pos2,
+) {
+    // Einfügestelle: Wo würde ein Doppelklick einen Knoten setzen? Ohne diese
+    // Vorschau ist die Geste unsichtbar.
+    if let Some(p) = pointer_page {
+        if let Some(hit) = crate::geometry::path_nearest(el, p) {
+            let near_node = crate::geometry::path_nodes(el)
+                .iter()
+                .any(|n| (n.anchor - hit.pos).length() * zoom <= NODE_GRAB);
+            if hit.dist * zoom <= NODE_GRAB && !near_node {
+                let s = to_screen(hit.pos);
+                painter.circle_stroke(s, 4.0, Stroke::new(1.5_f32, PATH_ACCENT));
+                painter.line_segment(
+                    [s - Vec2::new(3.0, 0.0), s + Vec2::new(3.0, 0.0)],
+                    Stroke::new(1.5_f32, PATH_ACCENT),
+                );
+                painter.line_segment(
+                    [s - Vec2::new(0.0, 3.0), s + Vec2::new(0.0, 3.0)],
+                    Stroke::new(1.5_f32, PATH_ACCENT),
+                );
+            }
+        }
+    }
+
+    let nodes = crate::geometry::path_nodes(el);
+    for (i, n) in nodes.iter().enumerate() {
+        let s = to_screen(n.anchor);
+        if !n.is_corner() {
+            for h in [n.in_h, n.out_h] {
+                let hs = to_screen(h);
+                painter.line_segment([s, hs], Stroke::new(1.0_f32, PATH_ACCENT));
+                painter.circle_filled(hs, 3.5, Color32::WHITE);
+                painter.circle_stroke(hs, 3.5, Stroke::new(1.5_f32, PATH_ACCENT));
+            }
+        }
+        let active = selected == Some(i);
+        let fill = if active { PATH_ACCENT } else { Color32::WHITE };
+        let stroke = Stroke::new(1.5_f32, PATH_ACCENT);
+        if n.is_corner() {
+            let r = Rect::from_center_size(s, Vec2::splat(9.0));
+            painter.rect_filled(r, 1.0, fill);
+            painter.rect_stroke(r, 1.0, stroke, egui::StrokeKind::Inside);
+        } else if n.is_smooth() {
+            painter.circle_filled(s, 4.5, fill);
+            painter.circle_stroke(s, 4.5, stroke);
+        } else {
+            // Raute = Spitze.
+            let d = 6.0;
+            let pts = vec![
+                s + Vec2::new(0.0, -d),
+                s + Vec2::new(d, 0.0),
+                s + Vec2::new(0.0, d),
+                s + Vec2::new(-d, 0.0),
+            ];
+            painter.add(Shape::convex_polygon(pts, fill, stroke));
+        }
+    }
+}
+
+/// Sucht Knoten oder Griff unter dem Cursor.
+///
+/// Rückgabe: `(Index, Griff)` — `None` als Griff heißt „der Stützpunkt selbst".
+/// Griffe gewinnen bei Gleichstand, weil sie in der Regel auf dem Stützpunkt
+/// aufsitzen und sonst nie erreichbar wären.
+fn path_node_at(
+    el: &Element,
+    pointer: Pos2,
+    to_screen: &impl Fn(Pos2) -> Pos2,
+) -> Option<(usize, Option<bool>)> {
+    let nodes = crate::geometry::path_nodes(el);
+    let mut best: Option<(f32, usize, Option<bool>)> = None;
+    for (i, n) in nodes.iter().enumerate() {
+        if !n.is_corner() {
+            for (outgoing, h) in [(false, n.in_h), (true, n.out_h)] {
+                let d = to_screen(h).distance(pointer);
+                if d <= NODE_GRAB && best.as_ref().is_none_or(|(bd, _, _)| d < *bd) {
+                    best = Some((d, i, Some(outgoing)));
+                }
+            }
+        }
+        let d = to_screen(n.anchor).distance(pointer);
+        // Der Stützpunkt braucht einen echten Vorsprung, um einen Griff zu
+        // verdrängen — sonst ließe sich ein kurzer Griff nie fassen.
+        if d <= NODE_GRAB && best.as_ref().is_none_or(|(bd, _, _)| d < *bd - 2.0) {
+            best = Some((d, i, None));
+        }
+    }
+    best.map(|(_, i, h)| (i, h))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geometry::PathNode;
+
+    /// Zoom 1 und Ursprung bei (0,0): Bildschirm- und Seitenkoordinaten sind
+    /// identisch, jede Toleranz in Pixeln ist damit direkt ablesbar.
+    fn ident(p: Pos2) -> Pos2 {
+        p
+    }
+
+    /// Waagerechter Zug — der Fall, der die Hüllbox auf `PATH_MIN_EXTENT`
+    /// zusammenfallen lässt.
+    fn flacher_pfad() -> Element {
+        crate::geometry::path_from_nodes(
+            1,
+            &[
+                PathNode::corner(Pos2::new(100.0, 200.0)),
+                PathNode::corner(Pos2::new(300.0, 200.0)),
+            ],
+            false,
+        )
+    }
+
+    #[test]
+    fn flacher_pfad_ist_auch_neben_der_kontur_treffbar() {
+        let el = flacher_pfad();
+        // Die Box ist nur PATH_MIN_EXTENT hoch. Früher verwarf die randlose
+        // Hüllbox-Prüfung diesen Klick, bevor die Toleranz überhaupt zum
+        // Zug kam — der Pfad war auf ein Viertelpixel genau zu treffen.
+        assert!(el.h <= crate::geometry::PATH_MIN_EXTENT);
+        let ctx = egui::Context::default();
+        assert_eq!(
+            element_hit_strength(&el, Pos2::new(200.0, 195.0), &ident, 1.0, &ctx),
+            Some(1),
+            "5 px neben einer waagerechten Kontur muss ein Treffer sein"
+        );
+    }
+
+    #[test]
+    fn weit_entfernter_klick_trifft_den_pfad_nicht() {
+        let el = flacher_pfad();
+        let ctx = egui::Context::default();
+        assert_eq!(
+            element_hit_strength(&el, Pos2::new(200.0, 400.0), &ident, 1.0, &ctx),
+            None
+        );
+    }
+
+    #[test]
+    fn doppelklick_verzeiht_mehr_als_der_klick() {
+        let el = flacher_pfad();
+        let daneben = Pos2::new(200.0, 188.0); // 12 px über der Kontur
+        assert!(
+            !path_hit_within(&el, daneben, &ident, 1.0, PATH_CLICK_TOL),
+            "für den einfachen Klick ist das zu weit"
+        );
+        assert!(
+            path_hit_within(&el, daneben, &ident, 1.0, PATH_DBLCLICK_TOL),
+            "der Doppelklick muss hier greifen, sonst entsteht ein Textfeld \
+             über dem Pfad"
+        );
+    }
+
+    #[test]
+    fn ausgewaehlter_pfad_faengt_auch_groebe_doppelklicks() {
+        let el = flacher_pfad();
+        let weit = Pos2::new(200.0, 170.0); // 30 px über der Kontur
+        assert!(
+            !path_hit_within(&el, weit, &ident, 1.0, PATH_DBLCLICK_TOL),
+            "ohne Auswahl bleibt das zu weit"
+        );
+        assert!(
+            path_hit_within(&el, weit, &ident, 1.0, PATH_DBLCLICK_TOL_SELECTED),
+            "wer den Pfad ausgewählt hat, meint beim Doppelklick ihn"
+        );
+    }
+
+    #[test]
+    fn toleranz_bleibt_am_bildschirm_konstant_beim_zoomen() {
+        let el = flacher_pfad();
+        // Bei Zoom 2 liegt die Kontur auf Bildschirm-y 400; 5 px darüber
+        // muss weiterhin treffen, obwohl das in Seitenkoordinaten nur noch
+        // 2,5 pt sind.
+        let ctx = egui::Context::default();
+        let to_screen = |p: Pos2| Pos2::new(p.x * 2.0, p.y * 2.0);
+        assert_eq!(
+            element_hit_strength(&el, Pos2::new(400.0, 395.0), &to_screen, 2.0, &ctx),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn resize_symbol_folgt_der_griffrichtung() {
+        use egui::CursorIcon::*;
+        // Bildschirmkoordinaten: y zeigt nach unten.
+        assert_eq!(resize_icon(Vec2::new(1.0, 0.0)), ResizeHorizontal);
+        assert_eq!(resize_icon(Vec2::new(-1.0, 0.0)), ResizeHorizontal);
+        assert_eq!(resize_icon(Vec2::new(0.0, 1.0)), ResizeVertical);
+        assert_eq!(resize_icon(Vec2::new(1.0, 1.0)), ResizeNwSe);
+        assert_eq!(resize_icon(Vec2::new(1.0, -1.0)), ResizeNeSw);
+    }
+
+    #[test]
+    fn gedrehtes_objekt_bekommt_gedrehtes_resize_symbol() {
+        // Die rechte Kante eines um 90° gedrehten Objekts liegt am Bildschirm
+        // unten — der Cursor muss senkrecht zeigen, nicht waagerecht.
+        let mut el = rechteck(1);
+        el.rotation = 90.0; // Grad, nicht Radiant
+
+        let center = Pos2::new(200.0, 150.0);
+        let rechts = edge_mid_positions(&el, &ident, 1.0)[1];
+        assert_eq!(resize_icon(rechts - center), egui::CursorIcon::ResizeVertical);
+    }
+
+    /// Minimale App mit einer Seite und den übergebenen Objekten.
+    fn app_mit(elements: Vec<Element>) -> EditorApp {
+        let mut app = EditorApp::default();
+        app.doc.pages[0].elements = elements;
+        app
+    }
+
+    /// Gefülltes Rechteck bei (100,100), 200×100 — Mittelpunkt (200,150).
+    fn rechteck(id: u64) -> Element {
+        let mut el = Element::new_rectangle(id, 100.0, 100.0);
+        el.w = 200.0;
+        el.h = 100.0;
+        el.fill_color = crate::model::default_fill_color();
+        el
+    }
+
+    #[test]
+    fn nicht_ausgewaehltes_objekt_zeigt_die_hand() {
+        let app = app_mit(vec![rechteck(7)]);
+        let ctx = egui::Context::default();
+        assert_eq!(
+            hover_cursor(&app, 0, Pos2::new(200.0, 150.0), &ident, 1.0, &ctx),
+            Some(egui::CursorIcon::PointingHand)
+        );
+    }
+
+    #[test]
+    fn ausgewaehltes_objekt_zeigt_das_verschiebe_symbol() {
+        let mut app = app_mit(vec![rechteck(7)]);
+        app.select_only(7);
+        let ctx = egui::Context::default();
+        assert_eq!(
+            hover_cursor(&app, 0, Pos2::new(200.0, 150.0), &ident, 1.0, &ctx),
+            Some(egui::CursorIcon::Move)
+        );
+    }
+
+    #[test]
+    fn leere_flaeche_laesst_den_cursor_in_ruhe() {
+        let app = app_mit(vec![rechteck(7)]);
+        let ctx = egui::Context::default();
+        assert_eq!(
+            hover_cursor(&app, 0, Pos2::new(600.0, 600.0), &ident, 1.0, &ctx),
+            None
+        );
+    }
+
+    #[test]
+    fn eckgriff_schlaegt_den_koerper() {
+        let mut app = app_mit(vec![rechteck(7)]);
+        app.select_only(7);
+        let ecke = corner_positions(&app.doc.pages[0].elements[0], &ident, 1.0)[0];
+        let ctx = egui::Context::default();
+        let icon = hover_cursor(&app, 0, ecke, &ident, 1.0, &ctx).expect("Griff muss antworten");
+        assert_ne!(
+            icon,
+            egui::CursorIcon::Move,
+            "auf dem Eckgriff wird skaliert, nicht verschoben"
+        );
+    }
+
+    #[test]
+    fn cursor_und_klick_treffen_dasselbe_objekt() {
+        // Zwei überlappende Rechtecke: Der Cursor darf nicht das eine
+        // versprechen, während der Klick das andere auswählt.
+        let mut unten = rechteck(1);
+        let mut oben = rechteck(2);
+        unten.x = 100.0;
+        oben.x = 200.0;
+        let app = app_mit(vec![unten, oben]);
+        let ctx = egui::Context::default();
+        for p in [
+            Pos2::new(150.0, 150.0),
+            Pos2::new(250.0, 150.0),
+            Pos2::new(350.0, 150.0),
+        ] {
+            let klick = topmost_at(&app, 0, p, &ident, 1.0, &ctx);
+            let cursor = hover_cursor(&app, 0, p, &ident, 1.0, &ctx);
+            assert_eq!(
+                klick.is_some(),
+                cursor.is_some(),
+                "bei {p:?} widersprechen sich Cursor und Klick"
+            );
+        }
+    }
+
+    #[test]
+    fn gefuellte_flaeche_zaehlt_als_treffer() {
+        let el = crate::geometry::path_from_nodes(
+            2,
+            &[
+                PathNode::corner(Pos2::new(100.0, 100.0)),
+                PathNode::corner(Pos2::new(300.0, 100.0)),
+                PathNode::corner(Pos2::new(300.0, 300.0)),
+                PathNode::corner(Pos2::new(100.0, 300.0)),
+            ],
+            true,
+        );
+        let mut el = el;
+        el.fill_color = crate::model::default_fill_color();
+        assert!(el.fill_color[3] > 0, "Test braucht eine sichtbare Füllung");
+        assert!(path_hit_within(
+            &el,
+            Pos2::new(200.0, 200.0),
+            &ident,
+            1.0,
+            PATH_CLICK_TOL
+        ));
+    }
 }

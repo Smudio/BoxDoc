@@ -20,4 +20,5 @@ pub mod pdf_import;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod printing;
 pub mod store;
+pub mod svg;
 pub mod text_layout;

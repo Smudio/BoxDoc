@@ -1,6 +1,6 @@
 [package]
 name = "boxdoc"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 description = "Ein simples, leistungsstarkes und zuverlässiges Dokumenten-Programm"
 license = "MIT OR Apache-2.0"
@@ -55,6 +55,13 @@ crossbeam-channel = "0.5"
 # sodass keine separate DLL-Auslieferung nötig ist.
 pdfium-render = "0.9"
 pdfium-bundled = "0.1"
+
+# Nur für Tests: echter XML-Parser. Der SVG-Export prüft damit, dass die
+# erzeugte Datei wirklich wohlgeformt ist — selbst gezählte Tags übersehen
+# genau die Fälle, die in der Praxis brechen (Anführungszeichen in
+# Attributen, base64-Blöcke, Unicode).
+[dev-dependencies]
+quick-xml = "0.36"
 
 [features]
 default = []

@@ -43,6 +43,11 @@ fn fully_populated_element() -> Element {
     el.stroke_color = [11, 22, 33, 44];
     el.corner_radius = 5.5;
     el.points = vec![[0.0, 0.0], [1.0, 0.25], [0.5, 1.0]];
+    el.handles = vec![
+        [0.0, 0.0, 0.1, 0.05],
+        [0.8, 0.2, 1.0, 0.35],
+        [0.6, 0.9, 0.5, 1.0],
+    ];
     el.path_closed = true;
     el
 }
@@ -130,6 +135,128 @@ fn pfad_element_ueberlebt_den_roundtrip() {
     assert!(boxdoc::merge::elements_equal(&el, b), "Pfad verändert: {b:#?}");
     assert_eq!(b.points.len(), 4);
     assert!(b.path_closed);
+}
+
+#[test]
+fn gerader_pfad_schreibt_kein_handles_feld() {
+    // Das Dateiformat ist die AI-Schnittstelle. Ein Streckenzug soll in der
+    // Datei genauso kurz bleiben wie vor der Kurven-Erweiterung — sonst steht
+    // in jedem Dokument ein Vektor voller Wiederholungen, den niemand liest.
+    let el = Element::new_path(7, &[(10.0, 10.0), (110.0, 60.0)], false);
+    let json = serde_json::to_string(&doc_with(el)).unwrap();
+    assert!(
+        !json.contains("handles"),
+        "leeres handles-Feld darf nicht geschrieben werden: {json}"
+    );
+}
+
+#[test]
+fn kurvenpfad_ueberlebt_den_roundtrip() {
+    use boxdoc::geometry::{self, PathNode};
+    use egui::Pos2;
+
+    let nodes = vec![
+        PathNode::corner(Pos2::new(50.0, 200.0)),
+        PathNode {
+            anchor: Pos2::new(150.0, 120.0),
+            in_h: Pos2::new(100.0, 120.0),
+            out_h: Pos2::new(200.0, 120.0),
+        },
+        PathNode::corner(Pos2::new(250.0, 200.0)),
+    ];
+    let el = geometry::path_from_nodes(7, &nodes, false);
+    assert!(el.path_is_curved(), "Testaufbau: Pfad sollte Kurven haben");
+
+    let json = serde_json::to_string(&doc_with(el.clone())).unwrap();
+    let back: Document = serde_json::from_str(&json).unwrap();
+    let b = &back.pages[0].elements[0];
+
+    assert!(boxdoc::merge::elements_equal(&el, b), "Pfad verändert: {b:#?}");
+    assert!(b.path_is_curved());
+    // Und die Knoten liegen nach dem Rundlauf an derselben Stelle.
+    for (got, want) in geometry::path_nodes(b).iter().zip(nodes.iter()) {
+        assert!((got.anchor - want.anchor).length() < 0.01);
+        assert!((got.in_h - want.in_h).length() < 0.01);
+        assert!((got.out_h - want.out_h).length() < 0.01);
+    }
+}
+
+#[test]
+fn das_pfad_beispiel_aus_agents_md_stimmt() {
+    // `AGENTS.md` **ist** die KI-Schnittstelle. Ein Beispiel darin, das nicht
+    // das beschriebene Ergebnis liefert, ist schlimmer als gar keines — die
+    // KI baut darauf auf und merkt den Fehler nie. Deshalb steht hier das
+    // Dreieck aus der Doku, Zeichen für Zeichen, samt seiner Behauptungen.
+    use boxdoc::geometry;
+    use egui::Pos2;
+
+    let json = r#"{
+        "format": "A4", "orientation": "Portrait",
+        "pages": [{"elements": [{
+            "id": 8, "kind": "Path",
+            "x": 50.0, "y": 50.0, "w": 100.0, "h": 100.0, "rotation": 0.0,
+            "points":  [[0.0, 1.0], [1.0, 1.0], [0.5, 0.0]],
+            "handles": [[0.0, 1.0, 0.0, 1.0],
+                        [1.0, 1.0, 1.4, 0.5],
+                        [0.5, 0.0, 0.5, 0.0]],
+            "path_closed": true,
+            "fill_color": [80, 140, 220, 120],
+            "stroke_width": 1.0, "stroke_color": [30, 60, 120, 255],
+            "text": "", "font_size": 14.0, "font": "default",
+            "color": [0,0,0,255], "align": "Left", "valign": "Top", "indent": 0.0,
+            "crop": {"x":0.0,"y":0.0,"w":1.0,"h":1.0}, "image_w": 0, "image_h": 0
+        }]}]
+    }"#;
+    let doc: Document = serde_json::from_str(json).expect("Beispiel muss laden");
+    let el = &doc.pages[0].elements[0];
+
+    // Die Stützpunkte liegen dort, wo die Umrechnung in der Doku es sagt.
+    let nodes = geometry::path_nodes(el);
+    let erwartet = [
+        Pos2::new(50.0, 150.0),
+        Pos2::new(150.0, 150.0),
+        Pos2::new(100.0, 50.0),
+    ];
+    for (n, p) in nodes.iter().zip(erwartet.iter()) {
+        assert!((n.anchor - *p).length() < 0.01, "{:?} statt {p:?}", n.anchor);
+    }
+
+    // „Unterkante und linke Seite sind Geraden, die rechte Seite wölbt sich."
+    let (_, segs) = geometry::path_segments(el).expect("drei Segmente");
+    assert_eq!(segs.len(), 3, "geschlossen = drei Segmente");
+    assert!(matches!(segs[0], geometry::PathSeg::Line(_)), "Unterkante");
+    assert!(matches!(segs[1], geometry::PathSeg::Cubic(..)), "rechte Seite");
+    assert!(matches!(segs[2], geometry::PathSeg::Line(_)), "linke Seite");
+
+    // Und sie wölbt sich wirklich nach außen, also über x = 150 hinaus.
+    let max_x = geometry::path_outline(el)
+        .iter()
+        .fold(f32::MIN, |m, p| m.max(p.x));
+    assert!(max_x > 155.0, "Wölbung reicht nur bis x = {max_x}");
+}
+
+#[test]
+fn pfad_mit_kaputten_griffen_laedt_trotzdem() {
+    // Eine KI oder ein Editor kann `handles` in der falschen Länge schreiben.
+    // Das darf den Pfad nicht halb gerade machen, sondern muss beim Laden
+    // repariert werden.
+    let json = r#"{
+        "format": "A4", "orientation": "Portrait",
+        "pages": [{"elements": [{
+            "id": 1, "kind": "Path",
+            "x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0, "rotation": 0.0,
+            "text": "", "font_size": 14.0, "font": "default",
+            "color": [0,0,0,255], "align": "Left", "valign": "Top", "indent": 0.0,
+            "crop": {"x":0.0,"y":0.0,"w":1.0,"h":1.0}, "image_w": 0, "image_h": 0,
+            "points": [[0.0,0.0],[0.5,1.0],[1.0,0.0]],
+            "handles": [[0.0,0.0,0.2,0.4]],
+            "path_closed": false
+        }]}]
+    }"#;
+    let doc: Document = serde_json::from_str(json).expect("muss laden");
+    let el = &doc.pages[0].elements[0];
+    assert!(el.path_handles_valid(), "Griffe wurden nicht repariert");
+    assert_eq!(el.handles.len(), el.points.len());
 }
 
 #[test]

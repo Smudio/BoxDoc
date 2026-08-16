@@ -17,6 +17,7 @@ mod pdf_import;
 mod printing;
 mod settings_io;
 mod store;
+mod svg;
 mod text_layout;
 mod themes;
 #[cfg(target_arch = "wasm32")]

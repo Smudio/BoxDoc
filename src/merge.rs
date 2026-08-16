@@ -302,6 +302,11 @@ pub fn elements_equal(a: &Element, b: &Element) -> bool {
             .iter()
             .zip(b.points.iter())
             .all(|(p, q)| feq(p[0], q[0]) && feq(p[1], q[1]))
+        && a.handles.len() == b.handles.len()
+        && a.handles
+            .iter()
+            .zip(b.handles.iter())
+            .all(|(p, q)| p.iter().zip(q.iter()).all(|(u, v)| feq(*u, *v)))
         && a.path_closed == b.path_closed
 }
 
@@ -395,8 +400,28 @@ fn merge_element(base: &Element, local: &Element, remote: &Element) -> (Element,
     merge_field!(image_h);
     merge_field!(fill_color);
     merge_field!(stroke_color);
-    merge_field!(points);
     merge_field!(path_closed);
+
+    // Stützpunkte und Griffe sind **ein** Feld.
+    //
+    // Getrennt gemergt könnten die Griffe der einen Seite an den Stützpunkten
+    // der anderen landen — unterschiedlich lang, und damit ein Pfad, dessen
+    // zweite Hälfte still ihre Rundung verliert. Die Knotenliste wird deshalb
+    // immer als Ganzes übernommen oder als Ganzes als Konflikt gemeldet.
+    {
+        let local_changed = local.points != base.points || local.handles != base.handles;
+        let remote_changed = remote.points != base.points || remote.handles != base.handles;
+        if remote_changed {
+            if local_changed {
+                if local.points != remote.points || local.handles != remote.handles {
+                    conflict = true;
+                }
+            } else {
+                out.points = remote.points.clone();
+                out.handles = remote.handles.clone();
+            }
+        }
+    }
 
     (out, conflict)
 }
