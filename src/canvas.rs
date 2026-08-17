@@ -855,16 +855,53 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
     // Ohne Rückmeldung ist jedes Objekt ein Ratespiel — eine dünne Kontur
     // sowieso, aber auch ein ungefüllter Rahmen oder ein Text mit viel Luft
     // in der Box. Der Cursor sagt vorher, ob man trifft, und was passiert.
+    let mut hover_icon = None;
     if !app.pasting && pointer_in_canvas && !click_on_ui {
         if let Some(pt) = pointer {
             if app.tool == crate::app::Tool::Select {
-                if let Some(icon) = hover_cursor(app, page_idx, pt, &to_screen, zoom, ctx) {
+                hover_icon = hover_cursor(app, page_idx, pt, &to_screen, zoom, ctx);
+                if let Some(icon) = hover_icon {
                     ctx.set_cursor_icon(icon);
                 }
             } else {
                 // Zeichenwerkzeug aktiv: Das Fadenkreuz sagt, dass hier gesetzt
                 // und nicht ausgewählt wird.
                 ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+            }
+        }
+    }
+
+    // --- Auswahlmodus-Badge am Cursor: + / − bei Shift / Strg ---
+    //
+    // Live-Anzeige des Auswahlmodus, solange der Modifier gehalten wird —
+    // auch während das Auswahl-Rechteck gezogen wird, weil dessen Wirkung
+    // erst beim Loslassen festgelegt wird. Beide Modifier gleichzeitig
+    // heben sich auf (Replace) → kein Badge.
+    //
+    // Sichtbar nur dort, wo der Modifier auch wirklich die Auswahl steuert:
+    // über einem Griff heißt Shift „Seitenverhältnis halten", und während
+    // eines laufenden Zieh-Vorgangs entscheidet er die Bewegung, nicht die
+    // Auswahl — ein „+" wäre dort schlicht gelogen.
+    if !app.pasting
+        && !editing_active
+        && pointer_in_canvas
+        && !click_on_ui
+        && app.tool == crate::app::Tool::Select
+    {
+        let selects = match app.interaction {
+            // Leere Fläche oder Objektkörper: Der nächste Klick geht in die Auswahl.
+            Interaction::None => !hover_icon.map(is_handle_cursor).unwrap_or(false),
+            // Auswahl-Rechteck: Wirkung entscheidet sich erst beim Loslassen.
+            Interaction::SelectionBox { .. } => true,
+            _ => false,
+        };
+        if selects {
+            if let Some(pt) = pointer {
+                let op = crate::app::SelectionOp::from_modifiers(
+                    ui.input(|i| i.modifiers.shift),
+                    ui.input(|i| i.modifiers.ctrl),
+                );
+                draw_selection_mode_badge(&painter, pt, op);
             }
         }
     }
@@ -1870,6 +1907,57 @@ fn resize_icon(dir: Vec2) -> egui::CursorIcon {
         egui::CursorIcon::ResizeVertical
     } else {
         egui::CursorIcon::ResizeNeSw
+    }
+}
+
+/// Zeigt dieses Hover-Symbol auf einen Griff (Größe ändern, Drehen,
+/// Endpunkt, Knoten)? Dort steuern Shift/Strg das Ziehen selbst und nicht
+/// die Auswahl.
+fn is_handle_cursor(icon: egui::CursorIcon) -> bool {
+    matches!(
+        icon,
+        egui::CursorIcon::Grab
+            | egui::CursorIcon::ResizeHorizontal
+            | egui::CursorIcon::ResizeVertical
+            | egui::CursorIcon::ResizeNwSe
+            | egui::CursorIcon::ResizeNeSw
+    )
+}
+
+/// Kleines +/−-Badge am Cursor, solange Shift bzw. Strg gehalten wird:
+/// blau „+" (Shift = zur Auswahl hinzufügen), rot „−" (Strg = aus der
+/// Auswahl entfernen). Bei `Replace` wird nichts gezeichnet.
+///
+/// Sitzt unten rechts am Zeiger — dort, wo Windows auch seine eigenen
+/// Cursor-Varianten (Kopieren, Verknüpfen) beschriftet, und wo es die
+/// Pfeilspitze nicht verdeckt. Bewusst klein und dicht am Hotspot: Das
+/// System zeichnet den Cursor, wir erst im nächsten Frame — je kürzer der
+/// Hebel, desto weniger fällt dieser eine Frame Versatz auf.
+///
+/// Die Zeichen sind gezeichnet statt gesetzt: ein Balken bzw. ein Kreuz aus
+/// zwei Linien. Bei 12 px Durchmesser ist das schärfer als eine Glyphe — und
+/// unabhängig davon, ob die geladene Schrift „−" (U+2212) überhaupt kennt.
+fn draw_selection_mode_badge(painter: &egui::Painter, pointer: Pos2, op: crate::app::SelectionOp) {
+    let (plus, color) = match op {
+        crate::app::SelectionOp::Add => (true, Color32::from_rgb(40, 120, 220)),
+        crate::app::SelectionOp::Remove => (false, Color32::from_rgb(220, 90, 40)),
+        crate::app::SelectionOp::Replace => return,
+    };
+    let center = pointer + Vec2::new(13.0, 14.0);
+    // Weißer Rand, damit das Badge auch über dunklen Elementen lesbar bleibt.
+    painter.circle_filled(center, 7.5, Color32::WHITE);
+    painter.circle_filled(center, 6.0, color);
+    let arm = 3.0;
+    let stroke = Stroke::new(1.6_f32, Color32::WHITE);
+    painter.line_segment(
+        [center - Vec2::new(arm, 0.0), center + Vec2::new(arm, 0.0)],
+        stroke,
+    );
+    if plus {
+        painter.line_segment(
+            [center - Vec2::new(0.0, arm), center + Vec2::new(0.0, arm)],
+            stroke,
+        );
     }
 }
 
