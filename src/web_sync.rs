@@ -35,6 +35,19 @@ pub enum WebEvent {
     /// Speichern abgelehnt, weil jemand anders zuerst war (HTTP 409).
     /// Der mitgelieferte Serverstand wird gemergt und erneut gespeichert.
     SaveConflict { json: String, version: u64 },
+    /// Ein neues Dokument wurde serverseitig angelegt (`?new=1`).
+    ///
+    /// Der Client bindet sich daraufhin daran und lädt den lokalen Stand
+    /// hinauf — das frisch angelegte Serverdokument ist leer.
+    Created {
+        slug: String,
+        token: String,
+        version: u64,
+    },
+    /// Anlegen abgelehnt (Name vergeben, ungültig, Rate-Limit). Die Meldung
+    /// kommt vom Server und gehört in den Dialog, nicht in die Statuszeile:
+    /// dort steht sie neben dem Feld, das der Nutzer korrigieren muss.
+    CreateFailed(String),
     /// Ein Fehler ist aufgetreten.
     Error(String),
 }
@@ -87,8 +100,20 @@ struct MetaResponse {
 #[derive(Serialize, Deserialize)]
 struct CreateResponse {
     slug: String,
-    token: String,
+    /// Fehlt bzw. ist `null` bei öffentlichen Dokumenten (`public=1`).
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    version: u64,
+    #[serde(default)]
     url: String,
+}
+
+/// Fehlerantwort der API — `{"error": "Name already exists"}`.
+#[derive(Serialize, Deserialize)]
+struct ErrorResponse {
+    #[serde(default)]
+    error: String,
 }
 
 impl WebDoc {
@@ -103,11 +128,14 @@ impl WebDoc {
         let mut slug = String::new();
 
         // Letztes Pfad-Segment prüfen, falls es wie ein Slug aussieht.
+        //
+        // Bewusst über `is_valid_slug` und nicht mit einer eigenen Prüfung:
+        // Die frühere Fassung verlangte hier einen Buchstaben am Anfang,
+        // während der Server seine Slugs als `bin2hex(random_bytes(5))`
+        // erzeugt. Jeder zweite davon beginnt mit einer Ziffer — und wurde
+        // damit auf der eigenen Seite nicht als Dokument erkannt.
         if let Some(rest) = path.rsplit('/').next() {
-            if rest.len() >= 4 && rest.len() <= 32
-                && rest.chars().all(|c| c.is_ascii_alphanumeric())
-                && rest.chars().next().map(|c| c.is_ascii_lowercase()).unwrap_or(false)
-            {
+            if is_valid_slug(rest) {
                 slug = rest.to_string();
             }
         }
@@ -138,47 +166,68 @@ impl WebDoc {
         })
     }
 
-    /// Erzeugt ein neues Dokument serverseitig (POST ?new=1) und liefert
-    /// das initialisierte WebDoc zurück.
-    pub async fn create_new() -> Result<Self, String> {
-        let base = detect_base();
-        let url = format!("{}/api.php?new=1", base);
-
-        let mut opts = RequestInit::new();
-        opts.method("POST");
-        opts.mode(RequestMode::Cors);
-
-        let request = Request::new_with_str_and_init(&url, &opts)
-            .map_err(|e| format!("Request fehlgeschlagen: {:?}", e))?;
-
-        let window = web_sys::window().ok_or("kein window")?;
-        let resp_val = JsFuture::from(window.fetch_with_request(&request))
-            .await
-            .map_err(|e| format!("fetch: {:?}", e))?;
-        let resp: Response = resp_val.dyn_into().map_err(|e| format!("cast: {:?}", e))?;
-
-        if !resp.ok() {
-            return Err(format!("Server antwortet {}", resp.status()));
-        }
-
-        let json_text = JsFuture::from(resp.text().map_err(|e| format!("text: {:?}", e))?)
-            .await
-            .map_err(|e| format!("text await: {:?}", e))?
-            .as_string()
-            .ok_or("text nicht als String")?;
-
-        let parsed: CreateResponse = serde_json::from_str(&json_text)
-            .map_err(|e| format!("parse: {}", e))?;
-
-        Ok(WebDoc {
-            slug: parsed.slug,
-            token: parsed.token,
-            base,
+    /// Bindet den Client an ein bekanntes Serverdokument.
+    ///
+    /// Der Weg nach dem Anlegen: ab hier greifen Autosave und Polling genauso
+    /// wie bei einem über die URL geöffneten Dokument.
+    pub fn bind(slug: String, token: String, version: u64) -> Self {
+        WebDoc {
+            slug,
+            token,
+            base: detect_base(),
             last_known_modified: 0.0,
             last_content_hash: 0,
-            version: 0,
+            version,
             base_doc: None,
-        })
+        }
+    }
+
+    /// Legt serverseitig ein neues Dokument an (POST `?new=1`).
+    ///
+    /// Leerer `name` -> der Server vergibt einen zufälligen Slug. `public`
+    /// entscheidet über den Zugriffsschutz: öffentliche Dokumente haben keinen
+    /// Token, eine saubere URL und tauchen im Datei-Browser auf; geschützte
+    /// bekommen einen Token, der in der URL mitwandert.
+    ///
+    /// Liefert (slug, token, version); der Token ist leer, wenn das Dokument
+    /// öffentlich ist.
+    pub async fn create(name: &str, public: bool) -> Result<(String, String, u64), String> {
+        let base = detect_base();
+        let mut url = format!("{}/api.php?new=1", base);
+        if !name.is_empty() {
+            url.push_str(&format!("&name={}", name));
+        }
+        if public {
+            url.push_str("&public=1");
+        }
+
+        let text = post_text(&url).await?;
+        let parsed: CreateResponse =
+            serde_json::from_str(&text).map_err(|e| format!("Antwort unlesbar: {}", e))?;
+
+        // Der Server antwortet mit version=1. Ein fehlendes Feld darf nicht als
+        // 0 durchgehen — der erste PUT schlüge sonst sofort mit 409 fehl.
+        Ok((
+            parsed.slug,
+            parsed.token.unwrap_or_default(),
+            parsed.version.max(1),
+        ))
+    }
+
+    /// Startet das Anlegen im Hintergrund; das Ergebnis kommt über die
+    /// Event-Queue, damit der ui-Loop synchron bleibt.
+    pub fn spawn_create(name: &str, public: bool) {
+        let name = name.to_string();
+        wasm_bindgen_futures::spawn_local(async move {
+            match WebDoc::create(&name, public).await {
+                Ok((slug, token, version)) => push_event(WebEvent::Created {
+                    slug,
+                    token,
+                    version,
+                }),
+                Err(e) => push_event(WebEvent::CreateFailed(e)),
+            }
+        });
     }
 
     /// Liefert die GET-URL für die API.
@@ -430,12 +479,10 @@ pub fn serialize_project(
 // Hilfsfunktionen
 // -----------------------------------------------------------------------------
 
-fn is_valid_slug(s: &str) -> bool {
-    s.len() >= 4
-        && s.len() <= 32
-        && s.chars().all(|c| c.is_ascii_alphanumeric())
-        && s.chars().next().map(|c| c.is_ascii_lowercase()).unwrap_or(false)
-}
+// Die Namensregel steht in `crate::slug` — plattformneutral, damit sie sich
+// nativ testen lässt (`tests/slug_parity.rs` hält sie mit der PHP-Fassung in
+// `web/index.php` zusammen).
+pub use crate::slug::{is_valid as is_valid_slug, slugify};
 
 fn url_param(query: &str, key: &str) -> Option<String> {
     let q = query.trim_start_matches('?');
@@ -517,6 +564,43 @@ async fn fetch_text(url: &str) -> Result<String, String> {
         .map_err(|e| format!("text await: {:?}", e))?
         .as_string()
         .ok_or("text nicht als String")?;
+    Ok(text)
+}
+
+/// POST ohne Body — der Weg von `?new=1`.
+///
+/// Bei einem Fehler wird die Meldung des Servers durchgereicht („Name already
+/// exists“, „Rate limit exceeded“). Ein bloßes „HTTP 409“ stünde im Dialog,
+/// ohne zu sagen, was der Nutzer ändern soll.
+async fn post_text(url: &str) -> Result<String, String> {
+    let window = web_sys::window().ok_or("kein window")?;
+    let mut opts = RequestInit::new();
+    opts.method("POST");
+    opts.mode(RequestMode::Cors);
+
+    let request = Request::new_with_str_and_init(url, &opts)
+        .map_err(|e| format!("request: {:?}", e))?;
+
+    let resp_val = JsFuture::from(window.fetch_with_request(&request))
+        .await
+        .map_err(|e| format!("Server nicht erreichbar: {:?}", e))?;
+    let resp: Response = resp_val.dyn_into().map_err(|e| format!("cast: {:?}", e))?;
+
+    let status = resp.status();
+    let text = JsFuture::from(resp.text().map_err(|e| format!("text: {:?}", e))?)
+        .await
+        .map_err(|e| format!("text await: {:?}", e))?
+        .as_string()
+        .unwrap_or_default();
+
+    if !(200..300).contains(&status) {
+        let msg = serde_json::from_str::<ErrorResponse>(&text)
+            .ok()
+            .map(|e| e.error)
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| format!("HTTP {}", status));
+        return Err(msg);
+    }
     Ok(text)
 }
 
@@ -615,6 +699,27 @@ pub fn spawn_file_list(base: &str) {
 /// Nimmt das Ergebnis von spawn_file_list ab (JSON-String), falls bereit.
 pub fn take_file_list() -> Option<String> {
     FILE_LIST.lock().ok()?.take()
+}
+
+/// Schreibt die Adresszeile auf das frisch angelegte Dokument um.
+///
+/// `replaceState` statt `navigate_to`: Das Dokument liegt bereits im Speicher.
+/// Ein echter Seitenwechsel würde die Anwendung neu laden und den lokalen Stand
+/// verwerfen, bevor der erste PUT durch ist. Der Nutzer bekommt trotzdem eine
+/// teilbare URL — und der Reload-Knopf tut danach das Richtige.
+pub fn update_url(slug: &str, token: &str) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Ok(history) = window.history() else {
+        return;
+    };
+    let url = if token.is_empty() {
+        format!("/{}", slug)
+    } else {
+        format!("/{}?t={}", slug, token)
+    };
+    let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url));
 }
 
 /// Navigiert den Browser zu einem Dokument-Slug (?reload, lädt neu).

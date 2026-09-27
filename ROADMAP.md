@@ -18,13 +18,13 @@ Diese Datei ist die einzige verbindliche Quelle für Status und Planung.
 | Undo/Redo | Snapshot-basiert, max. 200 Einträge | `src/history.rs` |
 | AI-Sync | Native `notify`-File-Watcher, Reload als Undo-Schritt | `src/file_watch.rs` |
 | Multiuser | Drei-Wege-Merge, optimistische Nebenläufigkeit über `version` | `src/merge.rs`, `src/web_sync.rs` |
-| ODT | Import + Export (nativ) mit ZIP-Limit, **ohne Shapes** | `src/odt.rs` |
-| PDF | Import (pdfium) + Export (printpdf), alle Shapes, echte Kurven, eingebettete Schriften | `src/pdf_import.rs`, `src/printing.rs` |
-| SVG | Export: ganze Seite **oder Auswahl**, echte Primitive und Transparenz | `src/svg.rs` |
+| ODT | Import + Export (Desktop **und** Web) mit ZIP-Limit, **ohne Shapes** | `src/odt.rs` |
+| PDF | Import (pdfium, nur Desktop) + Export (printpdf, **auch Web**), alle Shapes, echte Kurven, eingebettete Schriften | `src/pdf_import.rs`, `src/printing.rs` |
+| SVG | Export (Desktop **und** Web): ganze Seite **oder Auswahl**, echte Primitive und Transparenz | `src/svg.rs` |
 | Sicherheit | Shell-Args separiert, Pfad-Checks, ZIP-Limit, Backend-Token | `SECURITY.md` |
-| WASM | Lauffähig inkl. File-I/O über Browser-API und Server-Sync | `src/io.rs` (`web_impl`) |
+| WASM | Mit der EXE **angeglichen**: gleicher Menübaum, gleiche Ausgabebytes. Nur PDF-Import und Drucken fehlen (ausgegraut, Grund im Tooltip) | `src/io.rs` (`web_impl`), `tests/web_parity.rs` |
 | Papier | A3, A4, A5, Letter, Legal · Portrait/Landscape · Mehrere Seiten | `src/model.rs` |
-| Tests | 247 bestanden, `cargo test` | `src/`, `tests/` |
+| Tests | 260 bestanden, `cargo test` | `src/`, `tests/` |
 
 **Offen (bekannt):** kein responsives Mobile, keine CI, ODT-Export ohne
 Shapes/Textformatierung, Text-Rotation wird nicht gerendert, keine eigene
@@ -102,7 +102,12 @@ fehlt. Bestandsaufnahme: [`REVIEW.md`](REVIEW.md).
 - [ ] Mehrseitiger Export
 - [ ] CI-Test-Setup: Sample `.boxdoc` → PDF → neu einlesen → Diff
 
-**WASM:** PDF-Import/-Export im Browser optional via JS-Library (`pdf.js`); nicht Teil von Phase 2.
+**WASM:** ✅ **PDF-Export läuft im Browser** — ohne JS-Library, mit demselben
+`printpdf`-Code wie nativ (`printing::pdf_bytes()`). Dafür war ein Patch an
+printpdf 0.7 nötig, dessen wasm-Datums-Polyfill nicht baut; siehe
+`vendor/printpdf/BOXDOC-PATCH.md`. PDF-**Import** bleibt Desktop-exklusiv
+(pdfium ist eine native C++-Bibliothek); ein zweiter Parser via `pdf.js` würde
+andere Ergebnisse liefern als die EXE und ist deshalb ausdrücklich nicht geplant.
 
 **Agent:** `phase2-pdf`
 
@@ -118,7 +123,9 @@ fehlt. Bestandsaufnahme: [`REVIEW.md`](REVIEW.md).
 - [ ] Viewport-Meta-Tag + `index.html` für Mobile optimiert
 - [ ] Test auf Android Chrome + iOS Safari (manuelles QA)
 - [ ] Last-Sitzung in IndexedDB persistieren (Dok + Scroll-Position)
-- [ ] `Trunk.toml`-Optimierungen (kleinere WASM, lazy-Fonts)
+- [x] Kleineres WASM: `build-web.ps1` baut mit dem Profil `wasm-release`
+      (`opt-level="s"`, `lto`, `panic="abort"`) — 5,7 statt 7,5 MB
+- [ ] Lazy-Fonts (Schriften erst bei Bedarf laden)
 
 **Kein Auto-Save:** Keine automatische Speicherung der Daten — nur die letzte Sitzung zur Wiederherstellung.
 

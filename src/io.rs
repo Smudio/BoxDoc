@@ -427,6 +427,29 @@ mod native {
         None
     }
 
+    /// Schrift laden (TTF/OTF).
+    ///
+    /// Lag früher direkt im Menü-Code in `app.rs`. Hierher gezogen, weil die
+    /// Web-Version dieselbe Aktion braucht und der Menü-Code sonst zwei
+    /// plattformabhängige Zweige hätte.
+    pub fn open_font_dialog(app: &mut EditorApp) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Schrift", &["ttf", "otf"])
+            .set_title("Schriftdatei auswählen")
+            .pick_file()
+        else {
+            return;
+        };
+        let name = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| String::from("custom"));
+        match std::fs::read(&path) {
+            Ok(bytes) => app.add_font_from_bytes(name, bytes),
+            Err(e) => app.set_status(format!("Schrift laden fehlgeschlagen: {e}")),
+        }
+    }
+
     pub fn export_odt_dialog(app: &mut EditorApp) {
         let mut dlg = rfd::FileDialog::new()
             .add_filter("OpenDocument", &["odt"])
@@ -905,7 +928,24 @@ mod web_impl {
         app.set_status(".boxdoc-Datei auswählen…");
     }
 
-    pub fn save_project_dialog(app: &mut EditorApp, _save_as: bool) {
+    /// Speichern im Browser: Ziel ist ein Dokument auf dem Server.
+    ///
+    /// Auf Native schreibt „Speichern" in die gebundene Datei und „Speichern
+    /// unter…" fragt nach einer neuen. Im Browser ist die Entsprechung ein
+    /// Serverdokument: gebunden → hochladen, ungebunden → nach einem Namen
+    /// fragen. Der Download ist bewusst nicht mehr dieser Weg — er erzeugt
+    /// eine Kopie, die von jeder weiteren Änderung nichts mehr mitbekommt,
+    /// und liegt deshalb als `download_project` neben den Exporten.
+    pub fn save_project_dialog(app: &mut EditorApp, save_as: bool) {
+        if save_as {
+            app.open_server_save_dialog();
+        } else {
+            app.save_to_server_now();
+        }
+    }
+
+    /// Lädt den aktuellen Stand als `.boxdoc`-Datei herunter.
+    pub fn download_project(app: &mut EditorApp) {
         let fonts: Vec<ProjectFont> = app
             .fonts
             .map
@@ -927,9 +967,19 @@ mod web_impl {
         let project = Project::for_save(app.doc.clone(), fonts, images);
         match serde_json::to_string_pretty(&project) {
             Ok(json) => {
-                download_file(&json, "dokument.boxdoc", "application/json");
-                app.modified = false;
-                app.set_status("Dokument heruntergeladen.");
+                let name = match &app.web_doc {
+                    Some(w) => format!("{}.boxdoc", w.slug),
+                    None => format!("{}.boxdoc", stem(app)),
+                };
+                download_file(&json, &name, "application/json");
+                // `modified` nur löschen, wenn der Download tatsächlich das
+                // einzige Ziel ist. Hängt das Dokument am Server, wäre der
+                // Stand dort weiterhin älter — und ein grüner Punkt in der
+                // Statuszeile würde das Gegenteil behaupten.
+                if app.web_doc.is_none() {
+                    app.modified = false;
+                }
+                app.set_status(format!("Heruntergeladen: {name}"));
             }
             Err(e) => app.set_status(format!("Fehler: {e}")),
         }
@@ -944,19 +994,35 @@ mod web_impl {
         None // auf Web übernimmt der paste-Listener + take_pending_image
     }
 
-    /// Bild-Export im Browser: Download der PNG-Datei.
+    /// Bild-Export im Browser: Download je ausgewähltem Bild.
+    ///
+    /// Native fragt bei mehreren Bildern nach einem Ordner; im Browser gibt es
+    /// keinen Ordner, also ein Download pro Bild — durchnummeriert wie dort.
     pub fn export_image_dialog(app: &mut EditorApp) {
         let images = app.selected_images();
-        let Some(el) = images.first() else {
+        if images.is_empty() {
             app.set_status("Kein Bild ausgewählt.");
             return;
-        };
-        match app.images.element_png(el) {
-            Some(png) => {
-                download_bytes(&png, "bild.png", "image/png");
-                app.set_status("Bild heruntergeladen.");
-            }
-            None => app.set_status("Bilddaten konnten nicht gelesen werden."),
+        }
+        let stem = stem(app);
+        let single = images.len() == 1;
+        let mut saved = 0usize;
+        for (i, el) in images.iter().enumerate() {
+            let Some(png) = app.images.element_png(el) else {
+                continue;
+            };
+            let name = if single {
+                format!("{stem}_bild.png")
+            } else {
+                format!("{stem}_bild{}.png", i + 1)
+            };
+            download_bytes(&png, &name, "image/png");
+            saved += 1;
+        }
+        match saved {
+            0 => app.set_status("Bilddaten konnten nicht gelesen werden."),
+            1 if single => app.set_status("Bild heruntergeladen."),
+            n => app.set_status(format!("{n} von {} Bildern heruntergeladen.", images.len())),
         }
     }
 
@@ -968,20 +1034,113 @@ mod web_impl {
         false
     }
 
+    /// Namensstamm für Downloads — aus dem geöffneten Dokument, sonst
+    /// „dokument". Auf Web ist `file_path` nur ein Anzeigename (es gibt keinen
+    /// Dateisystem-Pfad), taugt als Stamm aber genauso.
+    fn stem(app: &EditorApp) -> String {
+        app.file_path
+            .as_ref()
+            .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| String::from("dokument"))
+    }
+
     pub fn export_odt_dialog(app: &mut EditorApp) {
-        app.set_status("ODT-Export wird auf Web noch nicht unterstützt.");
+        match crate::odt::export_to_bytes(&app.doc, &app.images) {
+            Ok(bytes) => {
+                let name = format!("{}.odt", stem(app));
+                download_bytes(
+                    &bytes,
+                    &name,
+                    "application/vnd.oasis.opendocument.text",
+                );
+                app.set_status(format!("ODT heruntergeladen: {name}"));
+            }
+            Err(e) => app.set_status(format!("ODT-Export fehlgeschlagen: {e}")),
+        }
     }
 
     pub fn import_odt_dialog(app: &mut EditorApp) {
-        app.set_status("ODT-Import wird auf Web noch nicht unterstützt.");
+        super::trigger_odt_file_input();
+        app.set_status("ODT-Datei auswählen…");
     }
 
-    pub fn import_pdf_dialog(app: &mut EditorApp) {
-        app.set_status("PDF-Import wird auf Web noch nicht unterstützt.");
+    /// PDF-Import bleibt Desktop-exklusiv: er setzt auf pdfium auf, eine
+    /// native C++-Bibliothek. Die gibt es im Browser nicht, und ein zweiter,
+    /// eigener PDF-Parser für Web würde andere Ergebnisse liefern als die EXE —
+    /// genau die Art Abweichung, die diese Angleichung vermeiden soll.
+    pub fn import_pdf_dialog(app: &mut EditorApp, _ctx: &egui::Context) {
+        app.set_status("PDF-Import gibt es nur in der Desktop-Version (braucht pdfium).");
     }
 
-    pub fn export_pdf(app: &mut EditorApp, _path: std::path::PathBuf) {
-        app.set_status("PDF-Export wird auf Web noch nicht unterstützt.");
+    pub fn export_pdf_dialog(app: &mut EditorApp, ctx: &egui::Context) {
+        let layouts = crate::printing::collect_layouts(ctx, &app.doc);
+        match crate::printing::pdf_bytes(&app.doc, &app.images, &layouts) {
+            Ok(bytes) => {
+                let name = format!("{}.pdf", stem(app));
+                download_bytes(&bytes, &name, "application/pdf");
+                app.set_status(format!("PDF heruntergeladen: {name}"));
+            }
+            Err(e) => app.set_status(format!("PDF-Export fehlgeschlagen: {e}")),
+        }
+    }
+
+    /// SVG-Export als Download. `selection_only` exportiert nur die
+    /// ausgewählten Objekte, sonst die aktuelle Seite — dieselbe Regel wie auf
+    /// Native (SVG kennt keine Seiten, also genau das, was auf dem Schirm ist).
+    pub fn export_svg_dialog(
+        app: &mut EditorApp,
+        ctx: &egui::Context,
+        selection_only: bool,
+    ) {
+        let scope = if selection_only {
+            if app.selection.is_empty() {
+                app.set_status("Nichts ausgewählt — es gibt nichts zu exportieren.");
+                return;
+            }
+            crate::svg::Scope::Selection {
+                page: app.page_index,
+                ids: app.selection.clone(),
+            }
+        } else {
+            crate::svg::Scope::Page(app.page_index)
+        };
+
+        let layouts = crate::printing::collect_layouts(ctx, &app.doc);
+        match crate::svg::svg_string(&app.doc, &app.images, &layouts, &scope) {
+            Ok(svg) => {
+                // Seitennummer bzw. „auswahl" mit in den Namen, damit der
+                // zweite Export nicht wie der erste heißt.
+                let suffix = if selection_only {
+                    String::from("auswahl")
+                } else {
+                    format!("seite{}", app.page_index + 1)
+                };
+                let name = format!("{}_{suffix}.svg", stem(app));
+                download_file(&svg, &name, "image/svg+xml");
+                let what = if selection_only {
+                    format!("{} Objekt(e)", app.selection.len())
+                } else {
+                    format!("Seite {}", app.page_index + 1)
+                };
+                app.set_status(format!("SVG heruntergeladen ({what}): {name}"));
+            }
+            Err(e) => app.set_status(format!("SVG-Export fehlgeschlagen: {e}")),
+        }
+    }
+
+    /// Drucken läuft im Browser über den Druckdialog des Browsers — und der
+    /// druckt die HTML-Seite, also den Canvas als Pixelbrei. Der PDF-Export
+    /// ist der richtige Weg und liefert dasselbe Ergebnis wie die EXE.
+    pub fn print_dialog(app: &mut EditorApp, _ctx: &egui::Context) {
+        app.set_status("Drucken: bitte PDF exportieren und das PDF drucken.");
+    }
+
+    /// Schrift laden — Datei-Dialog des Browsers, Ergebnis landet asynchron
+    /// in `PENDING_FONT`.
+    pub fn open_font_dialog(app: &mut EditorApp) {
+        super::trigger_font_file_input();
+        app.set_status("Schriftdatei auswählen…");
     }
 
     fn download_file(content: &str, filename: &str, mime: &str) {
@@ -1039,6 +1198,107 @@ static PENDING_IMAGE: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(
 
 #[cfg(target_arch = "wasm32")]
 static PENDING_PROJECT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Rohbytes einer gewählten ODT-Datei.
+#[cfg(target_arch = "wasm32")]
+static PENDING_ODT: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
+
+/// Name + Rohbytes einer gewählten Schriftdatei (TTF/OTF).
+#[cfg(target_arch = "wasm32")]
+static PENDING_FONT: std::sync::Mutex<Option<(String, Vec<u8>)>> = std::sync::Mutex::new(None);
+
+/// Liest die gewählte Datei binär ein und legt die Bytes über `store` ab.
+///
+/// Die drei Binär-Inputs (Bild, ODT, Schrift) unterschieden sich vorher nur in
+/// zwei Zeilen — Accept-Filter und Zielpuffer. Einmal geschrieben statt dreimal
+/// kopiert, sonst driften die Fassungen auseinander.
+#[cfg(target_arch = "wasm32")]
+fn trigger_binary_file_input(
+    accept: &str,
+    store: impl Fn(&web_sys::File, Vec<u8>) + 'static,
+) {
+    use wasm_bindgen::JsCast;
+    use web_sys::HtmlInputElement;
+
+    let document = web_sys::window().unwrap().document().unwrap();
+    let input = document
+        .create_element("input")
+        .unwrap()
+        .dyn_into::<HtmlInputElement>()
+        .unwrap();
+    input.set_type("file");
+    input.set_accept(accept);
+    input.set_multiple(false);
+
+    // `Rc`, weil der äußere change-Handler ein `FnMut` sein muss (er kann
+    // mehrfach feuern) und `store` daher nicht in den inneren load-Handler
+    // *verschoben* werden darf, sondern geteilt wird.
+    let store = std::rc::Rc::new(store);
+
+    let onchange: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)> =
+        wasm_bindgen::closure::Closure::new(move |event: web_sys::Event| {
+            let input: Option<HtmlInputElement> = event
+                .target()
+                .and_then(|t| t.dyn_into::<HtmlInputElement>().ok());
+            let Some(input) = input else { return };
+            let Some(file) = input.files().and_then(|f| f.get(0)) else {
+                return;
+            };
+
+            let reader = web_sys::FileReader::new().unwrap();
+            let _ = reader.read_as_array_buffer(&file);
+
+            let onload: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)> = {
+                let reader = reader.clone();
+                let store = store.clone();
+                wasm_bindgen::closure::Closure::new(move |_e: web_sys::Event| {
+                    if let Ok(result) = reader.result() {
+                        let bytes = js_sys::Uint8Array::new(&result).to_vec();
+                        store(&file, bytes);
+                    }
+                })
+            };
+            reader.set_onload(Some(onload.as_ref().unchecked_ref()));
+            onload.forget();
+        });
+
+    input.set_onchange(Some(onchange.as_ref().unchecked_ref()));
+    onchange.forget();
+    input.click();
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn trigger_odt_file_input() {
+    trigger_binary_file_input(
+        ".odt,application/vnd.oasis.opendocument.text",
+        |_file, bytes| {
+            if let Ok(mut p) = PENDING_ODT.lock() {
+                *p = Some(bytes);
+            }
+        },
+    );
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn trigger_font_file_input() {
+    trigger_binary_file_input(".ttf,.otf,font/ttf,font/otf", |file, bytes| {
+        // Der Schriftname ist der Dateiname ohne Endung — genauso wie auf
+        // Native (`path.file_stem()`).
+        let name = file.name();
+        let stem = name
+            .rsplit_once('.')
+            .map(|(s, _)| s.to_string())
+            .unwrap_or(name);
+        let stem = if stem.is_empty() {
+            String::from("custom")
+        } else {
+            stem
+        };
+        if let Ok(mut p) = PENDING_FONT.lock() {
+            *p = Some((stem, bytes));
+        }
+    });
+}
 
 #[cfg(target_arch = "wasm32")]
 fn trigger_file_input() {
@@ -1201,5 +1461,27 @@ pub fn take_pending_image() -> Option<Vec<u8>> {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn take_pending_image() -> Option<Vec<u8>> {
+    None
+}
+
+/// Auf Web: Bytes der zuletzt gewählten ODT-Datei.
+#[cfg(target_arch = "wasm32")]
+pub fn take_pending_odt() -> Option<Vec<u8>> {
+    PENDING_ODT.lock().unwrap().take()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn take_pending_odt() -> Option<Vec<u8>> {
+    None
+}
+
+/// Auf Web: Name und Bytes der zuletzt gewählten Schriftdatei.
+#[cfg(target_arch = "wasm32")]
+pub fn take_pending_font() -> Option<(String, Vec<u8>)> {
+    PENDING_FONT.lock().unwrap().take()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn take_pending_font() -> Option<(String, Vec<u8>)> {
     None
 }

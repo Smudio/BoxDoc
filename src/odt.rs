@@ -4,6 +4,7 @@
 //! gültiges Dokument, das LibreOffice/OpenOffice öffnen können, und lesen
 //! einfache ODT-Dateien bestmöglich wieder ein.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs::File;
 use std::io::{Read, Write};
 
@@ -48,9 +49,32 @@ fn esc(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// Baut die ODT-Datei und gibt sie als Bytes zurück.
+///
+/// Getrennt von `export`, weil das Ziel plattformabhängig ist: Native schreibt
+/// eine Datei, der Browser bietet einen Download an. Der Inhalt entsteht in
+/// beiden Fällen hier — so kann die Web-Version nicht anders exportieren als
+/// die EXE.
+pub fn export_to_bytes(doc: &Document, images: &ImageStore) -> Result<Vec<u8>, E> {
+    let mut buf = std::io::Cursor::new(Vec::new());
+    write_odt(&mut buf, doc, images)?;
+    Ok(buf.into_inner())
+}
+
+/// Schreibt die ODT-Datei auf die Platte (Native).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn export(path: &std::path::Path, doc: &Document, images: &ImageStore) -> Result<(), E> {
-    let file = File::create(path)?;
-    let mut zip = ZipWriter::new(file);
+    let bytes = export_to_bytes(doc, images)?;
+    File::create(path)?.write_all(&bytes)?;
+    Ok(())
+}
+
+fn write_odt<W: Write + std::io::Seek>(
+    target: W,
+    doc: &Document,
+    images: &ImageStore,
+) -> Result<(), E> {
+    let mut zip = ZipWriter::new(target);
     let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
     let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
 
@@ -217,10 +241,19 @@ fn format_rad(v: f32) -> String {
     format!("{:.4}", v)
 }
 
-/// Best-Effort-Import einer ODT-Datei.
+/// Best-Effort-Import einer ODT-Datei von der Platte (Native).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn import(path: &std::path::Path) -> Result<(Document, ImageStore, u64), E> {
-    let file = File::open(path)?;
-    let mut archive = ZipArchive::new(file)?;
+    let mut bytes = Vec::new();
+    File::open(path)?.read_to_end(&mut bytes)?;
+    import_from_bytes(&bytes)
+}
+
+/// Best-Effort-Import einer ODT-Datei aus dem Speicher.
+///
+/// Im Browser kommen die Bytes aus einem `FileReader`, es gibt keinen Pfad.
+pub fn import_from_bytes(bytes: &[u8]) -> Result<(Document, ImageStore, u64), E> {
+    let mut archive = ZipArchive::new(std::io::Cursor::new(bytes))?;
 
     // SW-003: Summen-Check über alle Einträge. Blockiert ZIP-Bomben mit vielen
     // kleinen Dateien, die einzeln unter `MAX_EXTRACT_SIZE` liegen.

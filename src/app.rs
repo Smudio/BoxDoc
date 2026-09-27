@@ -491,6 +491,27 @@ pub struct EditorApp {
     /// Status-Text für die Web-Sync-Anzeige.
     #[cfg(target_arch = "wasm32")]
     pub web_status: String,
+
+    // --- Dialog „Am Server speichern" (WASM-only) ---
+    /// Ist der Dialog offen?
+    #[cfg(target_arch = "wasm32")]
+    pub show_server_save: bool,
+    /// Eingetippter Dokumentname (Slug).
+    #[cfg(target_arch = "wasm32")]
+    pub server_save_name: String,
+    /// Soll das Dokument mit einem Token geschützt werden?
+    ///
+    /// Voreinstellung ist „nein": Ein öffentliches Dokument hat eine saubere,
+    /// merkbare URL und steht im Datei-Browser. Der Token-Fall ist die
+    /// Ausnahme und kostet einen Link, den man nicht verlieren darf.
+    #[cfg(target_arch = "wasm32")]
+    pub server_save_protected: bool,
+    /// Fehlermeldung des Servers, direkt am Eingabefeld.
+    #[cfg(target_arch = "wasm32")]
+    pub server_save_error: String,
+    /// Läuft gerade ein Anlege-Request?
+    #[cfg(target_arch = "wasm32")]
+    pub server_save_in_flight: bool,
 }
 
 impl EditorApp {
@@ -601,6 +622,16 @@ impl Default for EditorApp {
             web_save_in_flight: false,
             #[cfg(target_arch = "wasm32")]
             web_status: String::new(),
+            #[cfg(target_arch = "wasm32")]
+            show_server_save: false,
+            #[cfg(target_arch = "wasm32")]
+            server_save_name: String::new(),
+            #[cfg(target_arch = "wasm32")]
+            server_save_protected: false,
+            #[cfg(target_arch = "wasm32")]
+            server_save_error: String::new(),
+            #[cfg(target_arch = "wasm32")]
+            server_save_in_flight: false,
         }
         .with_init_history()
     }
@@ -1200,6 +1231,32 @@ impl EditorApp {
         }
     }
 
+    /// Übernimmt ein ODT aus dem Speicher — der Weg der Web-Version, wo der
+    /// `FileReader` Bytes und keinen Pfad liefert.
+    ///
+    /// Setzt `file_path` bewusst **nicht**: Im Browser gibt es keinen Pfad, und
+    /// ein erfundener würde beim Speichern eine Datei suggerieren, die es nicht
+    /// gibt. Der Import ist ein Konvertierungsschritt, kein Öffnen.
+    fn load_odt_from_bytes(&mut self, bytes: &[u8]) {
+        match crate::odt::import_from_bytes(bytes) {
+            Ok((doc, images, next_id)) => {
+                self.doc = doc;
+                self.images = images;
+                self.fonts = Default::default();
+                self.fonts_dirty = true;
+                self.page_index = 0;
+                self.next_id = next_id;
+                self.clear_selection();
+                self.editing = None;
+                self.crop_mode = false;
+                self.interaction = Interaction::None;
+                self.modified = false;
+                self.set_status("ODT geöffnet.");
+            }
+            Err(e) => self.set_status(format!("Fehler beim ODT-Lesen: {e}")),
+        }
+    }
+
     // ===================================================================
     // Schutz vor Datenverlust
     // ===================================================================
@@ -1679,10 +1736,7 @@ impl EditorApp {
         const POLL_INTERVAL_S: f64 = 2.0;
 
         let now = ctx.input(|i| i.time);
-        let needs_initial_load = match &self.web_doc {
-            Some(w) => !self.web_initial_loaded,
-            None => false,
-        };
+        let needs_initial_load = self.web_doc.is_some() && !self.web_initial_loaded;
 
         // 1) Initiales Laden (einmalig pro WebDoc).
         if needs_initial_load && !self.web_load_in_flight {
@@ -1727,6 +1781,19 @@ impl EditorApp {
                     self.merge_web_doc(&json, version);
                     self.web_dirty_at = Some(0.0); // sofort erneut speichern
                 }
+                WebEvent::Created {
+                    slug,
+                    token,
+                    version,
+                } => {
+                    self.adopt_created_doc(slug, token, version);
+                }
+                WebEvent::CreateFailed(msg) => {
+                    // Der Dialog bleibt offen: Der Nutzer muss den Namen
+                    // ändern können, ohne alles neu einzutippen.
+                    self.server_save_in_flight = false;
+                    self.server_save_error = translate_create_error(&msg);
+                }
                 WebEvent::Error(msg) => {
                     self.web_save_in_flight = false;
                     self.web_load_in_flight = false;
@@ -1770,6 +1837,197 @@ impl EditorApp {
             if let Some(w) = &self.web_doc {
                 w.spawn_poll();
             }
+        }
+    }
+
+    /// Öffnet den Dialog „Am Server speichern".
+    ///
+    /// Der Namensvorschlag kommt aus dem, was schon da ist: der Slug eines
+    /// bereits gebundenen Dokuments, sonst der Dateiname eines geöffneten
+    /// .boxdoc. Ein leerer Vorschlag ist besser als ein erfundener — der Name
+    /// wird Teil der URL und lässt sich später nicht mehr ändern.
+    #[cfg(target_arch = "wasm32")]
+    pub fn open_server_save_dialog(&mut self) {
+        let suggestion = self
+            .web_doc
+            .as_ref()
+            .map(|w| w.slug.clone())
+            .or_else(|| {
+                self.file_path
+                    .as_ref()
+                    .and_then(|p| p.file_stem())
+                    .map(|s| crate::web_sync::slugify(&s.to_string_lossy()))
+            })
+            .unwrap_or_default();
+        self.server_save_name = suggestion;
+        self.server_save_error.clear();
+        self.server_save_in_flight = false;
+        self.show_server_save = true;
+    }
+
+    /// Speichert sofort am Server, ohne auf die Autosave-Ruhezeit zu warten.
+    ///
+    /// Ist noch kein Serverdokument gebunden, führt der Weg über den Dialog:
+    /// „Speichern" ohne Ziel muss erst nach einem Ziel fragen.
+    #[cfg(target_arch = "wasm32")]
+    pub fn save_to_server_now(&mut self) {
+        if self.web_doc.is_none() {
+            self.open_server_save_dialog();
+            return;
+        }
+        if self.web_save_in_flight {
+            // Der laufende PUT trägt den aktuellen Stand noch nicht; `modified`
+            // bleibt gesetzt, also holt die Autosave-Runde ihn gleich nach.
+            self.set_status("Speichern läuft bereits…");
+            return;
+        }
+        let Some(w) = &self.web_doc else { return };
+        self.web_save_in_flight = true;
+        self.web_dirty_since_save = false;
+        self.web_dirty_at = None;
+        w.spawn_save(
+            self.doc.clone(),
+            self.images.clone(),
+            self.fonts.clone(),
+            w.version,
+        );
+        self.web_status = "Speichern…".to_string();
+        self.set_status("Am Server speichern…");
+    }
+
+    /// Bindet die Anwendung an ein frisch angelegtes Serverdokument.
+    ///
+    /// Das Dokument auf dem Server ist leer — der lokale Stand ist die erste
+    /// Änderung darauf und muss unmittelbar hinauf. Deshalb `web_dirty_at`
+    /// auf 0: die Autosave-Runde im selben Frame sieht die Ruhezeit als
+    /// abgelaufen an und schickt den PUT sofort los.
+    #[cfg(target_arch = "wasm32")]
+    fn adopt_created_doc(&mut self, slug: String, token: String, version: u64) {
+        crate::web_sync::update_url(&slug, &token);
+        let share = if token.is_empty() {
+            format!("{}/{}", crate::web_sync::detect_base(), slug)
+        } else {
+            format!("{}/{}?t={}", crate::web_sync::detect_base(), slug, token)
+        };
+
+        self.web_doc = Some(crate::web_sync::WebDoc::bind(slug, token, version));
+        self.web_initial_loaded = true;
+        self.web_load_in_flight = false;
+        self.modified = true;
+        self.web_dirty_since_save = false;
+        self.web_dirty_at = Some(0.0);
+        // Der Datei-Browser soll das neue Dokument sofort zeigen, nicht erst
+        // nach der nächsten Fünf-Sekunden-Runde.
+        self.files_last_refresh = 0.0;
+
+        self.show_server_save = false;
+        self.server_save_in_flight = false;
+        self.server_save_error.clear();
+        self.web_status = "Angelegt, wird hochgeladen…".to_string();
+        self.set_status(format!("Am Server angelegt: {share}"));
+    }
+
+    /// Dialog „Am Server speichern": Name wählen, Zugriff wählen, anlegen.
+    #[cfg(target_arch = "wasm32")]
+    fn show_server_save_dialog(&mut self, ctx: &Context) {
+        if !self.show_server_save {
+            return;
+        }
+
+        // Die Eingabe wird beim Tippen bereinigt statt hinterher abgelehnt:
+        // Wer „Mein Lebenslauf" eintippt, bekommt „meinlebenslauf" zu sehen und
+        // weiß sofort, wie die URL aussehen wird.
+        let mut submit = false;
+        let mut cancel = false;
+
+        egui::Window::new("Am Server speichern")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_min_width(340.0);
+                ui.label("Name des Dokuments (wird Teil der Adresse):");
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut self.server_save_name)
+                        .hint_text("z. B. lebenslauf")
+                        .desired_width(f32::INFINITY),
+                );
+                if resp.changed() {
+                    self.server_save_name = crate::web_sync::slugify(&self.server_save_name);
+                    self.server_save_error.clear();
+                }
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    submit = true;
+                }
+
+                let name = self.server_save_name.clone();
+                let valid = crate::web_sync::is_valid_slug(&name);
+                let base = crate::web_sync::detect_base();
+                if valid {
+                    ui.label(
+                        egui::RichText::new(format!("{base}/{name}"))
+                            .small()
+                            .weak(),
+                    );
+                } else {
+                    ui.label(
+                        egui::RichText::new("4 bis 32 Zeichen, nur a–z und 0–9.")
+                            .small()
+                            .weak(),
+                    );
+                }
+
+                ui.add_space(6.0);
+                ui.checkbox(
+                    &mut self.server_save_protected,
+                    "Mit Token schützen (nicht öffentlich)",
+                )
+                .on_hover_text(
+                    "Ohne Token: saubere Adresse, im Datei-Browser sichtbar.
+                     Mit Token: nur über den vollständigen Link erreichbar —                      geht der Link verloren, ist das Dokument nicht mehr                      aufzurufen.",
+                );
+
+                if !self.server_save_error.is_empty() {
+                    ui.add_space(4.0);
+                    ui.colored_label(
+                        egui::Color32::from_rgb(220, 100, 90),
+                        &self.server_save_error,
+                    );
+                }
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let can_send = valid && !self.server_save_in_flight;
+                    if ui
+                        .add_enabled(can_send, egui::Button::new("Anlegen und speichern"))
+                        .clicked()
+                    {
+                        submit = true;
+                    }
+                    if ui.button("Abbrechen").clicked() {
+                        cancel = true;
+                    }
+                    if self.server_save_in_flight {
+                        ui.spinner();
+                    }
+                });
+            });
+
+        if cancel {
+            self.show_server_save = false;
+            self.server_save_error.clear();
+            return;
+        }
+        if submit
+            && !self.server_save_in_flight
+            && crate::web_sync::is_valid_slug(&self.server_save_name)
+        {
+            self.server_save_in_flight = true;
+            self.server_save_error.clear();
+            crate::web_sync::WebDoc::spawn_create(
+                &self.server_save_name,
+                !self.server_save_protected,
+            );
         }
     }
 
@@ -1952,6 +2210,10 @@ impl eframe::App for EditorApp {
         // Bestätigungsdialog für Aktionen, die Arbeit verwerfen würden.
         self.show_unsaved_dialog(&ctx);
 
+        // Dialog „Am Server speichern" (Browser).
+        #[cfg(target_arch = "wasm32")]
+        self.show_server_save_dialog(&ctx);
+
         self.show_menu(&ctx);
         self.show_files_panel(&ctx);
         self.show_properties(&ctx);
@@ -2002,6 +2264,16 @@ impl eframe::App for EditorApp {
         if let Some(json) = crate::io::take_pending_project() {
             self.load_project_from_json(&json);
         }
+
+        // Web: asynchron geladene ODT-Datei.
+        if let Some(bytes) = crate::io::take_pending_odt() {
+            self.load_odt_from_bytes(&bytes);
+        }
+
+        // Web: asynchron geladene Schriftdatei.
+        if let Some((name, bytes)) = crate::io::take_pending_font() {
+            self.add_font_from_bytes(name, bytes);
+        }
     }
 }
 
@@ -2020,78 +2292,124 @@ impl EditorApp {
                         self.request_action(PendingAction::OpenDialog);
                         ui.close_menu();
                     }
+                    // Speichern schreibt in das gebundene Ziel — auf Native
+                    // eine Datei, im Browser ein Dokument auf dem Server.
+                    // Derselbe Griff, dasselbe Versprechen; nur das Ziel ist
+                    // ein anderes. Der Download bleibt im Browser als eigener
+                    // Eintrag: Er ist ein Export, kein Speichern, denn was
+                    // heruntergeladen wurde, bekommt keine weitere Änderung
+                    // mehr mit.
                     if menu_entry(ui, "Speichern", "Strg+S").clicked() {
                         crate::io::save_project_dialog(self, false);
                         ui.close_menu();
                     }
+                    #[cfg(not(target_arch = "wasm32"))]
                     if menu_entry(ui, "Speichern unter…", "Strg+Umschalt+S").clicked() {
                         crate::io::save_project_dialog(self, true);
                         ui.close_menu();
                     }
-                    #[cfg(not(target_arch = "wasm32"))]
+                    #[cfg(target_arch = "wasm32")]
                     {
-                        ui.separator();
-                        if ui.button("ODT exportieren…").clicked() {
-                            crate::io::export_odt_dialog(self);
-                        }
-                        if ui.button("ODT öffnen…").clicked() {
-                            crate::io::import_odt_dialog(self);
-                        }
-                        ui.separator();
-                        if ui.button("PDF exportieren…").clicked() {
-                            crate::io::export_pdf_dialog(self, ctx);
+                        if menu_entry(ui, "Am Server speichern…", "Strg+Umschalt+S").clicked() {
+                            crate::io::save_project_dialog(self, true);
                             ui.close_menu();
                         }
-                        if ui.button("PDF öffnen…").clicked() {
-                            crate::io::import_pdf_dialog(self, ctx);
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui.button("Seite als SVG exportieren…").clicked() {
-                            crate::io::export_svg_dialog(self, ctx, false);
-                            ui.close_menu();
-                        }
-                        // Ausgegraut statt versteckt: Wer den Eintrag sucht,
-                        // soll sehen, dass es ihn gibt — und woran es hakt.
-                        let has_sel = !self.selection.is_empty();
-                        let label = if has_sel {
-                            format!("Auswahl als SVG exportieren… ({})", self.selection.len())
-                        } else {
-                            String::from("Auswahl als SVG exportieren…")
-                        };
-                        let btn = ui.add_enabled(has_sel, egui::Button::new(label));
-                        if btn.on_disabled_hover_text("Erst Objekte auswählen").clicked() {
-                            crate::io::export_svg_dialog(self, ctx, true);
-                            ui.close_menu();
-                        }
-                        let img_n = self.selected_images().len();
-                        let img_label = if img_n > 1 {
-                            format!("Ausgewählte Bilder speichern… ({img_n})")
-                        } else {
-                            String::from("Ausgewähltes Bild speichern…")
-                        };
-                        let btn = ui.add_enabled(img_n > 0, egui::Button::new(img_label));
-                        if btn
+                        if ui
+                            .button("Herunterladen (.boxdoc)")
                             .on_hover_text(
-                                "Speichert die Bilddatei selbst — PNG oder JPEG, \
-                                 in Originalauflösung.",
+                                "Lädt eine Kopie als Datei herunter. Spätere \
+                                 Änderungen landen nicht darin — dafür ist \
+                                 der Eintrag Speichern da.",
                             )
-                            .on_disabled_hover_text("Erst ein Bild auswählen")
                             .clicked()
                         {
-                            crate::io::export_image_dialog(self);
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if menu_entry(ui, "Drucken…", "Strg+P").clicked() {
-                            crate::io::print_dialog(self, ctx);
+                            crate::io::download_project(self);
                             ui.close_menu();
                         }
                     }
-                    #[cfg(target_arch = "wasm32")]
+                    // Export/Import ist auf Web und Native derselbe Menübaum.
+                    // Beide Plattformen erzeugen dieselben Bytes; nur das Ziel
+                    // unterscheidet sich (Datei vs. Download) — und das steckt
+                    // in `io.rs`, nicht hier. Nur die zwei Einträge, die im
+                    // Browser wirklich nicht gehen (PDF-Import braucht pdfium,
+                    // Drucken den Systemdialog), sind auf Web ausgegraut.
+                    ui.separator();
+                    if ui.button("ODT exportieren…").clicked() {
+                        crate::io::export_odt_dialog(self);
+                    }
+                    if ui.button("ODT öffnen…").clicked() {
+                        crate::io::import_odt_dialog(self);
+                    }
+                    ui.separator();
+                    if ui.button("PDF exportieren…").clicked() {
+                        crate::io::export_pdf_dialog(self, ctx);
+                        ui.close_menu();
+                    }
                     {
-                        ui.separator();
-                        ui.label(egui::RichText::new("ODT/PDF/Druck: nur Desktop-Version").weak());
+                        // Ausgegraut statt versteckt: Wer den Eintrag sucht,
+                        // soll sehen, dass es ihn gibt — und woran es hakt.
+                        let native = cfg!(not(target_arch = "wasm32"));
+                        let btn = ui.add_enabled(native, egui::Button::new("PDF öffnen…"));
+                        if btn
+                            .on_disabled_hover_text(
+                                "PDF-Import braucht pdfium (native Bibliothek) — \
+                                 nur in der Desktop-Version.",
+                            )
+                            .clicked()
+                        {
+                            crate::io::import_pdf_dialog(self, ctx);
+                            ui.close_menu();
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("Seite als SVG exportieren…").clicked() {
+                        crate::io::export_svg_dialog(self, ctx, false);
+                        ui.close_menu();
+                    }
+                    let has_sel = !self.selection.is_empty();
+                    let label = if has_sel {
+                        format!("Auswahl als SVG exportieren… ({})", self.selection.len())
+                    } else {
+                        String::from("Auswahl als SVG exportieren…")
+                    };
+                    let btn = ui.add_enabled(has_sel, egui::Button::new(label));
+                    if btn.on_disabled_hover_text("Erst Objekte auswählen").clicked() {
+                        crate::io::export_svg_dialog(self, ctx, true);
+                        ui.close_menu();
+                    }
+                    let img_n = self.selected_images().len();
+                    let img_label = if img_n > 1 {
+                        format!("Ausgewählte Bilder speichern… ({img_n})")
+                    } else {
+                        String::from("Ausgewähltes Bild speichern…")
+                    };
+                    let btn = ui.add_enabled(img_n > 0, egui::Button::new(img_label));
+                    if btn
+                        .on_hover_text(if cfg!(target_arch = "wasm32") {
+                            "Lädt die Bilddatei selbst herunter (PNG), \
+                             in Originalauflösung."
+                        } else {
+                            "Speichert die Bilddatei selbst — PNG oder JPEG, \
+                             in Originalauflösung."
+                        })
+                        .on_disabled_hover_text("Erst ein Bild auswählen")
+                        .clicked()
+                    {
+                        crate::io::export_image_dialog(self);
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    {
+                        let native = cfg!(not(target_arch = "wasm32"));
+                        if menu_entry_enabled(ui, native, "Drucken…", "Strg+P")
+                            .on_disabled_hover_text(
+                                "Im Browser: PDF exportieren und das PDF drucken.",
+                            )
+                            .clicked()
+                        {
+                            crate::io::print_dialog(self, ctx);
+                            ui.close_menu();
+                        }
                     }
                     ui.separator();
                     ui.menu_button("Einstellungen", |ui| {
@@ -2184,24 +2502,9 @@ impl EditorApp {
                         crate::io::open_image_dialog(self);
                         ui.close_menu();
                     }
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        if ui.button("Schrift laden…").clicked() {
-                            if let Some(path) = rfd::FileDialog::new()
-                                .add_filter("Schrift", &["ttf", "otf"])
-                                .set_title("Schriftdatei auswählen")
-                                .pick_file()
-                            {
-                                let name = path
-                                    .file_stem()
-                                    .map(|s| s.to_string_lossy().to_string())
-                                    .unwrap_or_else(|| String::from("custom"));
-                                if let Ok(bytes) = std::fs::read(&path) {
-                                    self.add_font_from_bytes(name, bytes);
-                                }
-                            }
-                            ui.close_menu();
-                        }
+                    if ui.button("Schrift laden…").clicked() {
+                        crate::io::open_font_dialog(self);
+                        ui.close_menu();
                     }
                     ui.separator();
                     if ui.button("Rechteck").clicked() {
@@ -3079,19 +3382,13 @@ impl EditorApp {
     ///
     /// Wird nur aufgerufen, wenn etwas ausgewählt ist — deshalb kein
     /// ausgegrauter Zustand.
-    /// Der SVG-Export gibt es nur auf Native (Datei-Dialog); „Bild speichern"
-    /// läuft auf Web als Download. Deshalb kann die Zeile auf Web komplett
-    /// leer bleiben — dann entfällt auch der Trenner darüber.
+    ///
+    /// Beide Knöpfe gibt es auf beiden Plattformen; nur das Ziel unterscheidet
+    /// sich (Datei-Dialog vs. Download), und das steckt in `io.rs`.
     fn export_section(&mut self, ui: &mut egui::Ui, ctx: &Context) {
-        let _ = ctx; // auf Web ungenutzt
         let img_n = self.selected_images().len();
-        let svg = cfg!(not(target_arch = "wasm32"));
-        if !svg && img_n == 0 {
-            return;
-        }
         ui.separator();
         ui.horizontal_wrapped(|ui| {
-            #[cfg(not(target_arch = "wasm32"))]
             {
                 let n = self.selection.len();
                 let label = if n == 1 {
@@ -3658,6 +3955,40 @@ impl EditorApp {
                     dot,
                 );
                 ui.label(&self.status);
+
+                // Web: Wohin gespeichert wird und was der Sync gerade tut.
+                // Ohne diese Anzeige war beides unsichtbar — `web_status`
+                // wurde gepflegt, aber nie gezeichnet.
+                #[cfg(target_arch = "wasm32")]
+                {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if !self.web_status.is_empty() {
+                            ui.label(egui::RichText::new(&self.web_status).weak());
+                            ui.separator();
+                        }
+                        match &self.web_doc {
+                            Some(w) => {
+                                let label = if w.token.is_empty() {
+                                    format!("Server: {}", w.slug)
+                                } else {
+                                    format!("Server: {} \u{1f512}", w.slug)
+                                };
+                                ui.label(egui::RichText::new(label).weak())
+                                    .on_hover_text(w.share_url());
+                            }
+                            None => {
+                                ui.label(
+                                    egui::RichText::new("Nicht am Server gespeichert").weak(),
+                                )
+                                .on_hover_text(
+                                    "Strg+S legt das Dokument auf dem Server an; \
+                                     ab dann wird jede Änderung automatisch \
+                                     gespeichert.",
+                                );
+                            }
+                        }
+                    });
+                }
             });
         });
     }
@@ -3933,9 +4264,41 @@ impl EditorApp {
 ///
 /// Ein Kürzel, das niemand sieht, existiert für den Nutzer nicht — deshalb
 /// steht es direkt neben dem Befehl.
+/// Macht aus der englischen API-Meldung einen Satz, der im Dialog weiterhilft.
+///
+/// Der Server spricht Englisch, weil auch KI-Agenten und curl-Aufrufe an
+/// derselben API hängen. Im Dialog steht die Meldung aber direkt unter dem
+/// Feld, das der Nutzer ändern soll — dort muss sie sagen, was zu tun ist.
+#[cfg(target_arch = "wasm32")]
+fn translate_create_error(msg: &str) -> String {
+    if msg.contains("already exists") {
+        "Diesen Namen gibt es schon — bitte einen anderen wählen.".to_string()
+    } else if msg.contains("Invalid name") {
+        "Ungültiger Name: 4 bis 32 Zeichen, nur a–z und 0–9.".to_string()
+    } else if msg.contains("Rate limit") {
+        "Zu viele neue Dokumente in kurzer Zeit. Bitte später erneut versuchen."
+            .to_string()
+    } else {
+        format!("Anlegen fehlgeschlagen: {msg}")
+    }
+}
+
 fn menu_entry(ui: &mut egui::Ui, label: &str, shortcut: &str) -> egui::Response {
+    menu_entry_enabled(ui, true, label, shortcut)
+}
+
+/// Wie `menu_entry`, nur ausgraubar — für Einträge, die es zwar gibt, die aber
+/// gerade nicht gehen (z. B. Drucken im Browser). Ausgegraut statt versteckt:
+/// Wer den Eintrag sucht, soll sehen, dass es ihn gibt, und im Tooltip lesen,
+/// woran es hakt.
+fn menu_entry_enabled(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    label: &str,
+    shortcut: &str,
+) -> egui::Response {
     ui.horizontal(|ui| {
-        let resp = ui.button(label);
+        let resp = ui.add_enabled(enabled, egui::Button::new(label));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.label(egui::RichText::new(shortcut).weak().small());
         });

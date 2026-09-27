@@ -40,13 +40,16 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
+# PDF-Export und ODT laufen auf beiden Plattformen — auf Native in eine Datei,
+# im Browser als Download. Beide Crates sind reines Rust; printpdf braucht dazu
+# den wasm-Patch aus `vendor/printpdf` (siehe `[patch.crates-io]` unten).
+printpdf = "0.7"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # Native-only Dependencies
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 eframe = { version = "0.34", default-features = false, features = ["glow", "wayland", "x11"] }
 rfd = "0.15"
-zip = { version = "2", default-features = false, features = ["deflate"] }
-printpdf = "0.7"
 notify = "6"
 notify-debouncer-mini = "0.4"
 crossbeam-channel = "0.5"
@@ -78,10 +81,19 @@ web-sys = { version = "0.3", features = [
     "Blob", "Url", "FileReader", "File", "FileList", "HtmlInputElement",
     "ClipboardEvent", "DataTransfer", "DataTransferItem",
     # Web-Sync (Backend)
-    "Location", "Request", "RequestInit", "RequestMode", "Response", "Headers",
+    "Location", "History", "Request", "RequestInit", "RequestMode", "Response", "Headers",
     "Navigator",
 ] }
 js-sys = "0.3"
+
+# printpdf 0.7.0 lässt sich unverändert nicht für wasm32 bauen: sein eigener
+# Datums-Polyfill ist unvollständig (`offset()` fehlt, `month()` gibt `u32`
+# statt `u8`). `vendor/printpdf` ist eine Kopie mit genau diesen zwei
+# Korrekturen — beide in `cfg(target_arch = "wasm32")`-Blöcken, der native
+# Codepfad ist unverändert. Begründung und Upgrade-Pfad:
+# `vendor/printpdf/BOXDOC-PATCH.md`.
+[patch.crates-io]
+printpdf = { path = "vendor/printpdf" }
 
 [profile.release]
 opt-level = 2

@@ -218,17 +218,36 @@ src/
 └── svg.rs        SVG-Export (Seite oder Auswahl)
 ```
 
-Die Wahl von Rust + egui ermöglicht später eine Portierung auf Web (WASM) und mobile Geräte.
+Rust + egui laufen sowohl nativ als auch im Browser (WASM) — beide Fassungen
+teilen denselben Code.
 
 ---
 
 ## Build
+
+### Desktop
 
 ```sh
 cargo build --release
 ```
 
 Die fertige Binary liegt unter `target/release/boxdoc`.
+
+### Web
+
+```powershell
+.\build-web.ps1
+```
+
+Das Upload-Paket landet in `web/dist/`; dessen Inhalt auf den Webserver laden.
+`web/` ist die Quelle, `web/dist/` das Ergebnis — Details in
+[`web/README.md`](web/README.md).
+
+Die Web-Version ist mit der Desktop-Version angeglichen: gleicher Menübaum,
+gleiche Ausgabebytes. PDF-, SVG- und ODT-Export laufen im Browser als Download.
+Nicht dabei sind PDF-Import (braucht pdfium, eine native Bibliothek) und Drucken
+(dafür PDF exportieren) — beide Menüeinträge sind ausgegraut und erklären sich
+im Tooltip.
 
 ---
 

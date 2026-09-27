@@ -1,3 +1,14 @@
 [build]
 # Relativer Pfad, damit die App auch in Unterverzeichnissen funktioniert.
 public_url = "./"
+# Build-Ausgabe landet in `web/dist/`, nicht im Wurzelverzeichnis.
+#
+# Warum verschachtelt: Vorher lagen `web/` (handgeschriebene Quellen) und
+# `dist/` (Build-Ergebnis) nebeneinander und sahen wie zwei gleichrangige
+# Web-Ordner aus. Genau das ist passiert — `llms.txt` wurde in beiden von Hand
+# editiert, und `dist/index.php` war wochenlang veraltet. Als `web/dist` ist die
+# Beziehung nicht mehr zu verwechseln: **eine** Quelle, darin ihr Ergebnis.
+#
+# `web/dist/` ist gitignored und wird bei jedem Build komplett neu geschrieben.
+# Änderungen dort sind beim nächsten `trunk build` weg — immer `web/` editieren.
+dist = "web/dist"

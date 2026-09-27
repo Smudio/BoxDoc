@@ -227,7 +227,22 @@ gesnapshottet (nur IDs), um Speicher zu sparen.
   ist er ohne GUI testbar (`tests/pdf_wysiwyg.rs`).
 - **Shell-Aufruf (Windows):** `cmd /C start <pdf>` mit separaten `.arg()`-
   Aufrufen (SW-001 gefixt, siehe `SECURITY.md`).
-- **WASM:** Status-Text "nicht unterstützt".
+- **WASM: läuft**, mit denselben Bytes wie nativ. `pdf_bytes()` baut das PDF,
+  `export_pdf()` ist nur ein Datei-Wrapper darüber; im Browser geht dasselbe
+  Ergebnis als Download raus. Zwei Unterschiede:
+  - Als Fallback-Schrift nimmt WASM `default_font()` (die mitgelieferte
+    egui-Schrift) statt einer Systemschrift von der Platte — es gibt dort keine.
+    Das ist sogar die genauere Wahl, denn genau die sieht der Nutzer am Schirm.
+  - Nicht eingebettete Schriften aus `FONT_CHOICES` liegen als Datei auf der
+    Platte und fallen im Browser auf den Fallback zurück.
+- **printpdf 0.7 braucht dafür einen Patch:** sein wasm-Datums-Polyfill ist
+  unvollständig und lässt sich gar nicht bauen. `vendor/printpdf` ist eine Kopie
+  mit zwei Korrekturen, ausschließlich in `cfg(target_arch = "wasm32")`-Blöcken —
+  der native Codepfad ist unverändert. Details und Upgrade-Pfad:
+  `vendor/printpdf/BOXDOC-PATCH.md`.
+- **Drucken bleibt nativ.** Der Browser-Druckdialog druckt die HTML-Seite, also
+  den Canvas als Pixelbild. Der Menüeintrag ist auf Web ausgegraut statt
+  versteckt, mit dem Hinweis „PDF exportieren und das PDF drucken".
 
 ### 7b. SVG-Export (`src/svg.rs`)
 
@@ -485,11 +500,20 @@ Zusammenspiel mit dem Server (`src/web_sync.rs`):
 
 ### 8. ODT (`src/odt.rs`)
 
-- Import + Export nativ via `zip`-Crate.
+- Import + Export via `zip`-Crate, **auf beiden Plattformen**. `zip` mit
+  `deflate` ist reines Rust und baut für wasm32 ohne Änderung.
+- **Der Kern arbeitet auf Bytes, nicht auf Pfaden:** `export_to_bytes()` und
+  `import_from_bytes()` sind die eigentlichen Implementierungen (über
+  `std::io::Cursor`), `export()`/`import()` sind dünne Datei-Wrapper für Native.
+  Im Browser kommen die Bytes aus einem `FileReader` und gehen als Download
+  wieder raus — es gibt dort keinen Pfad.
 - **ZIP-Bomb-Limit aktiv** (SW-003 gefixt, siehe `SECURITY.md`):
   - `MAX_EXTRACT_SIZE = 100 MB` pro Archiveintrag, geprüft in `read_entry`.
-  - `MAX_ARCHIVE_TOTAL_SIZE = 400 MB` über alle Einträge, geprüft in `import`.
-- WASM: nicht unterstützt.
+  - `MAX_ARCHIVE_TOTAL_SIZE = 400 MB` über alle Einträge, geprüft in
+    `import_from_bytes` — also auf beiden Plattformen, nicht nur nativ.
+- Der ODT-Import setzt `file_path` auf Web bewusst nicht: ohne Dateisystem wäre
+  jeder Pfad erfunden, und beim Speichern würde er eine Datei suggerieren, die es
+  nicht gibt. Der Import ist ein Konvertierungsschritt, kein Öffnen.
 
 ---
 
@@ -506,17 +530,30 @@ Zusammenspiel mit dem Server (`src/web_sync.rs`):
 
 ### Web (WASM)
 
+Die Web-Version ist mit der EXE **angeglichen**: gleicher Menübaum, gleicher
+Code, gleiche Ausgabebytes (abgesichert durch `tests/web_parity.rs`). Der
+Unterschied ist nur das Ziel — nativ ein Dateidialog, im Browser ein Download.
+
 | Feature | Status | Bemerkung |
 |---------|--------|-----------|
 | Grund-Rendering | ✅ | egui/eframe WebRunner |
 | File-I/O (Open/Save) | ✅ | Browser File-Input + Blob-Download |
 | Server-Sync | ✅ | Versions-Polling + Drei-Wege-Merge (`web_sync.rs`, `merge.rs`) |
 | Mehrbenutzer | ✅ | Optimistische Nebenläufigkeit, 409 + Merge |
+| **PDF-Export** | ✅ | `printing::pdf_bytes()` → Download; braucht `vendor/printpdf` |
+| **SVG-Export (Seite + Auswahl)** | ✅ | `svg::svg_string()` → Download |
+| **ODT-Import/-Export** | ✅ | `odt::export_to_bytes()` / `import_from_bytes()` |
+| **Schrift laden (TTF/OTF)** | ✅ | File-Input → `PENDING_FONT` |
+| **Bilder speichern** | ✅ | ein Download je ausgewähltem Bild (PNG) |
 | File-Watcher (lokal) | ❌ | nur nativ; im Web übernimmt das der Server-Sync |
-| ODT-Import/-Export | ❌ | Status-Text; `zip`-Crate nicht in WASM-Variante |
-| PDF-Export | ❌ | Status-Text |
+| PDF-Import | ❌ | braucht pdfium (native C++-Bibliothek); Menüeintrag ausgegraut |
+| Drucken | ❌ | Browser druckt den Canvas als Pixelbild; stattdessen PDF exportieren |
+| Bild in die Zwischenablage (Strg+C) | ❌ | `navigator.clipboard.write` ist async + braucht Nutzergeste |
 | Responsiv / Mobile | ⚠️ | Phase 3 |
 | IndexedDB-Persistenz | ❌ | Phase 3 |
+
+Die drei fehlenden Aktionen sind im Menü **ausgegraut statt versteckt**, mit dem
+Grund im Tooltip. Wer den Eintrag sucht, soll sehen, dass es ihn gibt.
 
 ---
 
@@ -546,9 +583,14 @@ BoxDoc/
 │   └── svg.rs               # SVG-Export, Seite oder Auswahl (~440 Zeilen)
 ├── assets/
 │   └── fonts/               # Inter, Roboto, Lora, JetBrains, Pacifico (TTF)
-├── Cargo.toml              # Dependencies + Profile
-├── Trunk.toml              # WASM-Build-Konfig
-└── index.html              # WASM-Entry-Point
+├── vendor/
+│   └── printpdf/            # printpdf 0.7.0 + wasm-Patch (BOXDOC-PATCH.md)
+├── web/                     # Web-Quelle: PHP-Backend + KI-Dateien (web/README.md)
+│   └── dist/                # Build-Ergebnis, gitignored — NICHT editieren
+├── Cargo.toml              # Dependencies + Profile + [patch.crates-io]
+├── Trunk.toml              # WASM-Build-Konfig (dist = "web/dist")
+├── build-web.ps1           # Web-Build (nutzt Profil wasm-release)
+└── index.html              # WASM-Entry-Point + copy-file-Links nach web/dist/
 ```
 
 > Eine frühere Version dieses Dokuments behauptete eine `src/app/`- und
@@ -565,10 +607,18 @@ BoxDoc/
 
 Siehe `Cargo.toml`. Zusammenfassung:
 
-**Core:** `eframe`, `egui`, `image`, `serde`, `serde_json`, `base64`.
-**Nativ-only:** `rfd`, `zip`, `printpdf`, `notify`, `notify-debouncer-mini`,
-`crossbeam-channel`.
+**Core:** `eframe`, `egui`, `image`, `serde`, `serde_json`, `base64`,
+`printpdf`, `zip`. Die letzten zwei sind bewusst **nicht** nativ-exklusiv: PDF-
+und ODT-Export laufen auch im Browser, beide Crates sind reines Rust.
+**Nativ-only:** `rfd`, `notify`, `notify-debouncer-mini`, `crossbeam-channel`,
+`pdfium-render` + `pdfium-bundled` (native C++-Bibliothek → kein WASM).
 **WASM-only:** `wasm-bindgen`, `wasm-bindgen-futures`, `web-sys`, `js-sys`.
+
+**`[patch.crates-io]`:** `printpdf` zeigt auf `vendor/printpdf`, eine Kopie von
+0.7.0 mit zwei Korrekturen an seinem kaputten wasm-Datums-Polyfill. Ohne den
+Patch baut printpdf für `wasm32-unknown-unknown` überhaupt nicht. Der native
+Codepfad ist unverändert — beide Korrekturen stehen in
+`cfg(target_arch = "wasm32")`-Blöcken. Siehe `vendor/printpdf/BOXDOC-PATCH.md`.
 
 `gloo-storage`/`gloo-file` (in älterer Doku erwähnt) sind **nicht** Teil der
 Dependencies und nicht nötig — IndexedDB wird in Phase 3 über
@@ -605,9 +655,21 @@ cargo build --release                  # Binary: target/release/boxdoc
 ```bash
 rustup target add wasm32-unknown-unknown
 cargo install trunk
-trunk serve                             # Dev-Server
-trunk build --release                   # Production-WASM in dist/
+trunk serve                             # Dev-Server (debug, schnelle Rebuilds)
+.\build-web.ps1                         # Upload-Paket in web/dist/
 ```
+
+`build-web.ps1` ruft `trunk build --release --cargo-profile wasm-release`. Das
+Profil aus `Cargo.toml` (`opt-level="s"`, `lto`, `panic="abort"`) spart rund
+1,8 MB gegenüber dem normalen release-Profil — 5,7 statt 7,5 MB WASM. Es steht
+absichtlich **nicht** in `Trunk.toml`: sonst würde `trunk serve` beim Entwickeln
+auch damit bauen, zwei Minuten pro Rebuild statt Sekunden.
+
+**Ordnerstruktur:** `web/` ist die Quelle (in Git), `web/dist/` das Ergebnis
+(gitignored, wird bei jedem Build neu geschrieben). Vorher lagen beide als
+`web/` und `dist/` nebeneinander im Wurzelverzeichnis und sahen gleichrangig
+aus — mit dem Ergebnis, dass `llms.txt` in beiden von Hand editiert wurde und
+`dist/index.php` wochenlang veraltet war. Siehe `web/README.md`.
 
 ### Cross-Compile
 

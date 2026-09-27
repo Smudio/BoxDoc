@@ -6,19 +6,20 @@
 //! können. Die Binary (`src/main.rs`) verwendet ihre eigenen `mod`-Deklarationen
 //! und ist von diesem Lib-Target unabhängig.
 //!
-//! Wir exposen hier nur Backend-Module ohne UI-Abhängigkeiten. `printing`
-//! und `odt` referenzieren via `crate::app` die Binary-internen UI-Module und
-//! bleiben daher Binary-exklusiv.
+//! Wir exposen hier nur Backend-Module ohne UI-Abhängigkeiten. Einzige
+//! Ausnahme ist `pdf_import`: der setzt auf pdfium auf, eine native
+//! Bibliothek, und bleibt deshalb Native-exklusiv.
 
 pub mod fonts;
 pub mod geometry;
 pub mod history;
 pub mod merge;
 pub mod model;
+pub mod odt;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod pdf_import;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod printing;
+pub mod slug;
 pub mod store;
 pub mod svg;
 pub mod text_layout;

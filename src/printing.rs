@@ -3,15 +3,19 @@
 //! Text wird vektoriell ausgegeben (mit eingebetteter Systemschrift, damit auch
 //! Umlaute korrekt sind). Bilder werden zugeschnitten, gedreht und gerastert
 //! ausgegeben, sodass Drehung und Crop exakt dem Bildschirm entsprechen.
+//! Transparenz bleibt dabei erhalten: Der Alphakanal geht als Soft-Mask
+//! (`/SMask`) mit ins PDF, statt gegen Weiß verrechnet zu werden.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs::File;
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::BufWriter;
 
 use image::{ImageBuffer, RgbaImage};
 use printpdf::{
     path::{PaintMode, WindingOrder},
     BuiltinFont, Color, ColorBits, ColorSpace, Image, ImageTransform, ImageXObject, IndirectFontRef,
-    Line, Mm, PdfDocument, PdfDocumentReference, PdfLayerReference, Point, Polygon, Px, Rgb,
+    Line, Mm, PdfDocument, PdfDocumentReference, PdfLayerReference, Point, Polygon, Px, Rgb, SMask,
 };
 
 use crate::model::{page_size_pt, Document, Element, ElementKind, FontStyle};
@@ -44,12 +48,17 @@ pub fn collect_layouts(
     map
 }
 
-pub fn export_pdf(
-    path: &std::path::Path,
+/// Baut das PDF und gibt es als Bytes zurück.
+///
+/// Der eigentliche Export steckt hier und nicht in `export_pdf`, weil es das
+/// Ziel in zwei Varianten gibt: Native schreibt eine Datei, der Browser bietet
+/// einen Download an. Beide Wege sollen aber dieselben Bytes erzeugen — sonst
+/// weicht das PDF aus der Web-Version irgendwann unbemerkt von dem der EXE ab.
+pub fn pdf_bytes(
     doc: &Document,
     images: &crate::store::ImageStore,
     layouts: &std::collections::HashMap<u64, crate::text_layout::TextLayout>,
-) -> Result<(), E> {
+) -> Result<Vec<u8>, E> {
     let (pw_pt, ph_pt) = page_size_pt(doc.format, doc.orientation);
     let (pw_mm, ph_mm) = (pt_to_mm(pw_pt), pt_to_mm(ph_pt));
 
@@ -93,7 +102,20 @@ pub fn export_pdf(
         }
     }
 
-    document.save(&mut BufWriter::new(File::create(path)?))?;
+    Ok(document.save_to_bytes()?)
+}
+
+/// Schreibt das PDF in eine Datei (Native).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn export_pdf(
+    path: &std::path::Path,
+    doc: &Document,
+    images: &crate::store::ImageStore,
+    layouts: &std::collections::HashMap<u64, crate::text_layout::TextLayout>,
+) -> Result<(), E> {
+    use std::io::Write;
+    let bytes = pdf_bytes(doc, images, layouts)?;
+    BufWriter::new(File::create(path)?).write_all(&bytes)?;
     Ok(())
 }
 
@@ -101,18 +123,31 @@ pub fn export_pdf(
 ///
 /// Gibt einen Fehler zurück, statt zu panicken: Ein fehlgeschlagener PDF-Export
 /// darf niemals die Anwendung mitsamt dem ungespeicherten Dokument abreißen.
+/// Im Browser gibt es keine Systemschriften auf einer Platte. Dort ist
+/// `default_font` (die in der Binary mitgelieferte egui-Schrift) der einzige
+/// sinnvolle Fallback — und der bessere: sie ist genau die, die der Nutzer auf
+/// dem Bildschirm sieht.
 fn system_font(doc: &PdfDocumentReference) -> Result<IndirectFontRef, E> {
-    let candidates: [&str; 4] = [
-        "C:\\Windows\\Fonts\\arial.ttf",
-        "C:\\Windows\\Fonts\\segoeui.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
-    ];
-    for c in candidates {
-        if let Ok(f) = File::open(c) {
-            if let Ok(font) = doc.add_external_font(f) {
-                return Ok(font);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let candidates: [&str; 4] = [
+            "C:\\Windows\\Fonts\\arial.ttf",
+            "C:\\Windows\\Fonts\\segoeui.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+        ];
+        for c in candidates {
+            if let Ok(f) = File::open(c) {
+                if let Ok(font) = doc.add_external_font(f) {
+                    return Ok(font);
+                }
             }
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Some(font) = default_font(doc) {
+            return Ok(font);
         }
     }
     doc.add_builtin_font(BuiltinFont::Helvetica)
@@ -142,12 +177,22 @@ fn load_font_by_key(
         return doc.add_external_font(crate::fonts::bundled_bytes(key)?).ok();
     }
 
-    let path = def
-        .paths_for(style)
-        .iter()
-        .find(|p| std::fs::metadata(p).is_ok())?;
-    let f = File::open(path).ok()?;
-    doc.add_external_font(f).ok()
+    // Nicht eingebettete Schriften liegen als Datei auf der Platte. Im Browser
+    // gibt es die nicht — dort greift der Fallback des Aufrufers.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = style;
+        None
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let path = def
+            .paths_for(style)
+            .iter()
+            .find(|p| std::fs::metadata(p).is_ok())?;
+        let f = File::open(path).ok()?;
+        doc.add_external_font(f).ok()
+    }
 }
 
 /// Bettet die Schrift ein, die egui für `FontFamily::Proportional` benutzt —
@@ -415,14 +460,27 @@ fn draw_image(
     let tx = center_x - bbw / 2.0;
     let ty = center_y - bbh / 2.0;
 
+    // Transparenz bleibt Transparenz: die Farbkanaele gehen unveraendert (also
+    // *nicht* gegen Weiss verrechnet) ins PDF, der Alphakanal wird als
+    // Soft-Mask mitgegeben. Damit deckt ein PNG mit Transparenz das ab, was
+    // darunter liegt, nicht mehr weiss zu.
     let (rw, rh) = (rotated.width(), rotated.height());
     let mut rgb = Vec::with_capacity((rw * rh * 3) as usize);
+    let mut alpha = Vec::with_capacity((rw * rh) as usize);
     for px in rotated.pixels() {
-        let a = px[3] as f32 / 255.0;
-        rgb.push((px[0] as f32 * a + 255.0 * (1.0 - a)) as u8);
-        rgb.push((px[1] as f32 * a + 255.0 * (1.0 - a)) as u8);
-        rgb.push((px[2] as f32 * a + 255.0 * (1.0 - a)) as u8);
+        rgb.push(px[0]);
+        rgb.push(px[1]);
+        rgb.push(px[2]);
+        alpha.push(px[3] as i64);
     }
+    let opaque = alpha.iter().all(|a| *a == 255);
+    let smask = (!opaque).then(|| SMask {
+        width: rw as i64,
+        height: rh as i64,
+        interpolate: false,
+        bits_per_component: 8,
+        matte: alpha,
+    });
 
     let xobj = ImageXObject {
         width: Px(rw as usize),
@@ -433,7 +491,7 @@ fn draw_image(
         image_data: rgb,
         image_filter: None,
         clipping_bbox: None,
-        smask: None,
+        smask,
     };
     let img = Image::from(xobj);
 

@@ -13,9 +13,17 @@ desktop.ini
 # Build artifacts
 build_errors.txt
 
-# Trunk/Web build output (wird via `trunk build` erzeugt)
-/dist
+# Trunk/Web build output (wird via `trunk build` erzeugt).
+# Quelle ist `web/`, Ergebnis ist `web/dist/` — siehe Trunk.toml und web/README.md.
+/web/dist
 
 # Referenz-Version einer älteren/ahead BoxDoc-Variante (nur lokales Vergleichsmaterial)
 /boxdocahead
 /boxdocahead.rar
+
+# Persoenliche Dokumente / lokale Testdateien
+/Lebenslauf*
+/lebenslauf*
+/Test.boxdoc
+/Test.pdf
+/Test*.svg
