@@ -24,6 +24,7 @@ live und kann sie mit Strg+Z zurückrollen.
               { "Custom": { "name": "<Name>", "w_mm": <mm>, "h_mm": <mm> } },
     "orientation": "Portrait" | "Landscape",
     "custom_formats": [ { "name": "<Name>", "w_mm": <mm>, "h_mm": <mm> }, ... ],
+    "background": [r, g, b, a] | null,
     "pages": [
       { "elements": [ <Element>, ... ] }
     ]

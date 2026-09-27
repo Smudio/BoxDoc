@@ -136,6 +136,7 @@ fn sample_doc() -> Document {
         format: PaperFormat::A4,
         orientation: Orientation::Portrait,
         custom_formats: Vec::new(),
+        background: Some([255, 255, 255, 255]),
         pages: vec![page],
     }
 }

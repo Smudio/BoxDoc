@@ -72,6 +72,7 @@ Die `.boxdoc`-Datei direkt mit Datei-Werkzeugen lesen/schreiben. Beim Speichern
               { "Custom": { "name": "<Name>", "w_mm": <mm>, "h_mm": <mm> } },
     "orientation": "Portrait" | "Landscape",
     "custom_formats": [ { "name": "<Name>", "w_mm": <mm>, "h_mm": <mm> }, ... ],
+    "background": [r, g, b, a] | null,
     "pages": [ { "elements": [ <Element>, ... ] } ]
   },
   "images": [ { "id": <u64>, "png_base64": "<base64-PNG-Bytes>" } ]

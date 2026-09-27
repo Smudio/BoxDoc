@@ -22,6 +22,7 @@ mit Strg+Z zurückrollen.
             | { "Custom": { "name": "<Name>", "w_mm": <mm>, "h_mm": <mm> } },
     "orientation": "Portrait" | "Landscape",
     "custom_formats": [ { "name": "<Name>", "w_mm": <mm>, "h_mm": <mm> }, ... ],
+    "background": [r, g, b, a] | null,
     "pages": [ { "elements": [ <Element>, ... ] } ]
   },
   "fonts": [ { "name": "<key>", "ttf_base64": "<base64-TTF-Bytes>" } ],
@@ -32,6 +33,11 @@ mit Strg+Z zurückrollen.
 Reihenfolge in der Datei: `doc` → `_ai_hint` → `fonts` → `images`.
 `fonts[]` und `images[]` enthalten nur base64-Blöcke und stehen am Ende —
 du kannst sie ignorieren, wenn du nur Layout/Text änderst.
+
+**Hintergrund:** `"background"` im `doc`-Objekt ist `[r, g, b, a]`
+(a = Deckkraft, 255 = deckend) oder `null` für gar keinen Hintergrund —
+das exportierte SVG bleibt dann transparent (kein Hintergrund-Rechteck).
+Fehlt das Feld, gilt Weiß.
 
 ### Element
 

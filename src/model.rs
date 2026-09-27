@@ -1119,6 +1119,22 @@ impl Default for Page {
     }
 }
 
+/// Hintergrundfarbe der Seite als `[r, g, b, a]` (Alpha = Deckkraft, 255 =
+/// deckend). `None` = **kein** Hintergrund: Die Seite wird im SVG-Export
+/// ohne Hintergrund-Rechteck geschrieben (transparent), am Bildschirm und
+/// im PDF bleibt es Weiß.
+fn default_background() -> Option<[u8; 4]> {
+    Some([255, 255, 255, 255])
+}
+
+/// Reines Weiß ist der Normalfall und bleibt deshalb aus der Datei raus.
+/// `None` ("kein Hintergrund") wird dagegen als explizites `null`
+/// geschrieben, damit es beim Laden nicht mit dem Weiß-Default verwechselt
+/// werden kann.
+fn bg_is_white(bg: &Option<[u8; 4]>) -> bool {
+    matches!(bg, Some([255, 255, 255, 255]))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Document {
     pub format: PaperFormat,
@@ -1130,6 +1146,9 @@ pub struct Document {
     /// `PaperFormat::Custom`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_formats: Vec<CustomFormat>,
+    /// Seitenhintergrund. Fehlt das Feld in der Datei, gilt Weiß.
+    #[serde(default = "default_background", skip_serializing_if = "bg_is_white")]
+    pub background: Option<[u8; 4]>,
     pub pages: Vec<Page>,
 }
 
@@ -1139,6 +1158,7 @@ impl Default for Document {
             format: PaperFormat::A4,
             orientation: Orientation::Portrait,
             custom_formats: Vec::new(),
+            background: default_background(),
             pages: vec![Page::default()],
         }
     }
@@ -1155,6 +1175,11 @@ impl Document {
     /// (Breite, Höhe) der Seite in Punkten — inklusive Custom-Format.
     pub fn page_size_pt(&self) -> (f32, f32) {
         page_size_pt(&self.format, self.orientation)
+    }
+
+    /// Effektive Hintergrundfarbe — Weiß, wenn keiner gesetzt ist.
+    pub fn background_or_white(&self) -> [u8; 4] {
+        self.background.unwrap_or([255, 255, 255, 255])
     }
 
     /// Trägt ein Custom-Format in die Liste ein (gleicher Name ersetzt) und

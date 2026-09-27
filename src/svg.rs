@@ -31,7 +31,8 @@ pub const SELECTION_MARGIN: f32 = 8.0;
 /// Was in die Datei soll.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
-    /// Eine ganze Seite: Leinwand ist das Seitenformat, mit weißem Grund.
+    /// Eine ganze Seite: Leinwand ist das Seitenformat, mit dem
+    /// Seitenhintergrund des Dokuments (`None` = transparent).
     Page(usize),
     /// Nur diese Objekte einer Seite. Die Leinwand ist ihre gemeinsame
     /// Hüllbox plus [`SELECTION_MARGIN`], der Grund bleibt **durchsichtig** —
@@ -103,13 +104,36 @@ pub fn svg_string(
         env!("CARGO_PKG_VERSION")
     ));
     if opaque {
-        out.push_str(&format!(
-            "  <rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"#ffffff\"/>\n",
-            n(view.min.x),
-            n(view.min.y),
-            n(view.width()),
-            n(view.height()),
-        ));
+        match doc.background {
+            // Kein Hintergrund → gar kein Rechteck: transparentes SVG.
+            None => {}
+            Some([r, g, b, 255]) => {
+                out.push_str(&format!(
+                    "  <rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"#{:02x}{:02x}{:02x}\"/>\n",
+                    n(view.min.x),
+                    n(view.min.y),
+                    n(view.width()),
+                    n(view.height()),
+                    r,
+                    g,
+                    b,
+                ));
+            }
+            Some([r, g, b, a]) => {
+                // Deckkraft mit ins SVG: 0..255 → 0..1.
+                out.push_str(&format!(
+                    "  <rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"#{:02x}{:02x}{:02x}\" fill-opacity=\"{}\"/>\n",
+                    n(view.min.x),
+                    n(view.min.y),
+                    n(view.width()),
+                    n(view.height()),
+                    r,
+                    g,
+                    b,
+                    n(a as f32 / 255.0),
+                ));
+            }
+        }
     }
 
     for el in elements {

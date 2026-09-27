@@ -63,6 +63,34 @@ fn leinwand_einer_seite_ist_das_seitenformat() {
     assert!(svg.contains("fill=\"#ffffff\""), "Seite braucht weißen Grund");
 }
 
+#[test]
+fn hintergrund_keines_ergibt_transparentes_svg() {
+    let mut doc = doc_mit(vec![rechteck(1, 50.0, 50.0)]);
+    doc.background = None;
+    let svg = seite(&doc);
+    // Genau ein Rechteck: das Objekt selbst, kein Hintergrund.
+    assert_eq!(
+        svg.matches("<rect").count(),
+        1,
+        "ohne Hintergrund darf kein Hintergrund-Rechteck stehen:\n{svg}"
+    );
+}
+
+#[test]
+fn hintergrund_farbe_und_deckkraft_landen_im_svg() {
+    let mut doc = doc_mit(vec![]);
+    doc.background = Some([80, 140, 220, 128]);
+    let svg = seite(&doc);
+    assert!(
+        svg.contains("fill=\"#508cdc\""),
+        "Farbe fehlt im Hintergrund:\n{svg}"
+    );
+    assert!(
+        svg.contains(&format!("fill-opacity=\"{}\"", fmt(128.0 / 255.0))),
+        "Deckkraft fehlt im Hintergrund:\n{svg}"
+    );
+}
+
 /// Dieselbe Zahlenformatierung wie im Modul (drei Stellen, ohne Nullen).
 fn fmt(v: f32) -> String {
     let s = format!("{v:.3}");

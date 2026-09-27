@@ -77,6 +77,17 @@ pub fn pdf_bytes(
             document.add_page(Mm(pw_mm), Mm(ph_mm), "Ebene 1")
         };
         let layer = document.get_page(page_idx).get_layer(layer_idx);
+        // Seitenhintergrund als unterste Fläche. "Kein Hintergrund" (None)
+        // lässt das Papier weiß; eine Farbe wird inklusive Deckkraft
+        // (über Weiß gemischt, wie bei Formen) ganzseitig gefüllt.
+        if let Some(bg) = doc.background {
+            let mut bg_el = Element::new_rectangle(0, 0.0, 0.0);
+            bg_el.w = pw_pt;
+            bg_el.h = ph_pt;
+            bg_el.fill_color = bg;
+            bg_el.stroke_width = 0.0;
+            draw_rectangle(&layer, &bg_el, ph_mm);
+        }
         for el in &page.elements {
             match el.kind {
                 ElementKind::Text => {

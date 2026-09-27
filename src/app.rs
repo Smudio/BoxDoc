@@ -2895,6 +2895,7 @@ impl EditorApp {
                         ui.label(
                             "Kein Objekt ausgewählt.\nKlicke oder ziehe ein Auswahl-Rechteck.",
                         );
+                        app.background_section(ui);
                         return;
                     };
                     if app.selection.len() == 1 {
@@ -3391,6 +3392,49 @@ impl EditorApp {
         ui.separator();
         if ui.button("Objekt löschen").clicked() {
             self.delete_selected();
+        }
+    }
+
+    /// Hintergrund der Seite: "Keines" (transparent im SVG) oder eine
+    /// Farbe mit einstellbarer Deckkraft. Wird dokumentweit in der Datei
+    /// gespeichert (`doc.background`).
+    fn background_section(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.label("Hintergrund:");
+        ui.horizontal(|ui| {
+            let none = self.doc.background.is_none();
+            if ui.selectable_label(none, "Keines").clicked() && !none {
+                self.doc.background = None;
+                self.touch();
+            }
+            let colored = self.doc.background.is_some();
+            if ui.selectable_label(colored, "Farbe").clicked() && !colored {
+                self.doc.background = Some([255, 255, 255, 255]);
+                self.touch();
+            }
+            if let Some(col) = self.doc.background {
+                let mut c =
+                    Color32::from_rgba_unmultiplied(col[0], col[1], col[2], col[3]);
+                ui.color_edit_button_srgba(&mut c);
+                let new = c.to_srgba_unmultiplied();
+                if new != col {
+                    self.doc.background = Some(new);
+                    self.touch();
+                }
+            }
+        });
+        // Deckkraft separat — ein Slider ist schneller als der Dialog im
+        // Farbfeld, und genau Transparenz ist hier der häufigste Wunsch.
+        if let Some(col) = self.doc.background {
+            let mut a = col[3] as f32 / 255.0;
+            let resp = ui.add(egui::Slider::new(&mut a, 0.0..=1.0).text("Deckkraft"));
+            let new_a = (a * 255.0).round().clamp(0.0, 255.0) as u8;
+            if resp.changed() || new_a != col[3] {
+                if let Some(b) = self.doc.background.as_mut() {
+                    b[3] = new_a;
+                }
+                self.touch();
+            }
         }
     }
 

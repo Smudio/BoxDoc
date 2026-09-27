@@ -129,6 +129,7 @@ pub fn import_pdf(path: &std::path::Path) -> Result<(Document, ImageStore, u64),
         format,
         orientation,
         custom_formats: Vec::new(),
+        background: Some([255, 255, 255, 255]),
         pages,
     };
     Ok((doc, images, next_id))

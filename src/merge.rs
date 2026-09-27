@@ -129,6 +129,7 @@ pub fn merge_documents(
     // bei beidseitiger Änderung gewinnt lokal.
     let format = pick(&base.format, &local.format, &remote.format);
     let orientation = pick(&base.orientation, &local.orientation, &remote.orientation);
+    let background = pick(&base.background, &local.background, &remote.background);
     // Eigene Formate: Union nach Name; ist ein Name auf beiden Seiten
     // vorhanden, gewinnt lokal (dieselbe Regel wie bei `format`).
     let mut custom_formats = local.custom_formats.clone();
@@ -143,6 +144,7 @@ pub fn merge_documents(
             format,
             orientation,
             custom_formats,
+            background,
             pages,
         },
         report,

@@ -59,6 +59,7 @@ fn doc_with(el: Element) -> Document {
         format: PaperFormat::Legal,
         orientation: Orientation::Landscape,
         custom_formats: Vec::new(),
+        background: Some([255, 255, 255, 255]),
         pages: vec![Page { elements: vec![el] }],
     }
 }
@@ -284,6 +285,7 @@ fn alle_papierformate_und_ausrichtungen_roundtrippen() {
                 format: format.clone(),
                 orientation,
                 custom_formats: Vec::new(),
+                background: Some([255, 255, 255, 255]),
                 pages: vec![Page::default()],
             };
             let json = serde_json::to_string(&doc).unwrap();
@@ -308,6 +310,7 @@ fn eigenes_format_roundtrippt_mit_name_und_massen() {
             w_mm: 210.0,
             h_mm: 100.0,
         }],
+        background: Some([255, 255, 255, 255]),
         pages: vec![Page::default()],
     };
 
@@ -339,6 +342,36 @@ fn altes_format_ohne_custom_felder_laedt_weiterhin() {
     let doc: Document = serde_json::from_str(json).unwrap();
     assert_eq!(doc.format, PaperFormat::A5);
     assert!(doc.custom_formats.is_empty());
+    // Fehlender Hintergrund = Weiß (alter Bestand bleibt unverändert weiß).
+    assert_eq!(doc.background, Some([255, 255, 255, 255]));
+}
+
+#[test]
+fn hintergrund_roundtrip_mit_keines_und_deckkraft() {
+    // Kein Hintergrund: muss als explizites null in der Datei stehen, damit
+    // es nicht mit dem Weiß-Default verwechselt wird.
+    let ohne = Document {
+        background: None,
+        ..Document::default()
+    };
+    let json = serde_json::to_string(&ohne).unwrap();
+    assert!(json.contains("\"background\":null"), "null fehlt: {json}");
+    let back: Document = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.background, None);
+
+    // Farbe mit Deckkraft roundtrippt exakt.
+    let farbig = Document {
+        background: Some([80, 140, 220, 128]),
+        ..Document::default()
+    };
+    let json = serde_json::to_string(&farbig).unwrap();
+    let back: Document = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.background, Some([80, 140, 220, 128]));
+    assert_eq!(back.background_or_white(), [80, 140, 220, 128]);
+
+    // Reines Weiß bleibt unsichtbar in der Datei (Normalfall).
+    let json = serde_json::to_string(&Document::default()).unwrap();
+    assert!(!json.contains("background"), "Weiß soll nicht geschrieben werden: {json}");
 }
 
 #[test]

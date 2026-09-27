@@ -44,6 +44,7 @@ DATEIFORMAT
               { "Custom": { "name": "<Name>", "w_mm": <mm>, "h_mm": <mm> } },
     "orientation": "Portrait" | "Landscape",
     "custom_formats": [ { "name": "<Name>", "w_mm": <mm>, "h_mm": <mm> }, ... ],
+    "background": [r, g, b, a] | null,
     "pages": [ { "elements": [ <Element>, ... ] } ]
   },
   "fonts": [ { "name": "<key>", "ttf_base64": "<base64-TTF-Bytes>" } ],
@@ -64,6 +65,13 @@ w_mm/h_mm sind Breite und Höhe in Millimetern (Hochformat; "orientation"
 tauscht sie). Zusätzlich kannst du in "custom_formats" (Array, gleiche
 Objekte) weitere benannte Formate hinterlegen — sie erscheinen dann im
 Format-Menü und bleiben im Dokument gespeichert.
+
+SEITENHINTERGRUND
+-----------------
+"background" im doc-Objekt: [r,g,b,a] mit a = Deckkraft (255 deckend) oder
+null für GAR KEINEN Hintergrund — das SVG bekommt dann kein Hintergrund-
+Rechteck und bleibt transparent (praktisch für Icons/Schemata). Fehlt das
+Feld, gilt Weiß. Beispiel: "background": [255, 246, 230, 255].
 
 ELEMENT (je nach "kind" sind verschiedene Felder relevant)
 ---------------------------------------------------------

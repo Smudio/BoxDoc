@@ -330,6 +330,7 @@ pub fn import_from_bytes(bytes: &[u8]) -> Result<(Document, ImageStore, u64), E>
         format: PaperFormat::A4,
         orientation: Orientation::Portrait,
         custom_formats: Vec::new(),
+        background: Some([255, 255, 255, 255]),
         pages,
     };
     Ok((doc, images, next_id))

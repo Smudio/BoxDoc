@@ -173,7 +173,12 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
         2.0,
         Color32::from_black_alpha(35),
     );
-    painter.rect_filled(page_rect_screen, 2.0, Color32::WHITE);
+    let [br, bg_, bb, ba] = app.doc.background_or_white();
+    painter.rect_filled(
+        page_rect_screen,
+        2.0,
+        Color32::from_rgba_unmultiplied(br, bg_, bb, ba),
+    );
 
     // --- Reflow: Auto-Höhe der Textboxen ---
     // Textboxen wachsen mit ihrem Inhalt. Das ist abgeleiteter Zustand, kein
