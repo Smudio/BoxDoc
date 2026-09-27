@@ -76,6 +76,11 @@ pub fn mm_to_pt(mm: f32) -> f32 {
     mm * 72.0 / 25.4
 }
 
+/// Punkt -> Millimeter.
+pub fn pt_to_mm(pt: f32) -> f32 {
+    pt * 25.4 / 72.0
+}
+
 /// (Breite, Höhe) der Seite in Punkten.
 pub fn page_size_pt(format: &PaperFormat, orientation: Orientation) -> (f32, f32) {
     let (w, h) = format.size_mm();
@@ -137,6 +142,17 @@ impl Units {
             Units::Mm => val * 72.0 / 25.4,
             Units::Cm => val * 72.0 / 2.54,
             Units::Inch => val * 72.0,
+        }
+    }
+
+    /// Passende Zieh-Geschwindigkeit für DragValue pro Einheit — mm/pt
+    /// ändern sich grob, cm/zoll fein.
+    pub fn drag_speed(self) -> f32 {
+        match self {
+            Units::Pt => 1.0,
+            Units::Mm => 1.0,
+            Units::Cm => 0.1,
+            Units::Inch => 0.05,
         }
     }
 }

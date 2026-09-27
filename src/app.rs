@@ -8,8 +8,8 @@ use serde::Deserialize;
 use crate::canvas::show_canvas;
 use crate::geometry::{local_corners, local_to_world};
 use crate::model::{
-    CustomFormat, Document, Element, ElementKind, Orientation, PageAlign, PaperFormat, ScrollMode,
-    Settings, TextAlign, Units,
+    CustomFormat, Document, Element, ElementKind, mm_to_pt, Orientation, PageAlign, PaperFormat,
+    pt_to_mm, ScrollMode, Settings, TextAlign, Units,
 };
 use crate::store::{FontStore, ImageStore};
 
@@ -351,16 +351,26 @@ pub struct SnapLines {
     pub horizontal: Option<f32>,
 }
 
+/// Zulässiger Bereich für Format-Maße (10–2000 mm), ausgedrückt in der
+/// gewählten Anzeige-Einheit.
+fn custom_fmt_range(unit: Units) -> std::ops::RangeInclusive<f32> {
+    let lo = unit.from_pt(mm_to_pt(10.0));
+    let hi = unit.from_pt(mm_to_pt(2000.0));
+    lo..=hi
+}
+
 /// Bearbeitungsstand des Dialogs für eigene Seitenformate. Bleibt nur im
 /// UI bestehen; erst "Übernehmen" schreibt das Format ins Dokument (und
-/// damit in die Datei).
+/// damit in die Datei). Breite/Höhe werden in der gewählten Einheit
+/// angezeigt und erst beim Übernehmen nach mm umgerechnet.
 #[derive(Debug, Clone, Default)]
 pub struct CustomFormatDraft {
     pub name: String,
-    /// Breite in mm (Hochformat).
-    pub w_mm: f32,
-    /// Höhe in mm (Hochformat).
-    pub h_mm: f32,
+    /// Breite in der gewählten Einheit.
+    pub w: f32,
+    /// Höhe in der gewählten Einheit.
+    pub h: f32,
+    pub unit: Units,
 }
 
 pub struct EditorApp {
@@ -2617,6 +2627,7 @@ impl EditorApp {
                 ui.label("Format:");
                 let mut fmt = self.doc.format.clone();
                 let customs = self.doc.custom_formats.clone();
+                let mut open_custom_dialog = false;
                 egui::ComboBox::from_id_salt("format")
                     .selected_text(self.doc.format.label())
                     .show_ui(ui, |ui| {
@@ -2633,95 +2644,179 @@ impl EditorApp {
                                 ui.selectable_value(&mut fmt, value, label);
                             }
                         }
+                        ui.separator();
+                        if ui.selectable_label(false, "Benutzerdefiniert\u{2026}").clicked() {
+                            open_custom_dialog = true;
+                        }
                     });
                 if fmt != self.doc.format {
                     self.custom_fmt_edit = None;
                     self.doc.format = fmt;
                     self.touch();
                 }
-
-                // Eigenes Format anlegen oder das aktive bearbeiten.
-                let edit_label = if matches!(self.doc.format, PaperFormat::Custom(_)) {
-                    "Eigenes bearbeiten"
-                } else {
-                    "Eigenes\u{2026}"
-                };
-                if ui.button(edit_label).clicked() {
+                if open_custom_dialog && self.custom_fmt_edit.is_none() {
+                    // Frisch öffnen: Startwerte = aktuelle Seitengröße
+                    // (Hochformat), in der im Dokument eingestellten Einheit.
                     let (pw_pt, ph_pt) = self.doc.page_size_pt();
-                    let to_mm = |pt: f32| pt * 25.4 / 72.0;
-                    // Die Maße beziehen sich auf Hochformat; im Querformat
-                    // werden Startwerte getauscht, damit "Übernehmen" exakt
-                    // die aktuelle Seitengröße ergibt.
-                    let (a, b) = (to_mm(pw_pt), to_mm(ph_pt));
+                    let (a, b) = (pt_to_mm(pw_pt), pt_to_mm(ph_pt));
                     let (w_mm, h_mm) = match self.doc.orientation {
                         Orientation::Portrait => (a, b),
                         Orientation::Landscape => (b, a),
                     };
+                    let unit = self.settings.units;
                     let name = match &self.doc.format {
                         PaperFormat::Custom(c) => c.name.clone(),
                         _ => String::from("Eigenes Format"),
                     };
-                    self.custom_fmt_edit = Some(CustomFormatDraft { name, w_mm, h_mm });
+                    self.custom_fmt_edit = Some(CustomFormatDraft {
+                        name,
+                        w: unit.from_pt(mm_to_pt(w_mm)),
+                        h: unit.from_pt(mm_to_pt(h_mm)),
+                        unit,
+                    });
                 }
 
-                if let Some(mut draft) = self.custom_fmt_edit.take() {
-                    ui.separator();
-                    let mut apply = false;
-                    let mut cancel = false;
-                    let mut delete = false;
-                    // Nur löschen, wenn gerade ein eigenes Format aktiv ist.
-                    let active_is_custom = matches!(self.doc.format, PaperFormat::Custom(_));
-                    ui.horizontal(|ui| {
-                        ui.label("Name:");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut draft.name).desired_width(110.0),
-                        );
-                        ui.separator();
-                        ui.label("Breite:");
-                        ui.add(
-                            egui::DragValue::new(&mut draft.w_mm)
-                                .speed(1.0)
-                                .range(10.0..=2000.0)
-                                .suffix(" mm"),
-                        );
-                        ui.label("Höhe:");
-                        ui.add(
-                            egui::DragValue::new(&mut draft.h_mm)
-                                .speed(1.0)
-                                .range(10.0..=2000.0)
-                                .suffix(" mm"),
-                        );
-                        apply = ui.button("Übernehmen").clicked();
-                        cancel = ui.button("Abbrechen").clicked();
-                        if active_is_custom {
-                            delete = ui.button("Löschen").clicked();
-                        }
-                    });
-                    if apply {
-                        let name = draft.name.trim().to_string();
-                        let name = if name.is_empty() {
-                            String::from("Eigenes Format")
-                        } else {
-                            name
-                        };
-                        let fmt = CustomFormat {
-                            name: name.clone(),
-                            w_mm: draft.w_mm.clamp(10.0, 2000.0),
-                            h_mm: draft.h_mm.clamp(10.0, 2000.0),
-                        };
-                        self.doc.apply_custom_format(fmt);
-                        self.touch();
-                        self.set_status(format!("Eigenes Format '{name}' übernommen."));
-                    } else if delete {
-                        if let PaperFormat::Custom(c) = &self.doc.format {
-                            let name = c.name.clone();
-                            self.doc.remove_custom_format(&name);
-                            self.touch();
-                            self.set_status(format!("Eigenes Format '{name}' gelöscht."));
-                        }
-                    } else if !cancel {
-                        // Weiter offen lassen.
-                        self.custom_fmt_edit = Some(draft);
+                // Kleines Fenster zum Anlegen/Bearbeiten eigener Formate.
+                if self.custom_fmt_edit.is_some() {
+                    let mut win_open = true;
+                    egui::Window::new("Eigenes Format")
+                        .open(&mut win_open)
+                        .collapsible(false)
+                        .resizable(false)
+                        .show(ctx, |ui| {
+                            let mut draft = match self.custom_fmt_edit.take() {
+                                Some(d) => d,
+                                None => return,
+                            };
+                            let active_is_custom =
+                                matches!(self.doc.format, PaperFormat::Custom(_));
+                            let mut apply = false;
+                            let mut cancel = false;
+                            let mut delete_active = false;
+                            let mut apply_existing: Option<CustomFormat> = None;
+                            let mut delete_existing: Option<String> = None;
+
+                            // Einheit — Wechsel rechnet die aktuellen Werte mit um.
+                            let prev_unit = draft.unit;
+                            ui.horizontal(|ui| {
+                                ui.label("Einheit:");
+                                for u in Units::all() {
+                                    ui.selectable_value(&mut draft.unit, u, u.label());
+                                }
+                            });
+                            if draft.unit != prev_unit {
+                                let (pw, ph) =
+                                    (prev_unit.to_pt(draft.w), prev_unit.to_pt(draft.h));
+                                draft.w = draft.unit.from_pt(pw);
+                                draft.h = draft.unit.from_pt(ph);
+                            }
+
+                            egui::Grid::new("eigenes_format_felder")
+                                .num_columns(2)
+                                .spacing([8.0, 4.0])
+                                .show(ui, |ui| {
+                                    ui.label("Name:");
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut draft.name)
+                                            .desired_width(130.0),
+                                    );
+                                    ui.end_row();
+                                    ui.label("Breite:");
+                                    ui.add(
+                                        egui::DragValue::new(&mut draft.w)
+                                            .speed(draft.unit.drag_speed())
+                                            .range(custom_fmt_range(draft.unit))
+                                            .suffix(format!(" {}", draft.unit.label())),
+                                    );
+                                    ui.end_row();
+                                    ui.label("Höhe:");
+                                    ui.add(
+                                        egui::DragValue::new(&mut draft.h)
+                                            .speed(draft.unit.drag_speed())
+                                            .range(custom_fmt_range(draft.unit))
+                                            .suffix(format!(" {}", draft.unit.label())),
+                                    );
+                                    ui.end_row();
+                                });
+
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                if ui.button("Übernehmen").clicked() {
+                                    apply = true;
+                                }
+                                if ui.button("Abbrechen").clicked() {
+                                    cancel = true;
+                                }
+                                if active_is_custom && ui.button("Löschen").clicked() {
+                                    delete_active = true;
+                                }
+                            });
+
+                            // Bereits gespeicherte eigene Formate: anklicken
+                            // zum Verwenden, ✕ entfernt sie aus dem Dokument.
+                            if !customs.is_empty() {
+                                ui.separator();
+                                ui.label("Gespeicherte Formate:");
+                                egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
+                                    for c in &customs {
+                                        ui.horizontal(|ui| {
+                                            let label = format!(
+                                                "{} ({:.1}\u{d7}{:.1} mm)",
+                                                c.name, c.w_mm, c.h_mm
+                                            );
+                                            if ui.selectable_label(false, &label).clicked() {
+                                                apply_existing = Some(c.clone());
+                                            }
+                                            if ui.small_button("\u{2715}").clicked() {
+                                                delete_existing = Some(c.name.clone());
+                                            }
+                                        });
+                                    }
+                                });
+                            }
+
+                            if apply {
+                                let name = draft.name.trim().to_string();
+                                let name = if name.is_empty() {
+                                    String::from("Eigenes Format")
+                                } else {
+                                    name
+                                };
+                                let to_mm = |v: f32| pt_to_mm(draft.unit.to_pt(v));
+                                let fmt = CustomFormat {
+                                    name: name.clone(),
+                                    w_mm: to_mm(draft.w).clamp(10.0, 2000.0),
+                                    h_mm: to_mm(draft.h).clamp(10.0, 2000.0),
+                                };
+                                self.doc.apply_custom_format(fmt);
+                                self.touch();
+                                self.set_status(format!(
+                                    "Eigenes Format '{name}' übernommen."
+                                ));
+                            } else if delete_active {
+                                if let PaperFormat::Custom(c) = &self.doc.format {
+                                    let name = c.name.clone();
+                                    self.doc.remove_custom_format(&name);
+                                    self.touch();
+                                    self.set_status(format!(
+                                        "Eigenes Format '{name}' gelöscht."
+                                    ));
+                                }
+                            } else if let Some(c) = apply_existing {
+                                self.doc.format = PaperFormat::Custom(c);
+                                self.touch();
+                            } else if let Some(name) = delete_existing {
+                                self.doc.remove_custom_format(&name);
+                                self.touch();
+                            } else if !cancel {
+                                // Offen lassen — Stand zurückschreiben. Wird
+                                // das Fenster per ✕ geschlossen, räumt die
+                                // Prüfung nach show() auf.
+                                self.custom_fmt_edit = Some(draft);
+                            }
+                        });
+                    if !win_open {
+                        self.custom_fmt_edit = None;
                     }
                 }
 
