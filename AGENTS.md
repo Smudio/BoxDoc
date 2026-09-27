@@ -18,8 +18,10 @@ mit Strg+Z zurückrollen.
 ```json
 {
   "doc": {
-    "format": "A4" | "A3" | "A5" | "Letter" | "Legal",
+    "format": "A4" | "A3" | "A5" | "Letter" | "Legal"
+            | { "Custom": { "name": "<Name>", "w_mm": <mm>, "h_mm": <mm> } },
     "orientation": "Portrait" | "Landscape",
+    "custom_formats": [ { "name": "<Name>", "w_mm": <mm>, "h_mm": <mm> }, ... ],
     "pages": [ { "elements": [ <Element>, ... ] } ]
   },
   "fonts": [ { "name": "<key>", "ttf_base64": "<base64-TTF-Bytes>" } ],

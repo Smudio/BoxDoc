@@ -142,7 +142,7 @@ Projektstruktur:
 
 ```json
 {
-  "doc": { "format": "A4", "orientation": "Portrait", "pages": [...] },
+  "doc": { "format": "A4", "orientation": "Portrait", "custom_formats": [...], "pages": [...] },
   "images": [{ "id": 1, "png_base64": "..." }]
 }
 ```

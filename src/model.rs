@@ -5,24 +5,46 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Benutzerdefiniertes Papierformat: Name plus Maße in Millimetern
+/// (Hochformat). Wird mit Name und Abmessungen in der `.boxdoc`-Datei
+/// gespeichert und ist damit portabel.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CustomFormat {
+    pub name: String,
+    /// Breite in mm (Hochformat).
+    pub w_mm: f32,
+    /// Höhe in mm (Hochformat).
+    pub h_mm: f32,
+}
+
 /// Papierformate. Die Größe wird in Millimetern angegeben (Hochformat).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Custom` trägt seine Definition selbst (Name + Maße), damit überall, wo
+/// nur ein `PaperFormat` übergeben wird, auch ein eigenes Format ohne
+/// Zusatzkontext aufgelöst werden kann.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PaperFormat {
     A3,
     A4,
     A5,
     Letter,
     Legal,
+    /// Benutzerdefiniertes Format. In der Datei:
+    /// `"format": { "Custom": { "name": "...", "w_mm": 210.0, "h_mm": 297.0 } }`
+    Custom(CustomFormat),
 }
 
 impl PaperFormat {
-    pub fn label(self) -> &'static str {
+    /// Anzeigename. Bei Standardformaten die bekannte Bezeichnung, bei
+    /// Custom der vergebene Name.
+    pub fn label(&self) -> String {
         match self {
-            PaperFormat::A3 => "A3",
-            PaperFormat::A4 => "A4",
-            PaperFormat::A5 => "A5",
-            PaperFormat::Letter => "Letter",
-            PaperFormat::Legal => "Legal",
+            PaperFormat::A3 => String::from("A3"),
+            PaperFormat::A4 => String::from("A4"),
+            PaperFormat::A5 => String::from("A5"),
+            PaperFormat::Letter => String::from("Letter"),
+            PaperFormat::Legal => String::from("Legal"),
+            PaperFormat::Custom(c) => c.name.clone(),
         }
     }
 
@@ -31,13 +53,14 @@ impl PaperFormat {
     }
 
     /// (Breite, Höhe) in Millimeter, Hochformat.
-    pub fn size_mm(self) -> (f32, f32) {
+    pub fn size_mm(&self) -> (f32, f32) {
         match self {
             PaperFormat::A3 => (297.0, 420.0),
             PaperFormat::A4 => (210.0, 297.0),
             PaperFormat::A5 => (148.0, 210.0),
             PaperFormat::Letter => (215.9, 279.4),
             PaperFormat::Legal => (215.9, 355.6),
+            PaperFormat::Custom(c) => (c.w_mm, c.h_mm),
         }
     }
 }
@@ -54,7 +77,7 @@ pub fn mm_to_pt(mm: f32) -> f32 {
 }
 
 /// (Breite, Höhe) der Seite in Punkten.
-pub fn page_size_pt(format: PaperFormat, orientation: Orientation) -> (f32, f32) {
+pub fn page_size_pt(format: &PaperFormat, orientation: Orientation) -> (f32, f32) {
     let (w, h) = format.size_mm();
     let (w, h) = (mm_to_pt(w), mm_to_pt(h));
     match orientation {
@@ -1084,6 +1107,13 @@ impl Default for Page {
 pub struct Document {
     pub format: PaperFormat,
     pub orientation: Orientation,
+    /// Vom Nutzer definierte Formate (Name + Maße). Sie werden in der Datei
+    /// mitgespeichert, damit sie in diesem Dokument wieder wählbar bleiben,
+    /// auch wenn gerade ein Standardformat aktiv ist. Das aktuell genutzte
+    /// Custom-Format steckt zusätzlich in `format` (als
+    /// `PaperFormat::Custom`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_formats: Vec<CustomFormat>,
     pub pages: Vec<Page>,
 }
 
@@ -1092,6 +1122,7 @@ impl Default for Document {
         Document {
             format: PaperFormat::A4,
             orientation: Orientation::Portrait,
+            custom_formats: Vec::new(),
             pages: vec![Page::default()],
         }
     }
@@ -1103,5 +1134,31 @@ impl Document {
     }
     pub fn current_page_mut(&mut self, index: usize) -> Option<&mut Page> {
         self.pages.get_mut(index)
+    }
+
+    /// (Breite, Höhe) der Seite in Punkten — inklusive Custom-Format.
+    pub fn page_size_pt(&self) -> (f32, f32) {
+        page_size_pt(&self.format, self.orientation)
+    }
+
+    /// Trägt ein Custom-Format in die Liste ein (gleicher Name ersetzt) und
+    /// macht es zum aktiven Format.
+    pub fn apply_custom_format(&mut self, fmt: CustomFormat) {
+        match self.custom_formats.iter().position(|c| c.name == fmt.name) {
+            Some(i) => self.custom_formats[i] = fmt.clone(),
+            None => self.custom_formats.push(fmt.clone()),
+        }
+        self.format = PaperFormat::Custom(fmt);
+    }
+
+    /// Entfernt ein Custom-Format aus der Liste. Ist es gerade aktiv,
+    /// fällt das Dokument auf A4 Hochformat zurück.
+    pub fn remove_custom_format(&mut self, name: &str) {
+        self.custom_formats.retain(|c| c.name != name);
+        if let PaperFormat::Custom(c) = &self.format {
+            if c.name == name {
+                self.format = PaperFormat::A4;
+            }
+        }
     }
 }

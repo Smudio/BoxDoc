@@ -329,6 +329,7 @@ pub fn import_from_bytes(bytes: &[u8]) -> Result<(Document, ImageStore, u64), E>
     let doc = Document {
         format: PaperFormat::A4,
         orientation: Orientation::Portrait,
+        custom_formats: Vec::new(),
         pages,
     };
     Ok((doc, images, next_id))

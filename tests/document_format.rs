@@ -6,7 +6,8 @@
 //! weil es keine Tests gab.
 
 use boxdoc::model::{
-    Crop, Document, Element, ElementKind, Orientation, PaperFormat, Page, TextAlign, VAlign,
+    Crop, CustomFormat, Document, Element, ElementKind, Orientation, PaperFormat, Page, TextAlign,
+    VAlign,
 };
 
 /// Baut ein Element, in dem **jedes** Feld von seinem Default abweicht.
@@ -57,6 +58,7 @@ fn doc_with(el: Element) -> Document {
     Document {
         format: PaperFormat::Legal,
         orientation: Orientation::Landscape,
+        custom_formats: Vec::new(),
         pages: vec![Page { elements: vec![el] }],
     }
 }
@@ -279,8 +281,9 @@ fn alle_papierformate_und_ausrichtungen_roundtrippen() {
     for format in PaperFormat::all() {
         for orientation in [Orientation::Portrait, Orientation::Landscape] {
             let doc = Document {
-                format,
+                format: format.clone(),
                 orientation,
+                custom_formats: Vec::new(),
                 pages: vec![Page::default()],
             };
             let json = serde_json::to_string(&doc).unwrap();
@@ -289,6 +292,79 @@ fn alle_papierformate_und_ausrichtungen_roundtrippen() {
             assert_eq!(back.orientation, orientation);
         }
     }
+}
+
+#[test]
+fn eigenes_format_roundtrippt_mit_name_und_massen() {
+    let doc = Document {
+        format: PaperFormat::Custom(CustomFormat {
+            name: String::from("Briefshelfter"),
+            w_mm: 210.0,
+            h_mm: 100.0,
+        }),
+        orientation: Orientation::Portrait,
+        custom_formats: vec![CustomFormat {
+            name: String::from("Briefshelfter"),
+            w_mm: 210.0,
+            h_mm: 100.0,
+        }],
+        pages: vec![Page::default()],
+    };
+
+    let json = serde_json::to_string_pretty(&doc).unwrap();
+    // Name und Maße müssen lesbar in der Datei stehen.
+    assert!(json.contains("Briefshelfter"), "Name fehlt im JSON: {json}");
+    assert!(json.contains("w_mm"), "w_mm fehlt im JSON: {json}");
+
+    let back: Document = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.format, doc.format);
+    assert_eq!(back.custom_formats.len(), 1);
+    assert_eq!(back.custom_formats[0].name, "Briefshelfter");
+    assert_eq!(back.custom_formats[0].w_mm, 210.0);
+
+    // (Breite, Höhe) in pt: 210 mm ≈ 595.28 pt.
+    let (w, h) = back.page_size_pt();
+    assert!((w - 210.0 * 72.0 / 25.4).abs() < 0.01, "Breite war {w}");
+    assert!((h - 100.0 * 72.0 / 25.4).abs() < 0.01, "Höhe war {h}");
+}
+
+#[test]
+fn altes_format_ohne_custom_felder_laedt_weiterhin() {
+    // Dokument im alten Schema (kein custom_formats) muss unverändert laden.
+    let json = r#"{
+        "format": "A5",
+        "orientation": "Landscape",
+        "pages": [ { "elements": [] } ]
+    }"#;
+    let doc: Document = serde_json::from_str(json).unwrap();
+    assert_eq!(doc.format, PaperFormat::A5);
+    assert!(doc.custom_formats.is_empty());
+}
+
+#[test]
+fn apply_und_remove_custom_format() {
+    let mut doc = Document::default();
+    doc.apply_custom_format(CustomFormat {
+        name: String::from("Visitenkarte"),
+        w_mm: 85.0,
+        h_mm: 55.0,
+    });
+    assert!(matches!(doc.format, PaperFormat::Custom(_)));
+    assert_eq!(doc.custom_formats.len(), 1);
+
+    // Gleicher Name ersetzt statt zu duplizieren.
+    doc.apply_custom_format(CustomFormat {
+        name: String::from("Visitenkarte"),
+        w_mm: 85.0,
+        h_mm: 56.0,
+    });
+    assert_eq!(doc.custom_formats.len(), 1);
+    assert_eq!(doc.custom_formats[0].h_mm, 56.0);
+
+    doc.remove_custom_format("Visitenkarte");
+    assert!(doc.custom_formats.is_empty());
+    // Aktives Custom-Format entfernt → Rückfall auf A4.
+    assert_eq!(doc.format, PaperFormat::A4);
 }
 
 #[test]
@@ -317,11 +393,11 @@ fn alle_element_arten_roundtrippen() {
 fn seitengroessen_stimmen() {
     // A4 Hochformat = 595 x 842 pt. Wenn diese Umrechnung kippt, stimmt das
     // gesamte Layout inklusive PDF nicht mehr.
-    let (w, h) = boxdoc::model::page_size_pt(PaperFormat::A4, Orientation::Portrait);
+    let (w, h) = boxdoc::model::page_size_pt(&PaperFormat::A4, Orientation::Portrait);
     assert!((w - 595.0).abs() < 1.0, "Breite war {w}");
     assert!((h - 842.0).abs() < 1.0, "Höhe war {h}");
 
-    let (lw, lh) = boxdoc::model::page_size_pt(PaperFormat::A4, Orientation::Landscape);
+    let (lw, lh) = boxdoc::model::page_size_pt(&PaperFormat::A4, Orientation::Landscape);
     assert!((lw - h).abs() < 0.01, "Querformat muss Höhe/Breite tauschen");
     assert!((lh - w).abs() < 0.01);
 }

@@ -40,8 +40,10 @@ DATEIFORMAT
 -----------
 {
   "doc": {
-    "format": "A4" | "A3" | "A5" | "Letter" | "Legal",
+    "format": "A4" | "A3" | "A5" | "Letter" | "Legal" |
+              { "Custom": { "name": "<Name>", "w_mm": <mm>, "h_mm": <mm> } },
     "orientation": "Portrait" | "Landscape",
+    "custom_formats": [ { "name": "<Name>", "w_mm": <mm>, "h_mm": <mm> }, ... ],
     "pages": [ { "elements": [ <Element>, ... ] } ]
   },
   "fonts": [ { "name": "<key>", "ttf_base64": "<base64-TTF-Bytes>" } ],
@@ -52,6 +54,16 @@ Reihenfolge in der Datei: doc → _ai_hint → fonts → images.
 Die Felder `fonts[]` und `images[]` enthalten nur große base64-Blöcke und
 stehen daher am Ende — du kannst sie ignorieren, wenn du nur Layout/Text
 änderst. Beim Speichern schreibt BoxDoc sie unverändert zurück.
+
+EIGENES SEITENFORMAT
+--------------------
+Neben den Standardformaten ("A4", "A3", "A5", "Letter", "Legal") kannst du
+ein eigenes Format setzen:
+  "format": { "Custom": { "name": "Mein Format", "w_mm": 210.0, "h_mm": 297.0 } }
+w_mm/h_mm sind Breite und Höhe in Millimetern (Hochformat; "orientation"
+tauscht sie). Zusätzlich kannst du in "custom_formats" (Array, gleiche
+Objekte) weitere benannte Formate hinterlegen — sie erscheinen dann im
+Format-Menü und bleiben im Dokument gespeichert.
 
 ELEMENT (je nach "kind" sind verschiedene Felder relevant)
 ---------------------------------------------------------

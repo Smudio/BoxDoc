@@ -68,8 +68,10 @@ Die `.boxdoc`-Datei direkt mit Datei-Werkzeugen lesen/schreiben. Beim Speichern
 ```json
 {
   "doc": {
-    "format": "A4" | "A3" | "A5" | "Letter" | "Legal",
+    "format": "A4" | "A3" | "A5" | "Letter" | "Legal" |
+              { "Custom": { "name": "<Name>", "w_mm": <mm>, "h_mm": <mm> } },
     "orientation": "Portrait" | "Landscape",
+    "custom_formats": [ { "name": "<Name>", "w_mm": <mm>, "h_mm": <mm> }, ... ],
     "pages": [ { "elements": [ <Element>, ... ] } ]
   },
   "images": [ { "id": <u64>, "png_base64": "<base64-PNG-Bytes>" } ]

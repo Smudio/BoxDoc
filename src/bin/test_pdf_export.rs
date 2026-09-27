@@ -135,6 +135,7 @@ fn sample_doc() -> Document {
     Document {
         format: PaperFormat::A4,
         orientation: Orientation::Portrait,
+        custom_formats: Vec::new(),
         pages: vec![page],
     }
 }

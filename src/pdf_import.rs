@@ -128,6 +128,7 @@ pub fn import_pdf(path: &std::path::Path) -> Result<(Document, ImageStore, u64),
     let doc = Document {
         format,
         orientation,
+        custom_formats: Vec::new(),
         pages,
     };
     Ok((doc, images, next_id))

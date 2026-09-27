@@ -8,7 +8,7 @@ use egui::{
 
 use crate::app::{CropEdge, EditorApp, Interaction};
 use crate::geometry::{local_corners, local_to_world, rotate_vec, snap_angle_45, world_to_local};
-use crate::model::{page_size_pt, Element, ElementKind, PageAlign, ScrollMode};
+    use crate::model::{Element, ElementKind, PageAlign, ScrollMode};
 use crate::store::ImageStore;
 
 /// Kopie der aktiven Interaktion, damit `&app` nicht während der Bearbeitung
@@ -66,7 +66,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
     let double_clicked = response.double_clicked();
 
     let base = rect.min;
-    let (pw_pt, ph_pt) = page_size_pt(app.doc.format, app.doc.orientation);
+    let (pw_pt, ph_pt) = app.doc.page_size_pt();
     let page_align = app.settings.page_align;
     let rect_w = rect.width();
 
@@ -504,7 +504,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                     //     eines anderen Objekts.
                     let snap_px = 8.0;
                     let (pw_pt_snap, ph_pt_snap) =
-                        page_size_pt(app.doc.format, app.doc.orientation);
+                        app.doc.page_size_pt();
                     let ids: Vec<u64> = starts.iter().map(|(id, _, _)| *id).collect();
                     let (x_targets, y_targets) = collect_snap_targets(
                         &app.doc.pages[page_idx].elements,
@@ -576,7 +576,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
             Active::Resize(id, anchor, rotation, start_aspect) => {
                 // Snap-Parameter vor der Element-Borrow holen.
                 let (pw_pt_snap, ph_pt_snap) =
-                    page_size_pt(app.doc.format, app.doc.orientation);
+                    app.doc.page_size_pt();
                 let zoom_snap = app.view.zoom;
                 let (x_targets, y_targets) = collect_snap_targets(
                     &app.doc.pages[page_idx].elements,
@@ -598,7 +598,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
             }
             Active::ResizeEdge(id, edge, rotation, anchor) => {
                 let (pw_pt_snap, ph_pt_snap) =
-                    page_size_pt(app.doc.format, app.doc.orientation);
+                    app.doc.page_size_pt();
                 let zoom_snap = app.view.zoom;
                 let (x_targets, y_targets) = collect_snap_targets(
                     &app.doc.pages[page_idx].elements,

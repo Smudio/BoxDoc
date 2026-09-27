@@ -18,7 +18,7 @@ use printpdf::{
     Line, Mm, PdfDocument, PdfDocumentReference, PdfLayerReference, Point, Polygon, Px, Rgb, SMask,
 };
 
-use crate::model::{page_size_pt, Document, Element, ElementKind, FontStyle};
+use crate::model::{Document, Element, ElementKind, FontStyle};
 
 type E = Box<dyn std::error::Error>;
 
@@ -59,7 +59,7 @@ pub fn pdf_bytes(
     images: &crate::store::ImageStore,
     layouts: &std::collections::HashMap<u64, crate::text_layout::TextLayout>,
 ) -> Result<Vec<u8>, E> {
-    let (pw_pt, ph_pt) = page_size_pt(doc.format, doc.orientation);
+    let (pw_pt, ph_pt) = doc.page_size_pt();
     let (pw_mm, ph_mm) = (pt_to_mm(pw_pt), pt_to_mm(ph_pt));
 
     let (document, first_page, first_layer) =

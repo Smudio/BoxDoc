@@ -127,13 +127,22 @@ pub fn merge_documents(
 
     // Dokumentweite Eigenschaften: Änderung gegenüber base setzt sich durch,
     // bei beidseitiger Änderung gewinnt lokal.
-    let format = pick(base.format, local.format, remote.format);
-    let orientation = pick(base.orientation, local.orientation, remote.orientation);
+    let format = pick(&base.format, &local.format, &remote.format);
+    let orientation = pick(&base.orientation, &local.orientation, &remote.orientation);
+    // Eigene Formate: Union nach Name; ist ein Name auf beiden Seiten
+    // vorhanden, gewinnt lokal (dieselbe Regel wie bei `format`).
+    let mut custom_formats = local.custom_formats.clone();
+    for rc in &remote.custom_formats {
+        if !custom_formats.iter().any(|lc| lc.name == rc.name) {
+            custom_formats.push(rc.clone());
+        }
+    }
 
     (
         Document {
             format,
             orientation,
+            custom_formats,
             pages,
         },
         report,
@@ -142,11 +151,11 @@ pub fn merge_documents(
 
 /// Wählt zwischen zwei möglicherweise geänderten Werten.
 /// Lokal hat Vorrang, wenn beide vom Basiswert abweichen.
-fn pick<T: PartialEq + Copy>(base: T, local: T, remote: T) -> T {
+fn pick<T: PartialEq + Clone>(base: &T, local: &T, remote: &T) -> T {
     if local != base {
-        local
+        local.clone()
     } else {
-        remote
+        remote.clone()
     }
 }
 

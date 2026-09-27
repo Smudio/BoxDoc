@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 
 use crate::geometry;
-use crate::model::{page_size_pt, Document, Element, ElementKind};
+use crate::model::{Document, Element, ElementKind};
 use crate::text_layout::TextLayout;
 
 /// Rand um eine exportierte Auswahl, in Punkten.
@@ -64,7 +64,7 @@ pub fn svg_string(
     // Welche Elemente, und welche Leinwand?
     let (elements, view, opaque): (Vec<&Element>, egui::Rect, bool) = match scope {
         Scope::Page(_) => {
-            let (w, h) = page_size_pt(doc.format, doc.orientation);
+            let (w, h) = doc.page_size_pt();
             (
                 page.elements.iter().collect(),
                 egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(w, h)),

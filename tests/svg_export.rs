@@ -55,7 +55,7 @@ fn seite(doc: &Document) -> String {
 fn leinwand_einer_seite_ist_das_seitenformat() {
     let doc = doc_mit(vec![rechteck(1, 50.0, 50.0)]);
     let svg = seite(&doc);
-    let (w, h) = boxdoc::model::page_size_pt(doc.format, doc.orientation);
+    let (w, h) = doc.page_size_pt();
     assert!(
         svg.contains(&format!("viewBox=\"0 0 {} {}\"", fmt(w), fmt(h))),
         "viewBox fehlt oder stimmt nicht:\n{svg}"
