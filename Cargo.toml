@@ -45,6 +45,9 @@ base64 = "0.22"
 # den wasm-Patch aus `vendor/printpdf` (siehe `[patch.crates-io]` unten).
 printpdf = "0.7"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# SVG-Import: echter XML-Parser (Native und Web). Die Tests prüfen damit
+# außerdem, dass der SVG-Export wohlgeformt ist.
+quick-xml = "0.36"
 
 # Native-only Dependencies
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -58,13 +61,6 @@ crossbeam-channel = "0.5"
 # sodass keine separate DLL-Auslieferung nötig ist.
 pdfium-render = "0.9"
 pdfium-bundled = "0.1"
-
-# Nur für Tests: echter XML-Parser. Der SVG-Export prüft damit, dass die
-# erzeugte Datei wirklich wohlgeformt ist — selbst gezählte Tags übersehen
-# genau die Fälle, die in der Praxis brechen (Anführungszeichen in
-# Attributen, base64-Blöcke, Unicode).
-[dev-dependencies]
-quick-xml = "0.36"
 
 [features]
 default = []

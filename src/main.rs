@@ -17,6 +17,7 @@ mod settings_io;
 mod slug;
 mod store;
 mod svg;
+mod svg_import;
 mod text_layout;
 mod themes;
 #[cfg(target_arch = "wasm32")]

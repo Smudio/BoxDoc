@@ -22,4 +22,5 @@ pub mod printing;
 pub mod slug;
 pub mod store;
 pub mod svg;
+pub mod svg_import;
 pub mod text_layout;

@@ -52,6 +52,8 @@ BoxDoc verbindet die Einfachheit eines Objekt-Canvas mit der Vertrautheit klassi
 - PDF-Export und Drucken — mit **eingebetteter** Schrift, und zwar genau der,
   mit der auch auf dem Bildschirm gezeichnet wurde
 - SVG-Export — ganze Seite **oder nur die Auswahl**
+- SVG öffnen und importieren — jede Form, jeder Text, jedes Bild wird ein
+  eigenes, bearbeitbares Objekt
 - Bild-Export — ein ausgewähltes Bild als PNG oder JPEG wieder herausspeichern,
   und mit Strg+C auch direkt in die Zwischenablage (Paint, Word, Chat)
 
@@ -160,6 +162,32 @@ Was dabei herauskommt:
 Exportiert wird immer nur die **aktuelle** Seite: SVG kennt keine Seiten,
 alle übereinanderzustapeln wäre nicht das, was jemand will.
 
+### SVG öffnen und importieren
+
+**Datei → SVG öffnen…** macht aus einem SVG ein neues Dokument mit einer
+Seite in genau der Größe der SVG-Leinwand (ein Standardformat, wenn sie
+passt, sonst ein eigenes Format mit dem Dateinamen). Auch `boxdoc datei.svg`
+auf der Kommandozeile öffnet so.
+
+**Datei → SVG importieren…** — oder ein SVG einfach auf die Seite ziehen —
+fügt den Inhalt in die **aktuelle** Seite ein, ausgewählt und rückgängig
+machbar. Ist das SVG so groß wie die Seite, bleibt alles an seiner Stelle,
+sonst landet es mittig.
+
+- Rechtecke, Kreise, Ellipsen und Linien werden wieder genau diese Formen,
+  Pfade echte Bézier-Pfade mit Griffen (auch Bögen), Text wird Text, Bilder
+  werden Bilder (eingebettet oder als Datei neben dem SVG).
+- Verstanden werden Transformationen, Gruppen, `<use>`, Stile als Attribut,
+  `style="…"` und einfache `<style>`-Regeln, Deckkraft auf jeder Ebene.
+- Ein SVG, das BoxDoc selbst exportiert hat, kommt **verlustfrei** zurück —
+  auch umbrochene Absätze bleiben Absätze, statt zu festen Zeilen zu werden.
+- Angenähert wird, was BoxDoc nicht kennt: Verläufe werden zu ihrer
+  Mischfarbe; ein Pfad aus mehreren Teilen wird in Einzelpfade zerlegt
+  (Löcher werden dabei mitgefüllt); Filter und Masken fallen weg.
+
+Gespeichert wird danach als `.boxdoc` — das SVG selbst wird nie
+überschrieben. Zurück ins SVG geht es mit „Seite als SVG exportieren".
+
 ---
 
 ### Bilder herausspeichern und kopieren
@@ -215,7 +243,8 @@ src/
 ├── io.rs         Datei-Dialoge & Projektformat
 ├── odt.rs        OpenDocument-Import/Export
 ├── printing.rs   PDF-Export & Drucken
-└── svg.rs        SVG-Export (Seite oder Auswahl)
+├── svg.rs        SVG-Export (Seite oder Auswahl)
+└── svg_import.rs SVG öffnen & importieren
 ```
 
 Rust + egui laufen sowohl nativ als auch im Browser (WASM) — beide Fassungen

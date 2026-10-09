@@ -29,6 +29,15 @@ enum Active {
     PathHandle(u64, usize, bool),
 }
 
+/// Zoom-Grenzen (1.0 = 100 %). Gemeinsam für Mausrad und die +/−-Knöpfe,
+/// damit beide Wege an derselben Stelle anschlagen.
+///
+/// 2000 % reicht, um Knoten und Griffe kleiner Pfade sauber zu fassen. Viel
+/// weiter wird es teuer: Text wird mit dem Zoomfaktor gerastert, und
+/// riesige Glyphen füllen den Schrift-Atlas.
+pub const ZOOM_MIN: f32 = 0.1;
+pub const ZOOM_MAX: f32 = 20.0;
+
 /// Farbe der Pfad-Werkzeuge und der Knotenbearbeitung.
 const PATH_ACCENT: Color32 = Color32::from_rgb(230, 120, 40);
 /// Anfassradius für Knoten und Griffe, in Bildschirmpixeln.
@@ -91,7 +100,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                 (cur.x - base.x - align_x - pan.x) / zoom,
                 (cur.y - base.y - pan.y) / zoom,
             );
-            let new_zoom = (zoom * zoom_delta).clamp(0.1, 6.0);
+            let new_zoom = (zoom * zoom_delta).clamp(ZOOM_MIN, ZOOM_MAX);
             let new_align_x = compute_align_x(new_zoom);
             app.view.zoom = new_zoom;
             app.view.pan = Vec2::new(
@@ -168,15 +177,17 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
     // --- Seite zeichnen ---
     let page_rect_screen =
         Rect::from_min_size(to_screen(Pos2::ZERO), Vec2::new(pw_pt, ph_pt) * zoom);
+    // Eckig wie ein echtes Blatt — und wie PDF und SVG, die keine
+    // abgerundete Seite kennen.
     painter.rect_filled(
         page_rect_screen.translate(Vec2::new(4.0, 6.0)),
-        2.0,
+        0.0,
         Color32::from_black_alpha(35),
     );
     let [br, bg_, bb, ba] = app.doc.background_or_white();
     painter.rect_filled(
         page_rect_screen,
-        2.0,
+        0.0,
         Color32::from_rgba_unmultiplied(br, bg_, bb, ba),
     );
 

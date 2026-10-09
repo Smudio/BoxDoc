@@ -411,6 +411,27 @@ fn text(out: &mut String, el: &Element, layout: &TextLayout) {
         (false, true) => out.push_str(" text-decoration=\"line-through\""),
         (false, false) => {}
     }
+    // Für BoxDocs eigenen SVG-Import: Originaltext, Boxbreite und
+    // Ausrichtung. Im SVG stehen nur die fertig umbrochenen Zeilen, und
+    // daraus lässt sich nicht zurückgewinnen, welcher Umbruch ein harter war —
+    // ohne diese Angaben käme ein Absatz als Folge fester Zeilen zurück, die
+    // beim Bearbeiten nicht mehr neu umbrechen. Andere Programme ignorieren
+    // `data-*`-Attribute.
+    let align = match el.align {
+        crate::model::TextAlign::Left => "left",
+        crate::model::TextAlign::Center => "center",
+        crate::model::TextAlign::Right => "right",
+    };
+    out.push_str(&format!(
+        " data-boxdoc-w=\"{}\" data-boxdoc-align=\"{align}\" data-boxdoc-text=\"{}\"",
+        n(el.w),
+        // Zeilenumbrüche als Zeichenreferenz: Ein roher Umbruch in einem
+        // Attribut wird beim Lesen zu einem Leerzeichen normalisiert.
+        esc(&el.text)
+            .replace('\r', "")
+            .replace('\n', "&#10;")
+            .replace('\t', "&#9;")
+    ));
     out.push_str(&rotation(el));
     out.push_str(">\n");
 

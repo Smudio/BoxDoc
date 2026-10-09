@@ -517,6 +517,45 @@ mod native {
         }
     }
 
+    /// SVG wählen und als **neues Dokument** öffnen. Läuft über
+    /// `request_action`, der Aufrufer hat ungespeicherte Arbeit also schon
+    /// abgesichert.
+    pub fn open_svg_dialog(app: &mut EditorApp) {
+        let Some(path) = pick_svg("SVG öffnen") else {
+            return;
+        };
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                let name = path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                app.open_svg_bytes(&bytes, &name, path.parent().map(|p| p.to_path_buf()));
+            }
+            Err(e) => app.set_status(format!("Fehler beim SVG-Lesen: {e}")),
+        }
+    }
+
+    /// SVG wählen und seinen Inhalt in die aktuelle Seite einfügen.
+    pub fn import_svg_dialog(app: &mut EditorApp) {
+        let Some(path) = pick_svg("SVG importieren") else {
+            return;
+        };
+        match std::fs::read(&path) {
+            Ok(bytes) => app.import_svg_bytes(&bytes, path.parent().map(|p| p.to_path_buf())),
+            Err(e) => app.set_status(format!("Fehler beim SVG-Lesen: {e}")),
+        }
+    }
+
+    fn pick_svg(title: &str) -> Option<PathBuf> {
+        let path = rfd::FileDialog::new()
+            .add_filter("SVG", &["svg"])
+            .set_title(title)
+            .pick_file()?;
+        ensure_canonicalizable(&path).ok()?;
+        Some(path)
+    }
+
     pub fn import_pdf_dialog(app: &mut EditorApp, ctx: &egui::Context) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("PDF", &["pdf"])
@@ -1093,6 +1132,18 @@ mod web_impl {
         app.set_status("PDF-Import gibt es nur in der Desktop-Version (braucht pdfium).");
     }
 
+    /// SVG-Import läuft im Browser genauso wie auf dem Desktop — derselbe
+    /// Parser, nur die Bytes kommen asynchron über `PENDING_SVG`.
+    pub fn open_svg_dialog(app: &mut EditorApp) {
+        super::trigger_svg_file_input(true);
+        app.set_status("SVG-Datei auswählen…");
+    }
+
+    pub fn import_svg_dialog(app: &mut EditorApp) {
+        super::trigger_svg_file_input(false);
+        app.set_status("SVG-Datei auswählen…");
+    }
+
     pub fn export_pdf_dialog(app: &mut EditorApp, ctx: &egui::Context) {
         let layouts = crate::printing::collect_layouts(ctx, &app.doc);
         match crate::printing::pdf_bytes(&app.doc, &app.images, &layouts) {
@@ -1227,6 +1278,12 @@ static PENDING_ODT: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(No
 #[cfg(target_arch = "wasm32")]
 static PENDING_FONT: std::sync::Mutex<Option<(String, Vec<u8>)>> = std::sync::Mutex::new(None);
 
+/// Name (ohne Endung), Rohbytes und Ziel einer gewählten SVG-Datei:
+/// `true` = als neues Dokument öffnen, `false` = in die Seite importieren.
+#[cfg(target_arch = "wasm32")]
+static PENDING_SVG: std::sync::Mutex<Option<(String, Vec<u8>, bool)>> =
+    std::sync::Mutex::new(None);
+
 /// Liest die gewählte Datei binär ein und legt die Bytes über `store` ab.
 ///
 /// Die drei Binär-Inputs (Bild, ODT, Schrift) unterschieden sich vorher nur in
@@ -1297,6 +1354,20 @@ pub fn trigger_odt_file_input() {
             }
         },
     );
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn trigger_svg_file_input(open: bool) {
+    trigger_binary_file_input(".svg,image/svg+xml", move |file, bytes| {
+        let name = file.name();
+        let stem = name
+            .rsplit_once('.')
+            .map(|(s, _)| s.to_string())
+            .unwrap_or(name);
+        if let Ok(mut p) = PENDING_SVG.lock() {
+            *p = Some((stem, bytes, open));
+        }
+    });
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1503,5 +1574,17 @@ pub fn take_pending_font() -> Option<(String, Vec<u8>)> {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn take_pending_font() -> Option<(String, Vec<u8>)> {
+    None
+}
+
+/// Auf Web: Name, Bytes und Ziel (öffnen/importieren) der zuletzt gewählten
+/// SVG-Datei.
+#[cfg(target_arch = "wasm32")]
+pub fn take_pending_svg() -> Option<(String, Vec<u8>, bool)> {
+    PENDING_SVG.lock().unwrap().take()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn take_pending_svg() -> Option<(String, Vec<u8>, bool)> {
     None
 }

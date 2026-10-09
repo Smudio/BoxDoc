@@ -20,7 +20,7 @@ Diese Datei ist die einzige verbindliche Quelle für Status und Planung.
 | Multiuser | Drei-Wege-Merge, optimistische Nebenläufigkeit über `version` | `src/merge.rs`, `src/web_sync.rs` |
 | ODT | Import + Export (Desktop **und** Web) mit ZIP-Limit, **ohne Shapes** | `src/odt.rs` |
 | PDF | Import (pdfium, nur Desktop) + Export (printpdf, **auch Web**), alle Shapes, echte Kurven, eingebettete Schriften | `src/pdf_import.rs`, `src/printing.rs` |
-| SVG | Export (Desktop **und** Web): ganze Seite **oder Auswahl**, echte Primitive und Transparenz | `src/svg.rs` |
+| SVG | Export (Desktop **und** Web): ganze Seite **oder Auswahl**, echte Primitive und Transparenz · Öffnen + Import (Desktop **und** Web) als bearbeitbare Objekte | `src/svg.rs`, `src/svg_import.rs` |
 | Sicherheit | Shell-Args separiert, Pfad-Checks, ZIP-Limit, Backend-Token | `SECURITY.md` |
 | WASM | Mit der EXE **angeglichen**: gleicher Menübaum, gleiche Ausgabebytes. Nur PDF-Import und Drucken fehlen (ausgegraut, Grund im Tooltip) | `src/io.rs` (`web_impl`), `tests/web_parity.rs` |
 | Papier | A3, A4, A5, Letter, Legal · Portrait/Landscape · Mehrere Seiten | `src/model.rs` |

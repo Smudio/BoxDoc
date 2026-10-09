@@ -314,6 +314,8 @@ pub enum PendingAction {
     OpenDialog,
     /// Konkrete Datei öffnen (Datei-Browser).
     OpenFile(PathBuf),
+    /// Datei-Dialog: SVG als neues Dokument öffnen.
+    OpenSvgDialog,
     /// Anwendung beenden.
     Quit,
 }
@@ -323,7 +325,9 @@ impl PendingAction {
     fn label(&self) -> &'static str {
         match self {
             PendingAction::NewDocument => "Neues Dokument anlegen",
-            PendingAction::OpenDialog | PendingAction::OpenFile(_) => "Anderes Dokument öffnen",
+            PendingAction::OpenDialog
+            | PendingAction::OpenFile(_)
+            | PendingAction::OpenSvgDialog => "Anderes Dokument öffnen",
             PendingAction::Quit => "BoxDoc beenden",
         }
     }
@@ -479,6 +483,10 @@ pub struct EditorApp {
     /// Aktion, die auf die Bestätigung "ungespeicherte Änderungen verwerfen?"
     /// wartet. `None` = kein Dialog offen.
     pub pending_action: Option<PendingAction>,
+    /// Importierte SVG-Texte, die noch mit BoxDocs Schriftmetrik an ihre
+    /// Grundlinie gesetzt werden müssen. Läuft in `ui()`, weil der
+    /// Import-Code keinen `&egui::Context` hat (wie `fonts_dirty`).
+    pub pending_text_fit: Vec<crate::svg_import::TextFix>,
     /// Wurde das Beenden bereits bestätigt? Verhindert, dass der Close-Guard
     /// den Schließvorgang ein zweites Mal abfängt.
     pub quit_confirmed: bool,
@@ -627,6 +635,7 @@ impl Default for EditorApp {
             pending_external_change: false,
             show_conflict_dialog: false,
             pending_action: None,
+            pending_text_fit: Vec::new(),
             quit_confirmed: false,
             #[cfg(not(target_arch = "wasm32"))]
             close_requested_by_app: false,
@@ -1282,6 +1291,127 @@ impl EditorApp {
         }
     }
 
+    /// Liest ein SVG; Bilder, die per Dateiname eingebunden sind, werden
+    /// relativ zu `base_dir` gesucht (im Browser gibt es keins).
+    fn parse_svg(
+        &self,
+        bytes: &[u8],
+        first_id: u64,
+        base_dir: Option<PathBuf>,
+    ) -> Result<crate::svg_import::SvgImport, String> {
+        let text = String::from_utf8_lossy(bytes);
+        let text = text.trim_start_matches('\u{feff}');
+        let load = move |href: &str| -> Option<Vec<u8>> {
+            let dir = base_dir.as_ref()?;
+            std::fs::read(dir.join(href)).ok()
+        };
+        crate::svg_import::parse(text, first_id, &load)
+    }
+
+    /// Öffnet ein SVG als **neues Dokument**: eine Seite in der Größe der
+    /// SVG-Leinwand, jede Form ein eigenes, bearbeitbares Objekt.
+    ///
+    /// `file_path` bleibt bewusst leer. Sonst schriebe Strg+S das
+    /// BoxDoc-JSON in die SVG-Datei und machte sie für jedes andere Programm
+    /// unlesbar. Zurück ins SVG geht es über „Seite als SVG exportieren".
+    pub fn open_svg_bytes(&mut self, bytes: &[u8], name: &str, base_dir: Option<PathBuf>) {
+        let imp = match self.parse_svg(bytes, 1, base_dir) {
+            Ok(i) => i,
+            Err(e) => {
+                self.set_status(format!("Fehler beim SVG-Lesen: {e}"));
+                return;
+            }
+        };
+        let next_id = imp.next_id;
+        let skipped = imp.skipped;
+        let fixes = imp.text_fixes.clone();
+        let (doc, images) = imp.into_document(name);
+        let count = doc.pages[0].elements.len();
+
+        let mut store = ImageStore::default();
+        for img in images {
+            store.insert(img.id, img.png, img.dim);
+        }
+        self.doc = doc;
+        self.images = store;
+        self.fonts = FontStore::default();
+        self.fonts_dirty = true;
+        self.page_index = 0;
+        self.next_id = next_id;
+        self.clear_selection();
+        self.editing = None;
+        self.crop_mode = false;
+        self.interaction = Interaction::None;
+        self.file_path = None;
+        self.modified = false;
+        self.pending_text_fit = fixes;
+        self.history.init(self.snapshot());
+        self.set_status(svg_status("SVG geöffnet", count, skipped));
+    }
+
+    /// Fügt die Objekte eines SVG in die **aktuelle Seite** ein (rückgängig
+    /// machbar) und wählt sie aus, damit man sie gemeinsam verschieben kann.
+    ///
+    /// Ist die SVG-Leinwand so groß wie die Seite — typisch für eine zuvor
+    /// exportierte BoxDoc-Seite —, bleibt alles an seiner Stelle. Sonst wird
+    /// der Inhalt auf der Seite zentriert, wie ein eingefügtes Bild.
+    pub fn import_svg_bytes(&mut self, bytes: &[u8], base_dir: Option<PathBuf>) {
+        let mut imp = match self.parse_svg(bytes, self.next_id, base_dir) {
+            Ok(i) => i,
+            Err(e) => {
+                self.set_status(format!("Fehler beim SVG-Lesen: {e}"));
+                return;
+            }
+        };
+        if imp.elements.is_empty() {
+            self.set_status("Im SVG gibt es nichts, was BoxDoc übernehmen kann.");
+            return;
+        }
+        let (pw, ph) = self.doc.page_size_pt();
+        let same_size = (imp.width - pw).abs() < 1.0 && (imp.height - ph).abs() < 1.0;
+        if !same_size {
+            if let Some(b) = crate::geometry::elements_bounds(imp.elements.iter()) {
+                let d = Vec2::new(pw / 2.0 - b.center().x, ph / 2.0 - b.center().y);
+                for el in &mut imp.elements {
+                    el.x += d.x;
+                    el.y += d.y;
+                }
+                for fix in &mut imp.text_fixes {
+                    fix.anchor_pt += d;
+                }
+            }
+        }
+
+        self.push_history();
+        self.next_id = imp.next_id;
+        for img in imp.images {
+            self.images.insert(img.id, img.png, img.dim);
+        }
+        let ids: Vec<u64> = imp.elements.iter().map(|e| e.id).collect();
+        let count = ids.len();
+        if let Some(page) = self.doc.current_page_mut(self.page_index) {
+            page.elements.extend(imp.elements);
+        }
+        self.pending_text_fit.extend(imp.text_fixes);
+        self.selection = ids;
+        self.editing = None;
+        self.crop_mode = false;
+        self.interaction = Interaction::None;
+        self.modified = true;
+        self.set_status(svg_status("SVG importiert", count, imp.skipped));
+    }
+
+    /// Setzt ausstehende SVG-Texte (siehe `pending_text_fit`).
+    fn apply_pending_text_fit(&mut self, ctx: &Context) {
+        if self.pending_text_fit.is_empty() {
+            return;
+        }
+        let fixes = std::mem::take(&mut self.pending_text_fit);
+        for page in &mut self.doc.pages {
+            crate::svg_import::fit_texts(ctx, &mut page.elements, &fixes);
+        }
+    }
+
     // ===================================================================
     // Schutz vor Datenverlust
     // ===================================================================
@@ -1306,6 +1436,7 @@ impl EditorApp {
         match action {
             PendingAction::NewDocument => self.new_document(),
             PendingAction::OpenDialog => crate::io::open_project_dialog(self),
+            PendingAction::OpenSvgDialog => crate::io::open_svg_dialog(self),
             PendingAction::OpenFile(path) => {
                 #[cfg(not(target_arch = "wasm32"))]
                 self.open_path(path);
@@ -1565,6 +1696,23 @@ impl EditorApp {
     /// Öffnet eine Datei beim Start (z. B. per Kommandozeilen-Argument).
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open_path(&mut self, path: std::path::PathBuf) {
+        let is_svg = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("svg"));
+        if is_svg {
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    let name = path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    self.open_svg_bytes(&bytes, &name, path.parent().map(|p| p.to_path_buf()));
+                }
+                Err(e) => self.set_status(format!("Öffnen fehlgeschlagen: {e}")),
+            }
+            return;
+        }
         match crate::io::load_project(&path) {
             Ok((doc, images, fonts, next_id)) => {
                 self.doc = doc;
@@ -2162,6 +2310,7 @@ impl eframe::App for EditorApp {
             self.fonts_dirty = false;
             crate::fonts::install_with_custom(&ctx, &self.fonts);
         }
+        self.apply_pending_text_fit(&ctx);
 
         // --- Close-Guard -------------------------------------------------
         // Muss VOR allem anderen laufen: wenn der Nutzer das Fenster schließt
@@ -2266,6 +2415,22 @@ impl eframe::App for EditorApp {
             };
 
             if let Some(bytes) = bytes {
+                // SVG vor den Rasterbildern prüfen: Der Browser meldet es als
+                // `image/svg+xml`, und als Bild ließe es sich nicht dekodieren.
+                let is_svg = f.mime == "image/svg+xml"
+                    || f
+                        .path
+                        .as_ref()
+                        .and_then(|p| p.extension())
+                        .and_then(|e| e.to_str())
+                        .is_some_and(|e| e.eq_ignore_ascii_case("svg"))
+                    || f.name.to_ascii_lowercase().ends_with(".svg");
+                if is_svg {
+                    let dir = f.path.as_ref().and_then(|p| p.parent()).map(|p| p.to_path_buf());
+                    self.import_svg_bytes(&bytes, dir);
+                    had_drops = true;
+                    continue;
+                }
                 let is_image = bytes.starts_with(&[0x89, b'P', b'N', b'G'])
                     || bytes.starts_with(&[0xFF, 0xD8, 0xFF])
                     || bytes.starts_with(b"BM")
@@ -2288,6 +2453,16 @@ impl eframe::App for EditorApp {
         // Web: asynchron geladene Projekt-Datei (.boxdoc).
         if let Some(json) = crate::io::take_pending_project() {
             self.load_project_from_json(&json);
+        }
+
+        // Web: asynchron geladene SVG-Datei (öffnen oder importieren).
+        if let Some((name, bytes, open)) = crate::io::take_pending_svg() {
+            if open {
+                self.open_svg_bytes(&bytes, &name, None);
+            } else {
+                self.import_svg_bytes(&bytes, None);
+            }
+            self.apply_pending_text_fit(&ctx);
         }
 
         // Web: asynchron geladene ODT-Datei.
@@ -2387,6 +2562,29 @@ impl EditorApp {
                         }
                     }
                     ui.separator();
+                    if ui
+                        .button("SVG öffnen…")
+                        .on_hover_text(
+                            "Öffnet ein SVG als neues Dokument. Jede Form, jeder \
+                             Text und jedes Bild wird ein eigenes Objekt, das \
+                             sich bearbeiten lässt.",
+                        )
+                        .clicked()
+                    {
+                        self.request_action(PendingAction::OpenSvgDialog);
+                        ui.close_menu();
+                    }
+                    if ui
+                        .button("SVG importieren…")
+                        .on_hover_text(
+                            "Fügt den Inhalt eines SVG in die aktuelle Seite ein \
+                             (rückgängig machbar). Geht auch per Drag & Drop.",
+                        )
+                        .clicked()
+                    {
+                        crate::io::import_svg_dialog(self);
+                        ui.close_menu();
+                    }
                     if ui.button("Seite als SVG exportieren…").clicked() {
                         crate::io::export_svg_dialog(self, ctx, false);
                         ui.close_menu();
@@ -2834,10 +3032,10 @@ impl EditorApp {
                 ui.separator();
                 ui.label(format!("{:.0}%", self.view.zoom * 100.0));
                 if ui.button("-").clicked() {
-                    self.view.zoom = (self.view.zoom * 0.9).max(0.1);
+                    self.view.zoom = (self.view.zoom * 0.9).max(crate::canvas::ZOOM_MIN);
                 }
                 if ui.button("+").clicked() {
-                    self.view.zoom = (self.view.zoom * 1.1).min(6.0);
+                    self.view.zoom = (self.view.zoom * 1.1).min(crate::canvas::ZOOM_MAX);
                 }
             });
         });
@@ -4587,4 +4785,15 @@ fn origin_offset(el: &Element) -> (f32, f32) {
         VAlign::Bottom => el.h,
     };
     (ox, oy)
+}
+
+/// Statuszeile nach einem SVG-Import.
+fn svg_status(what: &str, count: usize, skipped: usize) -> String {
+    let mut s = format!("{what}: {count} Objekt(e).");
+    if skipped > 0 {
+        s.push_str(&format!(
+            " {skipped} Teil(e) konnten nicht übernommen werden (z. B. Filter, Masken)."
+        ));
+    }
+    s
 }
