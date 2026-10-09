@@ -1538,6 +1538,17 @@ impl EditorApp {
         let ctrl = egui::Modifiers::COMMAND;
         let ctrl_shift = egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT);
 
+        // --- F3: Fang ein/aus (wie im CAD) ---
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F3)) {
+            self.settings.snap.enabled = !self.settings.snap.enabled;
+            crate::settings_io::save(&self.settings);
+            self.set_status(if self.settings.snap.enabled {
+                "Fang ein (F3)."
+            } else {
+                "Fang aus (F3)."
+            });
+        }
+
         // --- Datei: gelten immer, auch beim Tippen ---
         if ctx.input_mut(|i| i.consume_key(ctrl_shift, egui::Key::S)) {
             crate::io::save_project_dialog(self, true);
@@ -2818,6 +2829,46 @@ impl EditorApp {
                     if ui.button("Ansicht zurücksetzen").clicked() {
                         self.view = View::default();
                         ui.close_menu();
+                    }
+                });
+
+                ui.menu_button("Fang", |ui| {
+                    let before = self.settings.snap;
+                    let snap = &mut self.settings.snap;
+                    ui.checkbox(&mut snap.enabled, "Fang aktiv (F3)");
+                    ui.label(
+                        egui::RichText::new("Alt gedrückt halten: Fang vorübergehend aus")
+                            .small()
+                            .weak(),
+                    );
+                    ui.separator();
+                    ui.add_enabled_ui(snap.enabled, |ui| {
+                        ui.checkbox(&mut snap.align, "Ausrichten beim Verschieben/Skalieren")
+                            .on_hover_text(
+                                "An Seitenrändern, Seitenmitte und Kanten anderer \
+                                 Objekte andocken.",
+                            );
+                        ui.separator();
+                        ui.label("Beim Zeichnen:");
+                        ui.checkbox(&mut snap.endpoint, "□ Endpunkt");
+                        ui.checkbox(&mut snap.midpoint, "△ Mitte");
+                        ui.checkbox(&mut snap.center, "○ Zentrum");
+                        ui.checkbox(&mut snap.quadrant, "◇ Quadrant");
+                        ui.checkbox(&mut snap.intersection, "× Schnittpunkt");
+                        ui.checkbox(&mut snap.perpendicular, "⊥ Lot");
+                        ui.checkbox(&mut snap.polar, "+ Polar 0° / 45° / 90°");
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            if ui.button("Alle an").clicked() {
+                                snap.set_all(true);
+                            }
+                            if ui.button("Alle aus").clicked() {
+                                snap.set_all(false);
+                            }
+                        });
+                    });
+                    if self.settings.snap != before {
+                        crate::settings_io::save(&self.settings);
                     }
                 });
 

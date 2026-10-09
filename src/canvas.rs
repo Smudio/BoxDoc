@@ -522,7 +522,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                     }
                 }
                 // Alt hält den Fang an, solange die Taste gedrückt ist.
-                let alt = ui.input(|i| i.modifiers.alt);
+                let alt = ui.input(|i| i.modifiers.alt) || !app.settings.snap.align_active();
                 if dragging && alt {
                     app.snap_lines = crate::app::SnapLines::default();
                     app.touch();
@@ -612,7 +612,11 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                     app.doc.page_size_pt();
                 let zoom_snap = app.view.zoom;
                 // Alt: Fang aus (Fangweite 0).
-                let snap_px = if ui.input(|i| i.modifiers.alt) { 0.0 } else { 8.0 };
+                let snap_px = if ui.input(|i| i.modifiers.alt) || !app.settings.snap.align_active() {
+                    0.0
+                } else {
+                    8.0
+                };
                 let (x_targets, y_targets) = collect_snap_targets(
                     &app.doc.pages[page_idx].elements,
                     &[id],
@@ -636,7 +640,11 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                     app.doc.page_size_pt();
                 let zoom_snap = app.view.zoom;
                 // Alt: Fang aus (Fangweite 0).
-                let snap_px = if ui.input(|i| i.modifiers.alt) { 0.0 } else { 8.0 };
+                let snap_px = if ui.input(|i| i.modifiers.alt) || !app.settings.snap.align_active() {
+                    0.0
+                } else {
+                    8.0
+                };
                 let (x_targets, y_targets) = collect_snap_targets(
                     &app.doc.pages[page_idx].elements,
                     &[id],
@@ -2506,13 +2514,13 @@ fn draw_snap(
         return None;
     }
     let els = app.doc.pages.get(app.page_index)?.elements.as_slice();
-    crate::snap::snap_point(cursor, from, els, exclude, app.view.zoom)
+    crate::snap::snap_point(cursor, from, els, exclude, app.view.zoom, &app.settings.snap)
 }
 
 /// Fangmarker wie im CAD — Quadrat = Endpunkt, Dreieck = Mitte, Kreis =
-/// Zentrum, Raute = Quadrant, ⊥ = Lot — aber klein, dünn und mit einer
-/// leisen Beschriftung. Beim Polarfang zeigt eine gestrichelte Hilfslinie die
-/// Richtung vom Startpunkt aus.
+/// Zentrum, Raute = Quadrant, × = Schnittpunkt, ⊥ = Lot, + = Polarfang —
+/// aber klein, dünn und mit einer leisen Beschriftung. Beim Polarfang zeigt
+/// eine gestrichelte Hilfslinie die Richtung vom Startpunkt aus.
 fn paint_snap(
     painter: &egui::Painter,
     to_screen: &impl Fn(Pos2) -> Pos2,
@@ -2561,6 +2569,10 @@ fn paint_snap(
             painter.line_segment([p + Vec2::new(-s, s), p + Vec2::new(s, s)], stroke);
             painter.line_segment([p + Vec2::new(0.0, s), p + Vec2::new(0.0, -s)], stroke);
         }
+        SnapKind::Intersection => {
+            painter.line_segment([p + Vec2::new(-s, -s), p + Vec2::new(s, s)], stroke);
+            painter.line_segment([p + Vec2::new(-s, s), p + Vec2::new(s, -s)], stroke);
+        }
         SnapKind::Polar(_) => {
             if let Some(f) = from {
                 let a = to_screen(f);
@@ -2574,8 +2586,8 @@ fn paint_snap(
                     5.0,
                 ));
             }
-            painter.line_segment([p + Vec2::new(-s, -s), p + Vec2::new(s, s)], stroke);
-            painter.line_segment([p + Vec2::new(-s, s), p + Vec2::new(s, -s)], stroke);
+            painter.line_segment([p + Vec2::new(-s, 0.0), p + Vec2::new(s, 0.0)], stroke);
+            painter.line_segment([p + Vec2::new(0.0, -s), p + Vec2::new(0.0, s)], stroke);
         }
     }
     painter.text(

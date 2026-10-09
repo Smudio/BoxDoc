@@ -271,6 +271,9 @@ pub struct Settings {
     pub theme: Theme,
     #[serde(default)]
     pub panel_side: PanelSide,
+    /// Fang-Einstellungen (Menü „Fang", F3).
+    #[serde(default)]
+    pub snap: crate::snap::SnapSettings,
 }
 
 // ===========================================================================
