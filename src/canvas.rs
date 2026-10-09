@@ -32,11 +32,12 @@ enum Active {
 /// Zoom-Grenzen (1.0 = 100 %). Gemeinsam für Mausrad und die +/−-Knöpfe,
 /// damit beide Wege an derselben Stelle anschlagen.
 ///
-/// 2000 % reicht, um Knoten und Griffe kleiner Pfade sauber zu fassen. Viel
-/// weiter wird es teuer: Text wird mit dem Zoomfaktor gerastert, und
-/// riesige Glyphen füllen den Schrift-Atlas.
+/// 6400 % — genug für Details im Bruchteil eines Millimeters. Möglich, weil
+/// nur sichtbare Objekte gezeichnet werden: Text wird mit dem Zoomfaktor
+/// gerastert, und riesige Glyphen der ganzen Seite füllten sonst den
+/// Schrift-Atlas.
 pub const ZOOM_MIN: f32 = 0.1;
-pub const ZOOM_MAX: f32 = 20.0;
+pub const ZOOM_MAX: f32 = 64.0;
 
 /// Farbe der Pfad-Werkzeuge und der Knotenbearbeitung.
 const PATH_ACCENT: Color32 = Color32::from_rgb(230, 120, 40);
@@ -208,8 +209,18 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
     // über den Knoten, die gerade angefasst werden sollen.
     let node_edit = app.path_edit.filter(|e| selection.contains(&e.id));
     if let Some(page) = app.doc.pages.get_mut(page_idx) {
+        let view = painter.clip_rect();
         for el in page.elements.iter_mut() {
-            draw_element(el, &mut app.images, ctx, &painter, &to_screen, zoom);
+            // Nur zeichnen, was im Bild ist. Bei starkem Zoom liegt fast die
+            // ganze Seite außerhalb — und jeder Text dort würde sonst in
+            // riesiger Größe gerastert und füllte den Schrift-Atlas.
+            let b = crate::geometry::element_bounds(el);
+            let margin = el.stroke_width.max(0.0) + el.font_size.max(0.0);
+            let screen = Rect::from_two_pos(to_screen(b.min), to_screen(b.max))
+                .expand(margin * zoom + 2.0);
+            if screen.intersects(view) {
+                draw_element(el, &mut app.images, ctx, &painter, &to_screen, zoom);
+            }
             let editing_nodes = node_edit.map(|e| e.id) == Some(el.id);
             if selection.contains(&el.id) && !editing_nodes {
                 if selection.len() == 1 {
@@ -510,7 +521,13 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                         el.y = sy + dp.y;
                     }
                 }
-                if dragging {
+                // Alt hält den Fang an, solange die Taste gedrückt ist.
+                let alt = ui.input(|i| i.modifiers.alt);
+                if dragging && alt {
+                    app.snap_lines = crate::app::SnapLines::default();
+                    app.touch();
+                }
+                if dragging && !alt {
                     // --- Snapping: Außenkanten + Mittelpunkt zur Seite und
                     // zu allen anderen Objekten. Pro Achse (X/Y) wird der
                     // jeweils nächste Andockpunkt gesucht und angezogen:
@@ -543,7 +560,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                             if let Some(target) =
                                 pick_snap(obj_val, &x_targets, snap_px, app.view.zoom)
                             {
-                                let dist = (obj_val - target).abs() / app.view.zoom;
+                                let dist = (obj_val - target).abs() * app.view.zoom;
                                 if best_x.map_or(true, |(d, _, _)| dist < d) {
                                     best_x = Some((dist, target - obj_val, target));
                                 }
@@ -554,7 +571,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                             if let Some(target) =
                                 pick_snap(obj_val, &y_targets, snap_px, app.view.zoom)
                             {
-                                let dist = (obj_val - target).abs() / app.view.zoom;
+                                let dist = (obj_val - target).abs() * app.view.zoom;
                                 if best_y.map_or(true, |(d, _, _)| dist < d) {
                                     best_y = Some((dist, target - obj_val, target));
                                 }
@@ -594,6 +611,8 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                 let (pw_pt_snap, ph_pt_snap) =
                     app.doc.page_size_pt();
                 let zoom_snap = app.view.zoom;
+                // Alt: Fang aus (Fangweite 0).
+                let snap_px = if ui.input(|i| i.modifiers.alt) { 0.0 } else { 8.0 };
                 let (x_targets, y_targets) = collect_snap_targets(
                     &app.doc.pages[page_idx].elements,
                     &[id],
@@ -606,7 +625,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                     let shift = ui.input(|i| i.modifiers.shift);
                     resize_to_pointer(el, anchor, rotation, to_page(pointer), shift, start_aspect);
                     (snap_v, snap_h) =
-                        snap_resize_edges(el, anchor, &x_targets, &y_targets, 8.0, zoom_snap);
+                        snap_resize_edges(el, anchor, &x_targets, &y_targets, snap_px, zoom_snap);
                     app.touch();
                 }
                 app.snap_lines.vertical = snap_v;
@@ -616,6 +635,8 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                 let (pw_pt_snap, ph_pt_snap) =
                     app.doc.page_size_pt();
                 let zoom_snap = app.view.zoom;
+                // Alt: Fang aus (Fangweite 0).
+                let snap_px = if ui.input(|i| i.modifiers.alt) { 0.0 } else { 8.0 };
                 let (x_targets, y_targets) = collect_snap_targets(
                     &app.doc.pages[page_idx].elements,
                     &[id],
@@ -635,7 +656,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                     }
                     resize_edge_to_pointer(el, edge, anchor, rotation, to_page(pointer));
                     (snap_v, snap_h) =
-                        snap_resize_edges(el, anchor, &x_targets, &y_targets, 8.0, zoom_snap);
+                        snap_resize_edges(el, anchor, &x_targets, &y_targets, snap_px, zoom_snap);
                     app.touch();
                 }
                 app.snap_lines.vertical = snap_v;
@@ -669,17 +690,24 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                 ));
             }
             Active::LineEndpoint(id, is_start) => {
-                if let Some(el) = element_mut(app, page_idx, id) {
-                    // Aktuelle Endpunkte in Seitenkoordinaten berechnen.
-                    let center = Pos2::new(el.x + el.w / 2.0, el.y);
-                    let start = local_to_world(center, el.rotation, Vec2::new(-el.w / 2.0, 0.0));
-                    let end = local_to_world(center, el.rotation, Vec2::new(el.w / 2.0, 0.0));
-                    // Der nicht-gezogene Endpunkt bleibt fixiert.
-                    let fixed = if is_start { end } else { start };
-                    let ptr_page = to_page(pointer);
-                    let mut target = Pos2::new(ptr_page.x, ptr_page.y);
-                    // Shift → auf 45°-Raster schnappen (H/V + Diagonalen).
-                    let shift = ui.input(|i| i.modifiers.shift);
+                // Der nicht-gezogene Endpunkt bleibt fixiert.
+                let fixed = element(app, page_idx, id).map(|el| {
+                    let (a, b) = crate::geometry::line_endpoints(el);
+                    if is_start { b } else { a }
+                });
+                let ptr_page = to_page(pointer).to_pos2();
+                // Shift → 45°-Raster; sonst Zeichenfang (ohne die Linie
+                // selbst, sonst finge der Endpunkt sich selbst).
+                let shift = ui.input(|i| i.modifiers.shift);
+                let snap = match fixed {
+                    Some(_) if shift => None,
+                    _ => draw_snap(app, ui, ptr_page, fixed, &[id]),
+                };
+                if let Some(s) = &snap {
+                    paint_snap(&painter, &to_screen, s, fixed);
+                }
+                if let (Some(el), Some(fixed)) = (element_mut(app, page_idx, id), fixed) {
+                    let mut target = snap.map(|s| s.point).unwrap_or(ptr_page);
                     if shift {
                         target = snap_angle_45(fixed, target);
                     }
@@ -701,21 +729,26 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
             }
             Active::PathNode(id, index) => {
                 let mut target = to_page(pointer).to_pos2();
+                // Vorgängerknoten. Beim ersten Knoten eines geschlossenen
+                // Pfads ist das der letzte — sonst wirkten Shift und Fang
+                // ausgerechnet dort nicht.
+                let prev = element(app, page_idx, id).and_then(|el| {
+                    let nodes = crate::geometry::path_nodes(el);
+                    let prev_idx = match index.checked_sub(1) {
+                        Some(i) => Some(i),
+                        None if el.path_closed => nodes.len().checked_sub(1),
+                        None => None,
+                    };
+                    prev_idx.and_then(|i| nodes.get(i).map(|n| n.anchor))
+                });
                 if ui.input(|i| i.modifiers.shift) {
                     // Shift: waagrecht/senkrecht/diagonal zum Vorgängerknoten.
-                    // Beim ersten Knoten eines geschlossenen Pfads ist das der
-                    // letzte — sonst wirkte Shift ausgerechnet dort nicht.
-                    if let Some(prev) = element(app, page_idx, id).and_then(|el| {
-                        let nodes = crate::geometry::path_nodes(el);
-                        let prev_idx = match index.checked_sub(1) {
-                            Some(i) => Some(i),
-                            None if el.path_closed => nodes.len().checked_sub(1),
-                            None => None,
-                        };
-                        prev_idx.and_then(|i| nodes.get(i).map(|n| n.anchor))
-                    }) {
+                    if let Some(prev) = prev {
                         target = snap_angle_45(prev, target);
                     }
+                } else if let Some(s) = draw_snap(app, ui, target, prev, &[id]) {
+                    paint_snap(&painter, &to_screen, &s, prev);
+                    target = s.point;
                 }
                 if let Some(el) = element_mut(app, page_idx, id) {
                     crate::geometry::move_node(el, index, target);
@@ -757,58 +790,64 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
     let drawing = app.tool != crate::app::Tool::Select;
     if app.tool == crate::app::Tool::Line {
         let shift = ui.input(|i| i.modifiers.shift);
-        // Vorschau rendern wenn Startpunkt gesetzt.
-        let has_start = app.line_drawing.is_some();
-        if has_start {
-            if let (Some(start), Some(pt)) = (app.line_drawing, pointer) {
-                let start_pos = Pos2::new(start.0, start.1);
-                let end_page = if shift {
-                    snap_angle_45(start_pos, to_page(pt).to_pos2())
-                } else {
-                    to_page(pt).to_pos2()
-                };
-                let sp = to_screen(start_pos);
-                let ep = to_screen(end_page);
-                let color = if shift {
-                    Color32::from_rgb(80, 200, 120)
-                } else {
-                    Color32::from_rgb(40, 120, 220)
-                };
-                painter.line_segment([sp, ep], Stroke::new(2.0_f32, color));
-                painter.circle_filled(sp, 5.0, color);
-                painter.circle_stroke(ep, 5.0, Stroke::new(1.5_f32, color));
-                if shift {
-                    painter.text(
-                        ep + Vec2::new(10.0, -6.0),
-                        egui::Align2::LEFT_BOTTOM,
-                        "45°",
-                        FontId::proportional(11.0),
-                        color,
-                    );
+        let start_pos = app.line_drawing.map(|s| Pos2::new(s.0, s.1));
+        // Zielpunkt: Shift erzwingt das 45°-Raster, sonst greift der
+        // Zeichenfang (Endpunkt, Mitte, Lot, 0°/45°/90° …) — beide Klicks
+        // und die Vorschau benutzen denselben Punkt.
+        let mut snap = None;
+        let target = pointer.map(|pt| {
+            let c = to_page(pt).to_pos2();
+            match start_pos {
+                Some(s) if shift => snap_angle_45(s, c),
+                _ => {
+                    snap = draw_snap(app, ui, c, start_pos, &[]);
+                    snap.map(|s| s.point).unwrap_or(c)
                 }
             }
-        } else if let Some(pt) = pointer {
-            painter.circle_stroke(pt, 5.0, Stroke::new(1.5_f32, Color32::from_rgb(40, 120, 220)));
+        });
+        let accent = Color32::from_rgb(40, 120, 220);
+        if let (Some(start_pos), Some(end_page)) = (start_pos, target) {
+            let sp = to_screen(start_pos);
+            let ep = to_screen(end_page);
+            let color = if shift {
+                Color32::from_rgb(80, 200, 120)
+            } else {
+                accent
+            };
+            painter.line_segment([sp, ep], Stroke::new(2.0_f32, color));
+            painter.circle_filled(sp, 5.0, color);
+            if snap.is_none() {
+                painter.circle_stroke(ep, 5.0, Stroke::new(1.5_f32, color));
+            }
+            if shift {
+                painter.text(
+                    ep + Vec2::new(10.0, -6.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    "45°",
+                    FontId::proportional(11.0),
+                    color,
+                );
+            }
+        } else if let (Some(pt), None) = (pointer, snap) {
+            painter.circle_stroke(pt, 5.0, Stroke::new(1.5_f32, accent));
+        }
+        if let Some(s) = &snap {
+            paint_snap(&painter, &to_screen, s, start_pos);
         }
         // Klick-Handling.
         if primary_pressed && pointer_in_canvas && !click_on_ui {
-            if let Some(pt) = pointer {
-                let p = to_page(pt);
-                match app.line_drawing {
+            if let Some(p) = target {
+                match start_pos {
                     None => {
                         // Erster Klick → Startpunkt setzen.
                         app.line_drawing = Some((p.x, p.y));
-                        app.status =
-                            String::from("Linie: Klicke den Endpunkt (Shift = 45°-Raster).");
+                        app.status = String::from(
+                            "Linie: Klicke den Endpunkt (Shift = 45°-Raster, Alt = ohne Fang).",
+                        );
                     }
-                    Some(current) => {
-                        // Zweiter Klick → Linie erstellen (mit Snap wenn Shift).
-                        let start_pos = Pos2::new(current.0, current.1);
-                        let end_pos = if shift {
-                            snap_angle_45(start_pos, p.to_pos2())
-                        } else {
-                            p.to_pos2()
-                        };
+                    Some(start_pos) => {
+                        // Zweiter Klick → Linie erstellen.
+                        let end_pos = p;
                         app.add_line_between((start_pos.x, start_pos.y), (end_pos.x, end_pos.y));
                         app.status = String::from(
                             "Linie: Klicke den nächsten Startpunkt (Esc zum Beenden).",
@@ -2455,12 +2494,108 @@ fn snap_resize_edges(
     (snap_v, snap_h)
 }
 
+/// Zeichenfang am Cursor (siehe [`crate::snap`]). Alt schaltet ihn aus.
+fn draw_snap(
+    app: &EditorApp,
+    ui: &egui::Ui,
+    cursor: Pos2,
+    from: Option<Pos2>,
+    exclude: &[u64],
+) -> Option<crate::snap::Snap> {
+    if ui.input(|i| i.modifiers.alt) {
+        return None;
+    }
+    let els = app.doc.pages.get(app.page_index)?.elements.as_slice();
+    crate::snap::snap_point(cursor, from, els, exclude, app.view.zoom)
+}
+
+/// Fangmarker wie im CAD — Quadrat = Endpunkt, Dreieck = Mitte, Kreis =
+/// Zentrum, Raute = Quadrant, ⊥ = Lot — aber klein, dünn und mit einer
+/// leisen Beschriftung. Beim Polarfang zeigt eine gestrichelte Hilfslinie die
+/// Richtung vom Startpunkt aus.
+fn paint_snap(
+    painter: &egui::Painter,
+    to_screen: &impl Fn(Pos2) -> Pos2,
+    snap: &crate::snap::Snap,
+    from: Option<Pos2>,
+) {
+    use crate::snap::SnapKind;
+    let color = Color32::from_rgb(80, 200, 120);
+    let stroke = Stroke::new(1.5_f32, color);
+    let p = to_screen(snap.point);
+    let s = 5.0;
+    match snap.kind {
+        SnapKind::Endpoint => {
+            painter.rect_stroke(
+                Rect::from_center_size(p, Vec2::splat(2.0 * s)),
+                0.0,
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+        }
+        SnapKind::Midpoint => {
+            painter.add(Shape::closed_line(
+                vec![
+                    p + Vec2::new(0.0, -s),
+                    p + Vec2::new(s, s * 0.8),
+                    p + Vec2::new(-s, s * 0.8),
+                ],
+                stroke,
+            ));
+        }
+        SnapKind::Center => {
+            painter.circle_stroke(p, s, stroke);
+        }
+        SnapKind::Quadrant => {
+            painter.add(Shape::closed_line(
+                vec![
+                    p + Vec2::new(0.0, -s),
+                    p + Vec2::new(s, 0.0),
+                    p + Vec2::new(0.0, s),
+                    p + Vec2::new(-s, 0.0),
+                ],
+                stroke,
+            ));
+        }
+        SnapKind::Perpendicular => {
+            painter.line_segment([p + Vec2::new(-s, s), p + Vec2::new(s, s)], stroke);
+            painter.line_segment([p + Vec2::new(0.0, s), p + Vec2::new(0.0, -s)], stroke);
+        }
+        SnapKind::Polar(_) => {
+            if let Some(f) = from {
+                let a = to_screen(f);
+                let dir = (p - a).normalized();
+                // Über den Cursor hinaus verlängert: Die Linie zeigt die
+                // Richtung, nicht nur die Strecke.
+                painter.add(Shape::dashed_line(
+                    &[a, p + dir * 4000.0],
+                    Stroke::new(1.0_f32, color.gamma_multiply(0.55)),
+                    6.0,
+                    5.0,
+                ));
+            }
+            painter.line_segment([p + Vec2::new(-s, -s), p + Vec2::new(s, s)], stroke);
+            painter.line_segment([p + Vec2::new(-s, s), p + Vec2::new(s, -s)], stroke);
+        }
+    }
+    painter.text(
+        p + Vec2::new(9.0, 7.0),
+        egui::Align2::LEFT_TOP,
+        snap.kind.label(),
+        FontId::proportional(11.0),
+        color,
+    );
+}
+
 /// Wählt das am nächsten gelegene Ziel innerhalb der Snap-Schwelle. Maß:
-/// Bildschirm-Pixel = |obj_val - target| / zoom.
+/// Bildschirm-Pixel = |obj_val - target| × zoom.
 fn pick_snap(obj_val: f32, targets: &[f32], snap_px: f32, zoom: f32) -> Option<f32> {
     let mut best: Option<(f32, f32)> = None;
     for &target in targets {
-        let dist = (obj_val - target).abs() / zoom;
+        // Abstand in Bildschirmpixeln: pt × Zoom. (Früher stand hier ein
+        // Geteilt — damit wuchs die Fangweite beim Hineinzoomen, bei 2000 %
+        // auf 160 pt, und alles klebte überall.)
+        let dist = (obj_val - target).abs() * zoom;
         if dist < snap_px && best.map_or(true, |(d, _)| dist < d) {
             best = Some((dist, target));
         }
@@ -2598,7 +2733,25 @@ fn path_tool(
     let zoom = app.view.zoom;
     let shift = ui.input(|i| i.modifiers.shift);
     let primary_down = ui.input(|i| i.pointer.primary_down());
-    let page_pos = pointer.map(|p| to_page(p).to_pos2());
+    let mut page_pos = pointer.map(|p| to_page(p).to_pos2());
+
+    // Zeichenfang für den nächsten Knoten des Pen-Werkzeugs — nicht, während
+    // gerade ein Griff herausgezogen wird (der soll frei folgen), und nicht
+    // mit Shift (das hat sein eigenes 45°-Raster).
+    if app.tool == crate::app::Tool::Pen && !shift {
+        let dragging = app.path_draft.as_ref().is_some_and(|d| d.dragging);
+        if let (Some(c), false) = (page_pos, dragging) {
+            let from = app
+                .path_draft
+                .as_ref()
+                .and_then(|d| d.nodes.last())
+                .map(|n| n.anchor);
+            if let Some(s) = draw_snap(app, ui, c, from, &[]) {
+                paint_snap(painter, to_screen, &s, from);
+                page_pos = Some(s.point);
+            }
+        }
+    }
 
     match app.tool {
         crate::app::Tool::Pen => pen_tool(

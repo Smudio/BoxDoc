@@ -15,6 +15,7 @@ mod pdf_import;
 mod printing;
 mod settings_io;
 mod slug;
+mod snap;
 mod store;
 mod svg;
 mod svg_import;

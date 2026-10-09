@@ -20,6 +20,7 @@ pub mod odt;
 pub mod pdf_import;
 pub mod printing;
 pub mod slug;
+pub mod snap;
 pub mod store;
 pub mod svg;
 pub mod svg_import;
