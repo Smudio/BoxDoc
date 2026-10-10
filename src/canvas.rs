@@ -19,6 +19,8 @@ enum Active {
     Resize(u64, Pos2, f32, f32),
     ResizeEdge(u64, CropEdge, f32, Pos2),
     Rotate(u64),
+    /// Gruppenrahmen ziehen (Startbox, hx, hy, Startzustände).
+    GroupResize(Rect, i8, i8, Vec<Element>),
     Crop(u64, CropEdge, crate::model::Crop),
     SelectionBox(Pos2),
     /// Linien-Endpunkt ziehen (id, is_start).
@@ -318,6 +320,11 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
     if app.path_edit.is_some() && node_edit.is_none() {
         app.path_edit = None;
     }
+    // Mehrfachauswahl: ein gemeinsamer Rahmen über allem, an dem die ganze
+    // Gruppe skaliert wird.
+    if let Some(r) = group_box(app, page_idx) {
+        draw_group_box(Rect::from_two_pos(to_screen(r.min), to_screen(r.max)), &painter);
+    }
 
     // --- Textbearbeitung (Overlay) ---
     if app.editing.is_some() {
@@ -526,6 +533,7 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
             | Interaction::Resize { .. }
             | Interaction::ResizeEdge { .. }
             | Interaction::Rotate { .. }
+            | Interaction::GroupResize { .. }
             | Interaction::Crop { .. }
             | Interaction::LineEndpoint { .. }
             | Interaction::PathNode { .. }
@@ -556,6 +564,12 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
             anchor,
         } => Some(Active::ResizeEdge(*id, *edge, *rotation, *anchor)),
         Interaction::Rotate { id } => Some(Active::Rotate(*id)),
+        Interaction::GroupResize {
+            start_box,
+            hx,
+            hy,
+            starts,
+        } => Some(Active::GroupResize(*start_box, *hx, *hy, starts.clone())),
         Interaction::Crop {
             id,
             edge,
@@ -741,6 +755,46 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
                 }
                 app.snap_lines.vertical = snap_v;
                 app.snap_lines.horizontal = snap_h;
+            }
+            Active::GroupResize(from, hx, hy, starts) => {
+                let p = to_page(pointer).to_pos2();
+                let shift = ui.input(|i| i.modifiers.shift);
+                let alt = ui.input(|i| i.modifiers.alt) || !app.settings.snap.align_active();
+                // Fang für die bewegten Kanten — nicht beim Seitenverhältnis-
+                // Sperren, dort bestimmt die andere Achse mit.
+                let mut snap_v = None;
+                let mut snap_h = None;
+                let mut p = p;
+                if !alt && !(shift && hx != 0 && hy != 0) {
+                    let ids: Vec<u64> = starts.iter().map(|e| e.id).collect();
+                    let (pw, ph) = app.doc.page_size_pt();
+                    let (xt, yt) =
+                        collect_snap_targets(&app.doc.pages[page_idx].elements, &ids, pw, ph);
+                    if hx != 0 {
+                        if let Some(t) = pick_snap(p.x, &xt, 8.0, zoom) {
+                            p.x = t;
+                            snap_v = Some(t);
+                        }
+                    }
+                    if hy != 0 {
+                        if let Some(t) = pick_snap(p.y, &yt, 8.0, zoom) {
+                            p.y = t;
+                            snap_h = Some(t);
+                        }
+                    }
+                }
+                let to = group_resize_box(from, hx, hy, p, shift);
+                let scale_text = hx != 0 && hy != 0;
+                if let Some(page) = app.doc.pages.get_mut(page_idx) {
+                    for start in &starts {
+                        if let Some(el) = page.elements.iter_mut().find(|e| e.id == start.id) {
+                            crate::geometry::scale_element(el, start, from, to, scale_text);
+                        }
+                    }
+                }
+                app.snap_lines.vertical = snap_v;
+                app.snap_lines.horizontal = snap_h;
+                app.touch();
             }
             Active::Rotate(id) => {
                 if let Some(el) = element_mut(app, page_idx, id) {
@@ -1647,6 +1701,116 @@ fn fill_and_stroke(painter: &egui::Painter, el: &Element, zoom: f32, pts: Vec<Po
     }
 }
 
+/// Gemeinsame Hüllbox der Mehrfachauswahl in Seitenkoordinaten. `None` bei
+/// weniger als zwei ausgewählten Objekten — dann hat jedes seine eigenen
+/// Griffe.
+fn group_box(app: &EditorApp, page_idx: usize) -> Option<Rect> {
+    if app.selection.len() < 2 || app.path_edit.is_some() {
+        return None;
+    }
+    let page = app.doc.pages.get(page_idx)?;
+    crate::geometry::elements_bounds(page.elements.iter().filter(|e| app.is_selected(e.id)))
+}
+
+/// Griffe des Gruppenrahmens auf dem Bildschirm: (Position, hx, hy).
+///
+/// Erst die vier Ecken, dann die Kantenmitten. Eine Achse, die keine
+/// Ausdehnung hat (z. B. nur waagrechte Linien), bekommt keine Kantengriffe —
+/// dort gibt es nichts zu skalieren, und die Griffe lägen auf den Ecken.
+fn group_handles(r: Rect) -> Vec<(Pos2, i8, i8)> {
+    let mut out = Vec::with_capacity(8);
+    for (hx, hy) in [(-1, -1), (1, -1), (1, 1), (-1, 1)] {
+        out.push((group_handle_pos(r, hx, hy), hx, hy));
+    }
+    if r.height() >= 12.0 {
+        out.push((group_handle_pos(r, -1, 0), -1, 0));
+        out.push((group_handle_pos(r, 1, 0), 1, 0));
+    }
+    if r.width() >= 12.0 {
+        out.push((group_handle_pos(r, 0, -1), 0, -1));
+        out.push((group_handle_pos(r, 0, 1), 0, 1));
+    }
+    out
+}
+
+fn group_handle_pos(r: Rect, hx: i8, hy: i8) -> Pos2 {
+    let pick = |lo: f32, hi: f32, h: i8| match h {
+        -1 => lo,
+        1 => hi,
+        _ => (lo + hi) / 2.0,
+    };
+    Pos2::new(pick(r.min.x, r.max.x, hx), pick(r.min.y, r.max.y, hy))
+}
+
+/// Griff des Gruppenrahmens unter dem Zeiger (Bildschirmkoordinaten).
+fn group_handle_at(r_screen: Rect, pointer: Pos2) -> Option<(i8, i8)> {
+    group_handles(r_screen)
+        .into_iter()
+        .find(|(p, _, _)| p.distance(pointer) < 9.0)
+        .map(|(_, hx, hy)| (hx, hy))
+}
+
+/// Neue Gruppenbox, wenn der Griff (hx, hy) auf `p` gezogen wird. Die
+/// gegenüberliegende Seite bleibt fix; über sie hinaus lässt sich nicht
+/// ziehen (Spiegeln gibt es nicht). Shift an einer Ecke hält das
+/// Seitenverhältnis.
+fn group_resize_box(from: Rect, hx: i8, hy: i8, p: Pos2, keep_aspect: bool) -> Rect {
+    const MIN: f32 = 1.0;
+    let (mut x0, mut x1, mut y0, mut y1) = (from.min.x, from.max.x, from.min.y, from.max.y);
+    match hx {
+        -1 => x0 = p.x.min(x1 - MIN),
+        1 => x1 = p.x.max(x0 + MIN),
+        _ => {}
+    }
+    match hy {
+        -1 => y0 = p.y.min(y1 - MIN),
+        1 => y1 = p.y.max(y0 + MIN),
+        _ => {}
+    }
+    if keep_aspect && hx != 0 && hy != 0 && from.width() > 1e-3 && from.height() > 1e-3 {
+        // Der größere Faktor gewinnt, damit die Box dem Zeiger folgt.
+        let f = ((x1 - x0) / from.width()).max((y1 - y0) / from.height());
+        let (w, h) = (from.width() * f, from.height() * f);
+        if hx < 0 {
+            x0 = x1 - w;
+        } else {
+            x1 = x0 + w;
+        }
+        if hy < 0 {
+            y0 = y1 - h;
+        } else {
+            y1 = y0 + h;
+        }
+    }
+    Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1))
+}
+
+/// Gemeinsamer Rahmen einer Mehrfachauswahl mit acht Griffen zum Skalieren.
+///
+/// Sieht aus wie der Rahmen eines einzelnen Pfads oder Rechtecks (siehe
+/// [`draw_selection`]): runde Griffe an den Ecken, eckige an den Kanten. Die
+/// Gruppe verhält sich ja auch wie ein einzelnes Objekt.
+fn draw_group_box(r: Rect, painter: &egui::Painter) {
+    let color = Color32::from_rgb(40, 120, 220);
+    painter.add(egui::epaint::RectShape::new(
+        r,
+        0.0,
+        Color32::TRANSPARENT,
+        Stroke::new(1.5_f32, color),
+        egui::StrokeKind::Middle,
+    ));
+    for (p, hx, hy) in group_handles(r) {
+        if hx != 0 && hy != 0 {
+            painter.circle_filled(p, 5.0, Color32::WHITE);
+            painter.circle_stroke(p, 5.0, Stroke::new(1.5_f32, color));
+        } else {
+            let handle = Rect::from_center_size(p, Vec2::splat(8.0));
+            painter.rect_filled(handle, 1.5, Color32::WHITE);
+            painter.rect_stroke(handle, 1.5, Stroke::new(1.5_f32, color), egui::StrokeKind::Inside);
+        }
+    }
+}
+
 /// Einfacher Rahmen für jedes Element in einer Multi-Selection (ohne Griffe).
 fn draw_multi_selection_box(
     el: &Element,
@@ -1662,7 +1826,7 @@ fn draw_multi_selection_box(
         .collect();
     painter.add(Shape::closed_line(
         pts,
-        Stroke::new(1.5_f32, Color32::from_rgb(40, 120, 220)),
+        Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(40, 120, 220, 140)),
     ));
 }
 
@@ -2122,6 +2286,15 @@ fn hover_cursor(
         }
     }
 
+    // 0b) Griffe des Gruppenrahmens.
+    if let Some(r) = group_box(app, page_idx) {
+        let r_screen = Rect::from_two_pos(to_screen(r.min), to_screen(r.max));
+        if let Some((hx, hy)) = group_handle_at(r_screen, pointer) {
+            return Some(resize_icon(Vec2::new(hx as f32, hy as f32)));
+        }
+    }
+    let sel = if app.selection.len() > 1 { None } else { sel };
+
     if let Some(id) = sel {
         if let Some(el) = element(app, page_idx, id) {
             let center = to_screen(Pos2::new(el.x + el.w / 2.0, el.y + el.h / 2.0));
@@ -2274,6 +2447,29 @@ fn start_interaction(
             return;
         }
     }
+
+    // 0b) Griffe des Gruppenrahmens. Bei einer Mehrfachauswahl gelten die
+    //     Einzelgriffe der Objekte nicht — sie sind auch nicht gezeichnet.
+    if let Some(r) = group_box(app, page_idx) {
+        let r_screen = Rect::from_two_pos(to_screen(r.min), to_screen(r.max));
+        if let Some((hx, hy)) = group_handle_at(r_screen, pointer) {
+            let starts: Vec<Element> = app.doc.pages[page_idx]
+                .elements
+                .iter()
+                .filter(|e| app.is_selected(e.id))
+                .cloned()
+                .collect();
+            app.push_history();
+            app.interaction = Interaction::GroupResize {
+                start_box: r,
+                hx,
+                hy,
+                starts,
+            };
+            return;
+        }
+    }
+    let sel = if app.selection.len() > 1 { None } else { sel };
 
     // 1) Crop-Kanten
     if crop_mode {
@@ -3453,5 +3649,37 @@ mod tests {
             1.0,
             PATH_CLICK_TOL
         ));
+    }
+
+    #[test]
+    fn gruppenrahmen_ecke_mit_shift_haelt_seitenverhaeltnis() {
+        let from = Rect::from_min_size(Pos2::new(100.0, 100.0), Vec2::new(200.0, 100.0));
+        // Ecke unten rechts weit nach rechts, kaum nach unten.
+        let r = group_resize_box(from, 1, 1, Pos2::new(500.0, 210.0), true);
+        assert_eq!(r.min, from.min);
+        assert!((r.width() / r.height() - 2.0).abs() < 1e-4);
+        assert!((r.width() - 400.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn gruppenrahmen_laesst_sich_nicht_umklappen() {
+        let from = Rect::from_min_size(Pos2::new(100.0, 100.0), Vec2::new(200.0, 100.0));
+        let r = group_resize_box(from, -1, 0, Pos2::new(900.0, 0.0), false);
+        assert!(r.width() >= 1.0 && r.max.x == from.max.x);
+        assert_eq!((r.min.y, r.max.y), (from.min.y, from.max.y));
+    }
+
+    #[test]
+    fn mehrfachauswahl_eckgriff_zeigt_resize_symbol() {
+        let mut a = rechteck(1);
+        a.fill_color = [0, 0, 0, 255];
+        let mut b = rechteck(2);
+        b.x = 400.0;
+        let mut app = app_mit(vec![a, b]);
+        app.selection = vec![1, 2];
+        let ctx = egui::Context::default();
+        // Gruppenrahmen: (100,100)–(600,200); Ecke unten rechts.
+        let icon = hover_cursor(&app, 0, Pos2::new(600.0, 200.0), &ident, 1.0, &ctx);
+        assert_eq!(icon, Some(egui::CursorIcon::ResizeNwSe));
     }
 }

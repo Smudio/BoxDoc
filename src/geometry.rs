@@ -165,6 +165,55 @@ pub fn elements_bounds<'a>(els: impl IntoIterator<Item = &'a Element>) -> Option
     out
 }
 
+/// Skaliert ein Element mit, wenn seine Gruppen-Hüllbox von `from` auf `to`
+/// gezogen wird — für das gemeinsame Skalieren einer Mehrfachauswahl.
+///
+/// `start` ist der Zustand bei Beginn des Ziehens; gerechnet wird immer von
+/// dort aus, damit sich Rundungsfehler über viele Frames nicht aufsummieren.
+///
+/// Gedrehte Objekte lassen sich nicht ungleichmäßig verzerren, ohne zur
+/// Raute zu werden. Sie behalten deshalb ihren Winkel; Breite und Höhe
+/// wachsen um den Faktor, um den sich ihre eigene Achse streckt. Bei 0°/90°
+/// ist das exakt.
+///
+/// `scale_text`: Schriftgröße und Einzug mitwachsen lassen (beim Ziehen an
+/// einer Ecke). Beim Ziehen an einer Kante bleibt die Schrift stehen — wer
+/// eine Gruppe nur breiter macht, will keine breitere Schrift.
+pub fn scale_element(el: &mut Element, start: &Element, from: egui::Rect, to: egui::Rect, scale_text: bool) {
+    let sx = if from.width() > 1e-3 { to.width() / from.width() } else { 1.0 };
+    let sy = if from.height() > 1e-3 { to.height() / from.height() } else { 1.0 };
+    let map = |p: Pos2| {
+        Pos2::new(
+            to.min.x + (p.x - from.min.x) * sx,
+            to.min.y + (p.y - from.min.y) * sy,
+        )
+    };
+    if start.kind == crate::model::ElementKind::Line {
+        // Linien: beide Endpunkte abbilden, daraus Länge und Winkel neu.
+        let (a, b) = line_endpoints(start);
+        let (a, b) = (map(a), map(b));
+        let len = (b.x - a.x).hypot(b.y - a.y).max(0.1);
+        el.w = len;
+        el.rotation = (b.y - a.y).atan2(b.x - a.x).to_degrees();
+        el.x = (a.x + b.x) / 2.0 - len / 2.0;
+        el.y = (a.y + b.y) / 2.0;
+    } else {
+        let (s, c) = start.rotation.to_radians().sin_cos();
+        let fw = (sx * c).hypot(sy * s);
+        let fh = (sx * s).hypot(sy * c);
+        let center = map(element_center(start));
+        el.w = (start.w * fw).max(0.1);
+        el.h = (start.h * fh).max(0.1);
+        el.x = center.x - el.w / 2.0;
+        el.y = center.y - el.h / 2.0;
+    }
+    if scale_text {
+        let f = (sx * sy).sqrt();
+        el.font_size = (start.font_size * f).max(1.0);
+        el.indent = start.indent * f;
+    }
+}
+
 /// Umriss eines Rechtecks als geschlossener Linienzug.
 ///
 /// Bei `corner_radius > 0` werden die Ecken durch Viertelkreise ersetzt.
@@ -1640,5 +1689,52 @@ mod tests {
                 "Punkt {p:?} liegt ausserhalb"
             );
         }
+    }
+
+    #[test]
+    fn gruppe_doppelt_so_gross_skaliert_position_groesse_und_schrift() {
+        let from = egui::Rect::from_min_size(Pos2::new(100.0, 100.0), Vec2::new(200.0, 100.0));
+        let to = egui::Rect::from_min_size(Pos2::new(100.0, 100.0), Vec2::new(400.0, 200.0));
+        let mut start = Element::new_text(1, 200.0, 150.0);
+        start.w = 50.0;
+        start.h = 20.0;
+        start.font_size = 12.0;
+        let mut el = start.clone();
+        scale_element(&mut el, &start, from, to, true);
+        assert!((el.x - 300.0).abs() < 1e-3 && (el.y - 200.0).abs() < 1e-3);
+        assert!((el.w - 100.0).abs() < 1e-3 && (el.h - 40.0).abs() < 1e-3);
+        assert!((el.font_size - 24.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn kante_ziehen_laesst_schrift_stehen_und_dreht_achsen_mit() {
+        let from = egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 100.0));
+        let to = egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(200.0, 100.0));
+        let mut start = Element::new_rectangle(1, 0.0, 0.0);
+        start.w = 40.0;
+        start.h = 10.0;
+        start.rotation = 90.0; // steht hochkant: die Breite läuft senkrecht
+        let mut el = start.clone();
+        scale_element(&mut el, &start, from, to, false);
+        assert!((el.w - 40.0).abs() < 1e-3, "w = {}", el.w);
+        assert!((el.h - 20.0).abs() < 1e-3, "h = {}", el.h);
+        assert_eq!(el.font_size, start.font_size);
+    }
+
+    #[test]
+    fn linie_skaliert_ueber_ihre_endpunkte() {
+        let from = egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 100.0));
+        let to = egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(200.0, 100.0));
+        let mut start = Element::new_line(1, 0.0, 0.0);
+        start.w = 100.0f32.hypot(100.0);
+        start.rotation = 45.0;
+        let c = Pos2::new(50.0, 50.0);
+        start.x = c.x - start.w / 2.0;
+        start.y = c.y;
+        let mut el = start.clone();
+        scale_element(&mut el, &start, from, to, false);
+        let (a, b) = line_endpoints(&el);
+        assert!(a.distance(Pos2::new(0.0, 0.0)) < 1e-2, "{a:?}");
+        assert!(b.distance(Pos2::new(200.0, 100.0)) < 1e-2, "{b:?}");
     }
 }

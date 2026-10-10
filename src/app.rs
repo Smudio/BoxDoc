@@ -129,6 +129,18 @@ pub enum Interaction {
         rotation: f32,
         anchor: egui::Pos2,
     },
+    /// Mehrfachauswahl gemeinsam skalieren: an einem Griff des Gruppenrahmens
+    /// ziehen, der gegenüberliegende Griff bleibt fix.
+    GroupResize {
+        /// Hüllbox der Gruppe beim Start (Seitenkoordinaten).
+        start_box: egui::Rect,
+        /// Welche Seiten der Griff bewegt: -1 = links/oben, 1 = rechts/unten,
+        /// 0 = diese Achse bleibt.
+        hx: i8,
+        hy: i8,
+        /// Alle ausgewählten Elemente im Zustand beim Start.
+        starts: Vec<crate::model::Element>,
+    },
     /// Drehen.
     Rotate {
         id: u64,
@@ -465,6 +477,8 @@ pub struct EditorApp {
     pub history: crate::history::History,
     /// Flag: Snapshot beim nächsten DragValue-Focus-Gain machen.
     pub prop_snapshot_pending: bool,
+    /// Gesamtgröße der Mehrfachauswahl: Seitenverhältnis beibehalten?
+    pub group_keep_aspect: bool,
     /// Zeitpunkt des letzten Pfeiltasten-Verschiebens (egui-time). Dient dazu,
     /// eine Serie von Tastendrücken zu EINEM Undo-Schritt zusammenzufassen.
     pub last_nudge_time: f64,
@@ -644,6 +658,7 @@ impl Default for EditorApp {
             theme_init_pending: true,
             history: crate::history::History::default(),
             prop_snapshot_pending: false,
+            group_keep_aspect: true,
             last_nudge_time: 0.0,
             show_json: false,
             json_buf: String::new(),
@@ -3787,7 +3802,66 @@ impl EditorApp {
             ui.add(egui::DragValue::new(&mut dy).speed(0.1).suffix(suffix));
         });
 
+        // --- Gesamtgröße: alle zusammen skalieren ---
+        // Fixpunkt ist der gewählte Referenzpunkt — mit „Mitte" wächst die
+        // Gruppe nach allen Seiten, mit „oben links" nach rechts unten.
+        ui.add_space(4.0);
+        ui.label("Gesamtgröße (alle zusammen skalieren):");
+        let mut gw = unit.from_pt(bw);
+        let mut gh = unit.from_pt(bh);
+        let (rgw, rgh) = ui
+            .horizontal(|ui| {
+                ui.label("B:");
+                let a = ui.add(
+                    egui::DragValue::new(&mut gw)
+                        .range(0.01..=10000.0)
+                        .speed(0.1)
+                        .suffix(suffix),
+                );
+                ui.label("H:");
+                let b = ui.add(
+                    egui::DragValue::new(&mut gh)
+                        .range(0.01..=10000.0)
+                        .speed(0.1)
+                        .suffix(suffix),
+                );
+                (a, b)
+            })
+            .inner;
+        ui.checkbox(&mut self.group_keep_aspect, "Seitenverhältnis beibehalten")
+            .on_hover_text(
+                "Breite und Höhe ändern sich gemeinsam; Schriftgrößen wachsen mit.                  Auf der Zeichenfläche: an einer Ecke des Gruppenrahmens ziehen,                  Shift hält das Seitenverhältnis.",
+            );
+        if rgw.changed() || rgh.changed() {
+            let mut nw = unit.to_pt(gw).max(0.01);
+            let mut nh = unit.to_pt(gh).max(0.01);
+            if self.group_keep_aspect {
+                if rgw.changed() && bw > 1e-3 {
+                    nh = bh * nw / bw;
+                } else if rgh.changed() && bh > 1e-3 {
+                    nw = bw * nh / bh;
+                }
+            }
+            let from = egui::Rect::from_min_size(egui::pos2(bx, by), egui::vec2(bw, bh));
+            let to = egui::Rect::from_min_size(
+                egui::pos2(anchor_x - nw * fx, anchor_y - nh * fy),
+                egui::vec2(nw, nh),
+            );
+            let scale_text = self.group_keep_aspect;
+            let ids = self.selection.clone();
+            if let Some(page) = self.doc.pages.get_mut(self.page_index) {
+                for el in page.elements.iter_mut().filter(|e| ids.contains(&e.id)) {
+                    let start = el.clone();
+                    crate::geometry::scale_element(el, &start, from, to, scale_text);
+                }
+            }
+            self.touch();
+            return;
+        }
+
         // --- B/H: einzelne Element-Größen, "—" bei gemischten Werten ---
+        ui.add_space(4.0);
+        ui.label("Jedes Objekt einzeln:");
         let sel_ids = self.selection.clone();
         let page_ref = self.doc.pages.get(self.page_index);
         let sel_els: Vec<&Element> = page_ref
