@@ -83,6 +83,15 @@ impl History {
         self.cursor + 1 < self.snapshots.len()
     }
 
+    /// Verwirft alle Snapshots, die seit `len` hinzugekommen sind — für eine
+    /// Aktion, die abgebrochen wurde, bevor sie etwas bewirkt hat.
+    pub fn truncate(&mut self, len: usize) {
+        if len >= 1 && len < self.snapshots.len() {
+            self.snapshots.truncate(len);
+            self.cursor = self.cursor.min(len - 1);
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.snapshots.len()
     }

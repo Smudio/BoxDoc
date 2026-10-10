@@ -98,6 +98,11 @@
         var loading = document.getElementById('loading');
         if (loading) loading.style.display = 'none';
       });
+      // iOS Safari ignoriert user-scalable=no und zoomt bei zwei Fingern die
+      // ganze Seite mit. Die Geste gehört BoxDoc, das selbst pannt und zoomt.
+      ['gesturestart', 'gesturechange', 'gestureend'].forEach(function(t) {
+        document.addEventListener(t, function(e) { e.preventDefault(); }, { passive: false });
+      });
     </script>
 
     <!--

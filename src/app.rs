@@ -73,6 +73,25 @@ pub struct View {
     /// Sperrt kurz weitere Wechsel, damit eine Mausrad-Raste nicht mehrere
     /// Seiten überspringt.
     pub last_page_flip: f64,
+    /// Läuft gerade eine Zwei-Finger-Geste (Pannen/Zoomen)? Bleibt gesetzt,
+    /// bis der letzte Finger den Bildschirm verlässt, damit der übrig
+    /// gebliebene Finger nicht plötzlich ein Auswahl-Rechteck aufzieht.
+    pub touch_gesture: bool,
+}
+
+/// Zustand vor dem ersten Fingerdruck auf dem Touchscreen.
+///
+/// Der erste Finger kommt fast immer ein paar Millisekunden vor dem zweiten
+/// an und startet dann schon ein Verschieben oder Auswahl-Rechteck. Wird
+/// daraus eine Zwei-Finger-Geste, stellt BoxDoc diesen Stand wieder her.
+pub struct TouchGuard {
+    pub time: f64,
+    pub snapshot: crate::history::Snapshot,
+    pub history_len: usize,
+    pub line_drawing: Option<(f32, f32)>,
+    pub path_draft: Option<PathDraft>,
+    pub path_edit: Option<PathEdit>,
+    pub editing: Option<(u64, String)>,
 }
 
 impl Default for View {
@@ -82,6 +101,7 @@ impl Default for View {
             zoom: 1.0,
             pan: Vec2::new(0.0, 24.0),
             last_page_flip: f64::NEG_INFINITY,
+            touch_gesture: false,
         }
     }
 }
@@ -188,7 +208,7 @@ impl Tool {
 ///
 /// Bewusst getrennt von [`Interaction`]: Der Entwurf gehört zu keinem
 /// Element, hat keine ID und darf beim Abbrechen spurlos verschwinden.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct PathDraft {
     /// Die bereits gesetzten Knoten, in Seitenkoordinaten (pt).
     pub nodes: Vec<crate::geometry::PathNode>,
@@ -428,6 +448,8 @@ pub struct EditorApp {
     pub path_draft: Option<PathDraft>,
     /// Welcher Pfad gerade auf Knotenebene bearbeitet wird.
     pub path_edit: Option<PathEdit>,
+    /// Siehe [`TouchGuard`].
+    pub touch_guard: Option<TouchGuard>,
     /// Theme-Fade: Quell-Thema.
     pub theme_from: crate::model::Theme,
     /// Theme-Fade: Ziel-Thema (= settings.theme).
@@ -615,6 +637,7 @@ impl Default for EditorApp {
             line_drawing: None,
             path_draft: None,
             path_edit: None,
+            touch_guard: None,
             theme_from: theme,
             theme_target: theme,
             theme_anim: 1.0,

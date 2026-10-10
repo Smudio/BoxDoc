@@ -90,8 +90,80 @@ pub fn show_canvas(app: &mut EditorApp, ctx: &egui::Context, ui: &mut egui::Ui) 
         }
     };
 
-    // --- Zoom (Ctrl+Scroll UND Pinch-to-Zoom) ---
-    // egui's zoom_delta() liefert den Faktor für beide Gesten.
+    // --- Touch: zwei Finger pannen und zoomen ---
+    //
+    // egui meldet den ersten Finger zusätzlich als Maus. Ohne Sonderweg zieht
+    // eine Zwei-Finger-Geste deshalb ein Auswahl-Rechteck auf oder verschiebt
+    // ein Objekt, und der Zoom kreist um den ersten Finger statt um die Mitte.
+    let multi = ui.input(|i| i.multi_touch());
+    let any_touches = ui.input(|i| i.any_touches());
+    let now = ui.input(|i| i.time);
+    if primary_pressed && any_touches && multi.is_none() && !app.view.touch_gesture {
+        app.touch_guard = Some(crate::app::TouchGuard {
+            time: now,
+            snapshot: app.snapshot(),
+            history_len: app.history.len(),
+            line_drawing: app.line_drawing,
+            path_draft: app.path_draft.clone(),
+            path_edit: app.path_edit,
+            editing: app.editing.clone(),
+        });
+    }
+    if multi.is_some() && !app.view.touch_gesture {
+        app.view.touch_gesture = true;
+        // Was der erste Finger eben erst angefangen hat, war keine Absicht.
+        // Nach einer halben Sekunde schon: dann bleibt das Ergebnis stehen.
+        if let Some(g) = app.touch_guard.take().filter(|g| now - g.time < 0.5) {
+            app.doc = g.snapshot.doc;
+            app.selection = g.snapshot.selection;
+            app.page_index = g.snapshot.page_index;
+            app.history.truncate(g.history_len);
+            app.line_drawing = g.line_drawing;
+            app.path_draft = g.path_draft;
+            app.path_edit = g.path_edit;
+            app.editing = g.editing;
+            app.touch();
+        }
+        if let Some(d) = app.path_draft.as_mut() {
+            d.dragging = false;
+            d.trace.clear();
+        }
+        app.interaction = Interaction::None;
+        app.snap_lines = crate::app::SnapLines::default();
+    }
+    if let Some(mt) = multi {
+        let zoom = app.view.zoom;
+        let pan = app.view.pan;
+        // Der Seitenpunkt unter der alten Fingermitte landet unter der neuen:
+        // Zoomen und Pannen in einem Schritt, wie bei einer Karten-App.
+        let prev = mt.center_pos - mt.translation_delta;
+        let page_under = Vec2::new(
+            (prev.x - base.x - compute_align_x(zoom) - pan.x) / zoom,
+            (prev.y - base.y - pan.y) / zoom,
+        );
+        let new_zoom = (zoom * mt.zoom_delta).clamp(ZOOM_MIN, ZOOM_MAX);
+        app.view.zoom = new_zoom;
+        app.view.pan = Vec2::new(
+            mt.center_pos.x - base.x - compute_align_x(new_zoom) - page_under.x * new_zoom,
+            mt.center_pos.y - base.y - page_under.y * new_zoom,
+        );
+    }
+    // Während der Geste ist der Finger keine Maus: kein Klick, kein Ziehen,
+    // kein Hover — bis alle Finger weg sind, einschließlich des Frames, in
+    // dem der letzte losgelassen wird.
+    let gesture = app.view.touch_gesture;
+    if !any_touches {
+        app.view.touch_gesture = false;
+        app.touch_guard = None;
+    }
+    let pointer = if gesture { None } else { pointer };
+    let primary_pressed = primary_pressed && !gesture;
+    let primary_released = primary_released && !gesture;
+    let double_clicked = double_clicked && !gesture;
+    let zoom_delta = if multi.is_some() { 1.0 } else { zoom_delta };
+    let scroll = if gesture { Vec2::ZERO } else { scroll };
+
+    // --- Zoom (Strg+Mausrad, Trackpad-Pinch) ---
     if zoom_delta != 1.0 {
         if let Some(cur) = pointer {
             let zoom = app.view.zoom;
