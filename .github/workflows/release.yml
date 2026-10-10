@@ -1,0 +1,61 @@
+# Veröffentlicht eine neue Version auf GitHub, sobald ein Tag `v*` gepusht wird.
+#
+#   git tag -a v0.8.0 -m "BoxDoc 0.8.0"
+#   git push origin main v0.8.0
+#
+# Gebaut wird auf GitHub (Windows), die fertige exe hängt am Release.
+# Lokal braucht es dafür nur git — kein GitHub CLI, kein Token.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      # C-Laufzeit fest einbinden: Die exe läuft dann auch auf Rechnern ohne
+      # „Visual C++ Redistributable".
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Ganze Historie samt Tags, für die Änderungsliste seit dem letzten Tag.
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Bauen
+        run: cargo build --release --locked --bin boxdoc
+
+      - name: exe umbenennen
+        shell: bash
+        run: cp target/release/boxdoc.exe "BoxDoc-${GITHUB_REF_NAME}-windows-x64.exe"
+
+      - name: Änderungen seit dem letzten Tag
+        shell: bash
+        run: |
+          prev=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
+          range="${prev:+$prev..}${GITHUB_REF_NAME}"
+          {
+            echo "## Download"
+            echo
+            echo "**BoxDoc-${GITHUB_REF_NAME}-windows-x64.exe** herunterladen und starten — keine Installation nötig."
+            echo
+            echo "## Änderungen${prev:+ seit $prev}"
+            echo
+            git log --no-merges --format='- %s' "$range"
+          } > notes.md
+          cat notes.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: BoxDoc ${{ github.ref_name }}
+          body_path: notes.md
+          files: BoxDoc-${{ github.ref_name }}-windows-x64.exe
